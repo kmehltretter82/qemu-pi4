@@ -26,12 +26,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Restore pinned Meson subproject
-        id: keycodemapdb-cache
+      - name: Restore pinned Meson subprojects
+        id: meson-subprojects-cache
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: subprojects/keycodemapdb
-          key: pi4-keycodemapdb-v1-${{ hashFiles('subprojects/keycodemapdb.wrap') }}
+          path: |
+            subprojects/berkeley-softfloat-3
+            subprojects/berkeley-testfloat-3
+            subprojects/keycodemapdb
+          key: pi4-meson-subprojects-v1-${{ hashFiles('subprojects/berkeley-softfloat-3.wrap', 'subprojects/berkeley-testfloat-3.wrap', 'subprojects/keycodemapdb.wrap') }}
 
       - name: Install build dependencies
         run: |
@@ -48,9 +51,13 @@ jobs:
             python3-venv \
             python3-wheel
 
-      - name: Fetch pinned Meson subproject
-        if: steps.keycodemapdb-cache.outputs.cache-hit != 'true'
-        run: meson subprojects download keycodemapdb
+      - name: Fetch pinned Meson subprojects
+        if: steps.meson-subprojects-cache.outputs.cache-hit != 'true'
+        run: |
+          meson subprojects download \
+            berkeley-softfloat-3 \
+            berkeley-testfloat-3 \
+            keycodemapdb
 
       - name: Configure focused Pi 4 build
         run: |
