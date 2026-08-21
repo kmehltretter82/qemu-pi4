@@ -32,6 +32,8 @@ Missing devices
 
  * V3D 4.2 graphics accelerator (its MMIO range is an unimplemented
    placeholder)
+ * BCM2711 HDMI/display pipeline and HDMI DDC I2C controllers
+ * BCM2711 always-on L2 interrupt controller used by HDMI
  * Pulse Width Modulation (PWM)
  * PCIe root port
  * GENET Ethernet controller

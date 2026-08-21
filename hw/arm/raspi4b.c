@@ -68,18 +68,21 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
         "brcm,bcm2711-rng200",
         "brcm,bcm2711-thermal",
         "brcm,bcm2711-genet-v5",
+        "brcm,bcm2711-l2-intc",
+        "brcm,bcm2711-hdmi-i2c",
+        "brcm,2711-v3d",
     };
 
     for (int i = 0; i < ARRAY_SIZE(nodes_to_remove); i++) {
         const char *dev_str = nodes_to_remove[i];
         int offset;
 
-        offset = fdt_node_offset_by_compatible(fdt, -1, dev_str);
-        while (offset >= 0) {
-            if (fdt_nop_node(fdt, offset) == 0) {
-                warn_report("bcm2711 dtb: %s has been disabled!", dev_str);
+        while ((offset = fdt_node_offset_by_compatible(fdt, -1,
+                                                       dev_str)) >= 0) {
+            if (fdt_nop_node(fdt, offset) != 0) {
+                break;
             }
-            offset = fdt_node_offset_by_compatible(fdt, offset, dev_str);
+            warn_report("bcm2711 dtb: %s has been disabled!", dev_str);
         }
     }
 
