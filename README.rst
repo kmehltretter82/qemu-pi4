@@ -14,16 +14,20 @@ The project started from QEMU 11.1.0, commit
 ``84f07211cc5b4fc6a371559bf8a5de4fb068e648``. The unchanged starting point is
 marked by the ``qemu-pi4-base-v11.1.0`` tag.
 
-The current QEMU machine model is ``raspi4b``. A distinct Raspberry Pi 400
-machine and improved Pi 4 peripheral coverage are project goals; they are not
-claimed as complete yet.
+The current machine model is ``raspi4b``. It models a 2 GiB Raspberry Pi 4
+Model B and is the foundation for a future Raspberry Pi 400 machine. A
+distinct Pi 400 model and improved Pi 4 peripheral coverage are project goals;
+they are not claimed as complete yet.
+
+Raspberry Pi 5 is not supported. It uses a substantially different BCM2712
+SoC and RP1 I/O controller, neither of which this project currently models.
 
 Focused build
 =============
 
 The ``pi4`` device configuration builds the AArch64 system emulator with the
-Raspberry Pi machines and their required devices, without the normal set of
-unrelated AArch64 boards:
+Pi 4 machine and its required devices, without the normal set of unrelated
+AArch64 boards:
 
 .. code-block:: shell
 
@@ -38,9 +42,11 @@ unrelated AArch64 boards:
   ninja qemu-system-aarch64
   ./qemu-system-aarch64 -machine help
 
-QEMU 11.1.0 groups Raspberry Pi 0 through Raspberry Pi 4 behind the shared
-``CONFIG_RASPI`` option, so this first focused build includes those related
-machines. Separating Pi 4 support more precisely can be done incrementally.
+This fork separates Pi 4 support behind ``CONFIG_RASPI4`` and removes the
+legacy Pi 0, Pi 1, Pi 2, and Pi 3 machine and SoC implementations. The focused
+binary exposes only ``none`` and ``raspi4b`` as machine types. Device models
+whose names start with ``bcm2835`` remain where the Pi 4 still uses those
+compatible peripheral blocks.
 
 Licensing
 =========

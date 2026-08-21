@@ -14,7 +14,7 @@
 #include "qemu/module.h"
 #include "hw/arm/bcm2835_peripherals.h"
 #include "hw/misc/bcm2835_mbox_defs.h"
-#include "hw/arm/raspi_platform.h"
+#include "hw/arm/raspi4_platform.h"
 #include "system/system.h"
 
 /* Peripheral base address on the VC (GPU) system bus */
@@ -22,13 +22,6 @@
 
 /* Capabilities for SD controller: no DMA, high-speed, default clocks etc. */
 #define BCM2835_SDHC_CAPAREG 0x52134b4
-
-/*
- * According to Linux driver & DTS, dma channels 0--10 have separate IRQ,
- * while channels 11--14 share one IRQ:
- */
-#define SEPARATE_DMA_IRQ_MAX 10
-#define ORGATED_DMA_IRQ_COUNT 4
 
 /* All three I2C controllers share the same IRQ */
 #define ORGATED_I2C_IRQ_COUNT 3
@@ -43,32 +36,6 @@ void create_unimp(BCMSocPeripheralBaseState *ps,
     sysbus_realize(SYS_BUS_DEVICE(uds), &error_fatal);
     memory_region_add_subregion_overlap(&ps->peri_mr, ofs,
                     sysbus_mmio_get_region(SYS_BUS_DEVICE(uds), 0), -1000);
-}
-
-static void bcm2835_peripherals_init(Object *obj)
-{
-    BCM2835PeripheralState *s = BCM2835_PERIPHERALS(obj);
-    BCMSocPeripheralBaseState *s_base = BCM_SOC_PERIPHERALS_BASE(obj);
-
-    /* Random Number Generator */
-    object_initialize_child(obj, "rng", &s->rng, TYPE_BCM2835_RNG);
-
-    /* Thermal */
-    object_initialize_child(obj, "thermal", &s->thermal, TYPE_BCM2835_THERMAL);
-
-    /* GPIO */
-    object_initialize_child(obj, "gpio", &s->gpio, TYPE_BCM2835_GPIO);
-
-    object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhci",
-                                   OBJECT(&s_base->sdhci.sdbus));
-    object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhost",
-                                   OBJECT(&s_base->sdhost.sdbus));
-
-    /* Gated DMA interrupts */
-    object_initialize_child(obj, "orgated-dma-irq",
-                            &s_base->orgated_dma_irq, TYPE_OR_IRQ);
-    object_property_set_int(OBJECT(&s_base->orgated_dma_irq), "num-lines",
-                            ORGATED_DMA_IRQ_COUNT, &error_abort);
 }
 
 static void raspi_peripherals_base_init(Object *obj)
@@ -181,71 +148,6 @@ static void raspi_peripherals_base_init(Object *obj)
                             ORGATED_I2C_IRQ_COUNT, &error_abort);
     object_initialize_child(obj, "orgated-i2c-irq-splitter",
                             &s->orgated_i2c_irq_splitter, TYPE_SPLIT_IRQ);
-}
-
-static void bcm2835_peripherals_realize(DeviceState *dev, Error **errp)
-{
-    MemoryRegion *mphi_mr;
-    BCM2835PeripheralState *s = BCM2835_PERIPHERALS(dev);
-    BCMSocPeripheralBaseState *s_base = BCM_SOC_PERIPHERALS_BASE(dev);
-    int n;
-
-    bcm_soc_peripherals_common_realize(dev, errp);
-
-    /* Extended Mass Media Controller */
-    sysbus_connect_irq(SYS_BUS_DEVICE(&s_base->sdhci), 0,
-        qdev_get_gpio_in_named(DEVICE(&s_base->ic), BCM2835_IC_GPU_IRQ,
-                               INTERRUPT_ARASANSDIO));
-
-     /* Connect DMA 0-12 to the interrupt controller */
-    for (n = 0; n <= SEPARATE_DMA_IRQ_MAX; n++) {
-        sysbus_connect_irq(SYS_BUS_DEVICE(&s_base->dma), n,
-                           qdev_get_gpio_in_named(DEVICE(&s_base->ic),
-                                                  BCM2835_IC_GPU_IRQ,
-                                                  INTERRUPT_DMA0 + n));
-    }
-
-    if (!qdev_realize(DEVICE(&s_base->orgated_dma_irq), NULL, errp)) {
-        return;
-    }
-    for (n = 0; n < ORGATED_DMA_IRQ_COUNT; n++) {
-        sysbus_connect_irq(SYS_BUS_DEVICE(&s_base->dma),
-                           SEPARATE_DMA_IRQ_MAX + 1 + n,
-                           qdev_get_gpio_in(DEVICE(&s_base->orgated_dma_irq), n));
-    }
-    qdev_connect_gpio_out(DEVICE(&s_base->orgated_dma_irq), 0,
-                          qdev_get_gpio_in_named(DEVICE(&s_base->ic),
-                              BCM2835_IC_GPU_IRQ,
-                              INTERRUPT_DMA0 + SEPARATE_DMA_IRQ_MAX + 1));
-
-    /* Random Number Generator */
-    if (!sysbus_realize(SYS_BUS_DEVICE(&s->rng), errp)) {
-        return;
-    }
-    memory_region_add_subregion(
-        &s_base->peri_mr, RNG_OFFSET,
-        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->rng), 0));
-
-    /* THERMAL */
-    if (!sysbus_realize(SYS_BUS_DEVICE(&s->thermal), errp)) {
-        return;
-    }
-    memory_region_add_subregion(&s_base->peri_mr, THERMAL_OFFSET,
-                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->thermal), 0));
-
-    /* Map MPHI to the peripherals memory map */
-    mphi_mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s_base->mphi), 0);
-    memory_region_add_subregion(&s_base->peri_mr, MPHI_OFFSET, mphi_mr);
-
-    /* GPIO */
-    if (!sysbus_realize(SYS_BUS_DEVICE(&s->gpio), errp)) {
-        return;
-    }
-    memory_region_add_subregion(
-        &s_base->peri_mr, GPIO_OFFSET,
-        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpio), 0));
-
-    object_property_add_alias(OBJECT(s), "sd-bus", OBJECT(&s->gpio), "sd-bus");
 }
 
 void bcm_soc_peripherals_common_realize(DeviceState *dev, Error **errp)
@@ -529,30 +431,18 @@ void bcm_soc_peripherals_common_realize(DeviceState *dev, Error **errp)
     create_unimp(s, &s->sdramc, "bcm2835-sdramc", SDRAMC_OFFSET, 0x100);
 }
 
-static void bcm2835_peripherals_class_init(ObjectClass *oc, const void *data)
-{
-    DeviceClass *dc = DEVICE_CLASS(oc);
-    BCMSocPeripheralBaseClass *bc = BCM_SOC_PERIPHERALS_BASE_CLASS(oc);
-
-    bc->peri_size = 0x1000000;
-    dc->realize = bcm2835_peripherals_realize;
-}
-
-static const TypeInfo bcm2835_peripherals_types[] = {
-    {
-        .name = TYPE_BCM2835_PERIPHERALS,
-        .parent = TYPE_BCM_SOC_PERIPHERALS_BASE,
-        .instance_size = sizeof(BCM2835PeripheralState),
-        .instance_init = bcm2835_peripherals_init,
-        .class_init = bcm2835_peripherals_class_init,
-    }, {
-        .name = TYPE_BCM_SOC_PERIPHERALS_BASE,
-        .parent = TYPE_SYS_BUS_DEVICE,
-        .instance_size = sizeof(BCMSocPeripheralBaseState),
-        .instance_init = raspi_peripherals_base_init,
-        .class_size = sizeof(BCMSocPeripheralBaseClass),
-        .abstract = true,
-    }
+static const TypeInfo bcm_soc_peripherals_base_type = {
+    .name = TYPE_BCM_SOC_PERIPHERALS_BASE,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(BCMSocPeripheralBaseState),
+    .instance_init = raspi_peripherals_base_init,
+    .class_size = sizeof(BCMSocPeripheralBaseClass),
+    .abstract = true,
 };
 
-DEFINE_TYPES(bcm2835_peripherals_types)
+static void bcm_soc_peripherals_base_register_type(void)
+{
+    type_register_static(&bcm_soc_peripherals_base_type);
+}
+
+type_init(bcm_soc_peripherals_base_register_type)

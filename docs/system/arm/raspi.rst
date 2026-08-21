@@ -1,36 +1,26 @@
-Raspberry Pi boards (``raspi0``, ``raspi1ap``, ``raspi2b``, ``raspi3ap``, ``raspi3b``, ``raspi4b``)
-===================================================================================================
+Raspberry Pi 4 Model B (``raspi4b``)
+====================================
 
+``qemu-pi4`` provides a focused model of a Raspberry Pi 4 Model B revision
+1.5 with four Cortex-A72 cores and 2 GiB of RAM. The model is available only
+in the AArch64 system emulator.
 
-QEMU provides models of the following Raspberry Pi boards:
-
-``raspi0`` and ``raspi1ap``
-  ARM1176JZF-S core, 512 MiB of RAM
-``raspi2b``
-  Cortex-A7 (4 cores), 1 GiB of RAM
-``raspi3ap``
-  Cortex-A53 (4 cores), 512 MiB of RAM
-``raspi3b``
-  Cortex-A53 (4 cores), 1 GiB of RAM
-``raspi4b``
-  Cortex-A72 (4 cores), 2 GiB of RAM
+The Raspberry Pi 400 uses the same BCM2711 generation but is not yet exposed
+as a distinct machine. Raspberry Pi 5 is not supported: its BCM2712 SoC and
+RP1 I/O controller require separate models.
 
 Implemented devices
 -------------------
 
- * ARM1176JZF-S, Cortex-A7, Cortex-A53 or Cortex-A72 CPU
- * Interrupt controller
+ * Four Cortex-A72 CPU cores
+ * GIC-400 and legacy VideoCore interrupt controllers
  * DMA controller
  * Clock and reset controller (CPRMAN)
  * System Timer
  * GPIO controller
  * Serial ports (BCM2835 AUX - 16550 based - and PL011)
- * Random Number Generator (RNG)
  * Frame Buffer
- * USB host (USBH)
- * GPIO controller
  * SD/MMC host controller
- * SoC thermal sensor
  * USB2 host controller (DWC2 and MPHI)
  * MailBox controller (MBOX)
  * VideoCore firmware (property)
@@ -41,5 +31,7 @@ Missing devices
 ---------------
 
  * Pulse Width Modulation (PWM)
- * PCIE Root Port (raspi4b)
- * GENET Ethernet Controller (raspi4b)
+ * PCIe root port
+ * GENET Ethernet controller
+ * RNG200 random number generator
+ * BCM2711 thermal sensor

@@ -51,7 +51,7 @@ libqos_srcs = files(
         # qgraph machines:
         'aarch64-xlnx-zcu102-machine.c',
         'arm-imx25-pdk-machine.c',
-        'arm-raspi2-machine.c',
+        'aarch64-raspi4b-machine.c',
         'arm-sabrelite-machine.c',
         'arm-smdkc210-machine.c',
         'arm-virt-machine.c',

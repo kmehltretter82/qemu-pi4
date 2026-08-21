@@ -69,17 +69,6 @@ static const uint8_t kernel_plml605[] = {
     0xfc, 0xff, 0x00, 0xb8                  /* bri   -4  loop */
 };
 
-static const uint8_t bios_raspi2[] = {
-    0x10, 0x30, 0x9f, 0xe5,                 /*        ldr     r3, [pc, #16]  Get &UART0 */
-    0x10, 0x20, 0x9f, 0xe5,                 /*        ldr     r2, [pc, #16]  Get &CR */
-    0xb0, 0x23, 0xc3, 0xe1,                 /*        strh    r2, [r3, #48]  Set CR */
-    0x54, 0x20, 0xa0, 0xe3,                 /*        mov     r2, #'T' */
-    0x00, 0x20, 0xc3, 0xe5,                 /* loop:  strb    r2, [r3]       *TXDAT = 'T' */
-    0xff, 0xff, 0xff, 0xea,                 /*        b       -4             (loop) */
-    0x00, 0x10, 0x20, 0x3f,                 /* UART0: 0x3f201000 */
-    0x01, 0x01, 0x00, 0x00,                 /* CR:    0x101 = UARTEN|TXE */
-};
-
 static const uint8_t kernel_aarch64[] = {
     0x02, 0x20, 0xa1, 0xd2,                 /*        mov    x2, #0x9000000  Load UART0 */
     0x21, 0x20, 0x80, 0x52,                 /*        mov    w1, 0x101       CR = UARTEN|TXE */
@@ -195,7 +184,6 @@ static const testdef_t tests[] = {
       sizeof(kernel_pls3adsp1800), kernel_pls3adsp1800 },
     { "microblaze", "petalogix-ml605", "", "TT",
       sizeof(kernel_plml605), kernel_plml605 },
-    { "arm", "raspi2b", "", "TT", sizeof(bios_raspi2), 0, bios_raspi2 },
     { "aarch64", "virt", "-cpu max", "TT", sizeof(kernel_aarch64),
       kernel_aarch64 },
     { "arm", "microbit", "", "T", sizeof(kernel_nrf51), kernel_nrf51 },

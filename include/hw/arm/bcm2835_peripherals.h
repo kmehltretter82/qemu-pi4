@@ -20,15 +20,12 @@
 #include "hw/core/or-irq.h"
 #include "hw/intc/bcm2835_ic.h"
 #include "hw/misc/bcm2835_property.h"
-#include "hw/misc/bcm2835_rng.h"
 #include "hw/misc/bcm2835_mbox.h"
 #include "hw/misc/bcm2835_mphi.h"
-#include "hw/misc/bcm2835_thermal.h"
 #include "hw/misc/bcm2835_cprman.h"
 #include "hw/misc/bcm2835_powermgt.h"
 #include "hw/sd/sdhci.h"
 #include "hw/sd/bcm2835_sdhost.h"
-#include "hw/gpio/bcm2835_gpio.h"
 #include "hw/timer/bcm2835_systmr.h"
 #include "hw/usb/hcd-dwc2.h"
 #include "hw/ssi/bcm2835_spi.h"
@@ -41,9 +38,6 @@
 #define TYPE_BCM_SOC_PERIPHERALS_BASE "bcm-soc-peripherals-base"
 OBJECT_DECLARE_TYPE(BCMSocPeripheralBaseState, BCMSocPeripheralBaseClass,
                     BCM_SOC_PERIPHERALS_BASE)
-#define TYPE_BCM2835_PERIPHERALS "bcm2835-peripherals"
-OBJECT_DECLARE_SIMPLE_TYPE(BCM2835PeripheralState, BCM2835_PERIPHERALS)
-
 struct BCMSocPeripheralBaseState {
     /*< private >*/
     SysBusDevice parent_obj;
@@ -51,8 +45,6 @@ struct BCMSocPeripheralBaseState {
 
     MemoryRegion peri_mr, peri_mr_alias, gpu_bus_mr, mbox_mr;
     MemoryRegion ram_alias[4];
-    qemu_irq irq, fiq;
-
     BCM2835SystemTimerState systmr;
     BCM2835MphiState mphi;
     UnimplementedDeviceState txp;
@@ -63,7 +55,6 @@ struct BCMSocPeripheralBaseState {
     BCM2835AuxState aux;
     BCM2835FBState fb;
     BCM2835DMAState dma;
-    OrIRQState orgated_dma_irq;
     BCM2835ICState ic;
     BCM2835PropertyState property;
     BCM2835MboxState mboxes;
@@ -89,15 +80,6 @@ struct BCMSocPeripheralBaseClass {
     SysBusDeviceClass parent_class;
     /*< public >*/
     uint64_t peri_size; /* Peripheral range size */
-};
-
-struct BCM2835PeripheralState {
-    /*< private >*/
-    BCMSocPeripheralBaseState parent_obj;
-    /*< public >*/
-    BCM2835RngState rng;
-    Bcm2835ThermalState thermal;
-    BCM2835GpioState gpio;
 };
 
 void create_unimp(BCMSocPeripheralBaseState *ps,

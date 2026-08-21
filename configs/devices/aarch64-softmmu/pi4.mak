@@ -1,2 +1,2 @@
-# Raspberry Pi 4 support currently shares CONFIG_RASPI with earlier models.
-CONFIG_RASPI=y
+# Raspberry Pi 4 machine and its required devices.
+CONFIG_RASPI4=y

@@ -21,7 +21,7 @@
 #include "../qtest/libqos/qgraph_internal.h"
 
 #define MACHINE_PC "x86_64/pc"
-#define MACHINE_RASPI2 "arm/raspi2b"
+#define MACHINE_RASPI4 "aarch64/raspi4b"
 #define I440FX "i440FX-pcihost"
 #define PCIBUS_PC "pcibus-pc"
 #define SDHCI "sdhci"
@@ -326,8 +326,8 @@ static void test_full_sample_raspi(void)
     check_driver(SDHCI_PCI);
     qos_node_consumes(SDHCI_PCI, PCIBUS, NULL);
     check_produces(SDHCI_PCI, SDHCI);
-    check_machine(MACHINE_RASPI2);
-    check_contains(MACHINE_RASPI2, SDHCI_MM);
+    check_machine(MACHINE_RASPI4);
+    check_contains(MACHINE_RASPI4, SDHCI_MM);
     check_driver(SDHCI_MM);
     check_produces(SDHCI_MM, SDHCI);
     qos_add_test(REGISTER_TEST, SDHCI, testfunct, NULL);
@@ -339,14 +339,14 @@ static void test_full_sample_raspi(void)
 static void test_cycle(void)
 {
     qos_graph_init();
-    check_machine(MACHINE_RASPI2);
+    check_machine(MACHINE_RASPI4);
     check_driver("B");
     check_driver("C");
     check_driver("D");
-    check_contains(MACHINE_RASPI2, "B");
+    check_contains(MACHINE_RASPI4, "B");
     check_contains("B", "C");
     check_contains("C", "D");
-    check_contains("D", MACHINE_RASPI2);
+    check_contains("D", MACHINE_RASPI4);
     check_leaf_discovered(0);
     qos_print_graph();
     qos_graph_destroy();
@@ -355,11 +355,11 @@ static void test_cycle(void)
 static void test_two_test_same_interface(void)
 {
     qos_graph_init();
-    check_machine(MACHINE_RASPI2);
-    check_produces(MACHINE_RASPI2, "B");
+    check_machine(MACHINE_RASPI4);
+    check_produces(MACHINE_RASPI4, "B");
     qos_add_test("C", "B", testfunct, NULL);
     qos_add_test("D", "B", testfunct, NULL);
-    check_contains(MACHINE_RASPI2, "B");
+    check_contains(MACHINE_RASPI4, "B");
     check_leaf_discovered(4);
     qos_print_graph();
     qos_graph_destroy();
@@ -368,8 +368,8 @@ static void test_two_test_same_interface(void)
 static void test_test_in_path(void)
 {
     qos_graph_init();
-    check_machine(MACHINE_RASPI2);
-    check_produces(MACHINE_RASPI2, "B");
+    check_machine(MACHINE_RASPI4);
+    check_produces(MACHINE_RASPI4, "B");
     qos_add_test("C", "B", testfunct, NULL);
     check_driver("D");
     check_consumes("D", "B");
@@ -383,11 +383,11 @@ static void test_test_in_path(void)
 static void test_double_edge(void)
 {
     qos_graph_init();
-    check_machine(MACHINE_RASPI2);
+    check_machine(MACHINE_RASPI4);
     check_produces("B", "C");
     qos_node_consumes("C", "B", NULL);
     qos_add_test("D", "C", testfunct, NULL);
-    check_contains(MACHINE_RASPI2, "B");
+    check_contains(MACHINE_RASPI4, "B");
     qos_print_graph();
     qos_graph_destroy();
 }

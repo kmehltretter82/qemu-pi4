@@ -42,7 +42,7 @@ Nodes
 
 A node can be of four types:
 
-- **QNODE_MACHINE**:   for example ``arm/raspi2b``
+- **QNODE_MACHINE**:   for example ``aarch64/raspi4b``
 - **QNODE_DRIVER**:    for example ``generic-sdhci``
 - **QNODE_INTERFACE**: for example ``sdhci`` (interface for all ``-sdhci``
   drivers).
@@ -176,12 +176,12 @@ It is possible to troubleshoot unavailable tests by running::
   #      |-> dest='i440FX-pcihost' type=0 (node=0x5591421117f0)
   #   src=''
   #      |-> dest='x86_64/pc' type=0 (node=0x559142111600)
-  #      |-> dest='arm/raspi2b' type=0 (node=0x559142110740)
+  #      |-> dest='aarch64/raspi4b' type=0 (node=0x559142110740)
   ...
   # }
   # ALL QGRAPH NODES: {
   #   name='virtio-net-tests/announce-self' type=3 cmd_line='(null)' [available]
-  #   name='arm/raspi2b' type=0 cmd_line='-M raspi2b ' [UNAVAILABLE]
+  #   name='aarch64/raspi4b' type=0 cmd_line='-M raspi4b ' [UNAVAILABLE]
   ...
   # }
 
@@ -192,11 +192,11 @@ qgraph path in the "ALL QGRAPH EDGES" output as follows: '' -> 'x86_64/pc' ->
 'virtio-net'. The root of the qgraph is '' and the depth first search begins
 there.
 
-The ``arm/raspi2b`` machine node is listed as "UNAVAILABLE". Although it is
-reachable from the root via '' -> 'arm/raspi2b' the node is unavailable because
-the QEMU binary did not list it when queried by the framework. This is expected
-because we used the ``qemu-system-x86_64`` binary which does not support Arm
-machine types.
+The ``aarch64/raspi4b`` machine node is listed as "UNAVAILABLE". Although it is
+reachable from the root via '' -> 'aarch64/raspi4b', the node is unavailable
+because the QEMU binary did not list it when queried by the framework. This is
+expected because we used the ``qemu-system-x86_64`` binary which does not
+support Arm machine types.
 
 If a test is unexpectedly listed as "UNAVAILABLE", first check that the "ALL
 QGRAPH EDGES" output reports edge connectivity from the root ('') to the test.
@@ -214,8 +214,8 @@ Here we continue the ``sdhci`` use case, with the following scenario:
 
 - ``sdhci-test`` aims to test the ``read[q,w], writeq`` functions
   offered by the ``sdhci`` drivers.
-- The current ``sdhci`` device is supported by both ``x86_64/pc`` and Arm
-  (in this example we focus on the ``arm-raspi2b``) machines.
+- The current ``sdhci`` device is supported by both ``x86_64/pc`` and
+  ``aarch64/raspi4b`` machines.
 - QEMU offers 2 types of drivers: ``QSDHCI_MemoryMapped`` for Arm and
   ``QSDHCI_PCI`` for ``x86_64/pc``. Both implement the
   ``read[q,w], writeq`` functions.
@@ -237,11 +237,11 @@ In order to implement such scenario in qgraph, the test developer needs to:
   all the pci drivers available)
 
   ``sdhci-pci --consumes--> pci-bus``
-- Create an ``arm/raspi2b`` machine node. This machine ``contains``
+- Create an ``aarch64/raspi4b`` machine node. This machine ``contains``
   a ``generic-sdhci`` memory mapped ``sdhci`` driver node, representing
   ``QSDHCI_MemoryMapped``.
 
-  ``arm/raspi2b --contains--> generic-sdhci``
+  ``aarch64/raspi4b --contains--> generic-sdhci``
 - Create the ``sdhci`` interface node. This interface offers the
   functions that are shared by all ``sdhci`` devices.
   The interface is produced by ``sdhci-pci`` and ``generic-sdhci``,
@@ -256,67 +256,67 @@ In order to implement such scenario in qgraph, the test developer needs to:
 
   ``sdhci-test --consumes--> sdhci``
 
-``arm-raspi2b`` machine, simplified from
-``tests/qtest/libqos/arm-raspi2-machine.c``::
+``aarch64-raspi4b`` machine, simplified from
+``tests/qtest/libqos/aarch64-raspi4b-machine.c``::
 
     #include "qgraph.h"
 
-    struct QRaspi2Machine {
+    struct QRaspi4bMachine {
         QOSGraphObject obj;
         QGuestAllocator alloc;
         QSDHCI_MemoryMapped sdhci;
     };
 
-    static void *raspi2_get_driver(void *object, const char *interface)
+    static void *raspi4b_get_driver(void *object, const char *interface)
     {
-        QRaspi2Machine *machine = object;
+        QRaspi4bMachine *machine = object;
         if (!g_strcmp0(interface, "memory")) {
             return &machine->alloc;
         }
 
-        fprintf(stderr, "%s not present in arm/raspi2b\n", interface);
+        fprintf(stderr, "%s not present in aarch64/raspi4b\n", interface);
         g_assert_not_reached();
     }
 
-    static QOSGraphObject *raspi2_get_device(void *obj,
-                                                const char *device)
+    static QOSGraphObject *raspi4b_get_device(void *obj,
+                                              const char *device)
     {
-        QRaspi2Machine *machine = obj;
+        QRaspi4bMachine *machine = obj;
         if (!g_strcmp0(device, "generic-sdhci")) {
             return &machine->sdhci.obj;
         }
 
-        fprintf(stderr, "%s not present in arm/raspi2b\n", device);
+        fprintf(stderr, "%s not present in aarch64/raspi4b\n", device);
         g_assert_not_reached();
     }
 
-    static void *qos_create_machine_arm_raspi2(QTestState *qts)
+    static void *qos_create_machine_aarch64_raspi4b(QTestState *qts)
     {
-        QRaspi2Machine *machine = g_new0(QRaspi2Machine, 1);
+        QRaspi4bMachine *machine = g_new0(QRaspi4bMachine, 1);
 
         alloc_init(&machine->alloc, ...);
 
         /* Get node(s) contained inside (CONTAINS) */
-        machine->obj.get_device = raspi2_get_device;
+        machine->obj.get_device = raspi4b_get_device;
 
         /* Get node(s) produced (PRODUCES) */
-        machine->obj.get_driver = raspi2_get_driver;
+        machine->obj.get_driver = raspi4b_get_driver;
 
         /* free the object */
-        machine->obj.destructor = raspi2_destructor;
+        machine->obj.destructor = raspi4b_destructor;
         qos_init_sdhci_mm(&machine->sdhci, ...);
         return &machine->obj;
     }
 
-    static void raspi2_register_nodes(void)
+    static void raspi4b_register_nodes(void)
     {
-        /* arm/raspi2b --contains--> generic-sdhci */
-        qos_node_create_machine("arm/raspi2b",
-                                 qos_create_machine_arm_raspi2);
-        qos_node_contains("arm/raspi2b", "generic-sdhci", NULL);
+        /* aarch64/raspi4b --contains--> generic-sdhci */
+        qos_node_create_machine("aarch64/raspi4b",
+                                 qos_create_machine_aarch64_raspi4b);
+        qos_node_contains("aarch64/raspi4b", "generic-sdhci", NULL);
     }
 
-    libqos_init(raspi2_register_nodes);
+    libqos_init(raspi4b_register_nodes);
 
 ``x86_64/pc`` machine, simplified from
 ``tests/qtest/libqos/x86_64_pc-machine.c``::
@@ -527,7 +527,7 @@ In the above example, all possible types of relations are created::
                                |
                                +--produces-- +
                                              |
-               arm/raspi2b --contains--> generic-sdhci
+               aarch64/raspi4b --contains--> generic-sdhci
 
 or inverting the consumes edge in consumed_by::
 
@@ -543,7 +543,7 @@ or inverting the consumes edge in consumed_by::
                              |
                              +--produces-- +
                                            |
-            arm/raspi2b --contains--> generic-sdhci
+            aarch64/raspi4b --contains--> generic-sdhci
 
 Adding a new test
 -----------------
@@ -593,7 +593,7 @@ Final graph will be like this::
                                |
                                +--produces-- +
                                              |
-               arm/raspi2b --contains--> generic-sdhci
+               aarch64/raspi4b --contains--> generic-sdhci
 
 or inverting the consumes edge in consumed_by::
 
@@ -609,16 +609,16 @@ or inverting the consumes edge in consumed_by::
                              |
                              +--produces-- +
                                            |
-            arm/raspi2b --contains--> generic-sdhci
+            aarch64/raspi4b --contains--> generic-sdhci
 
 Assuming there the binary is
 ``QTEST_QEMU_BINARY=./qemu-system-x86_64``
 a valid test path will be:
 ``/x86_64/pc/1440FX-pcihost/pci-bus-pc/pci-bus/sdhci-pc/sdhci/sdhci-test``
 
-and for the binary ``QTEST_QEMU_BINARY=./qemu-system-arm``:
+and for the binary ``QTEST_QEMU_BINARY=./qemu-system-aarch64``:
 
-``/arm/raspi2b/generic-sdhci/sdhci/sdhci-test``
+``/aarch64/raspi4b/generic-sdhci/sdhci/sdhci-test``
 
 Additional examples are also in ``test-qgraph.c``
 

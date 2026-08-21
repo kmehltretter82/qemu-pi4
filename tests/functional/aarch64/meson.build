@@ -35,7 +35,6 @@ tests_aarch64_system_thorough = [
   'imx8mp_evk',
   'kvm',
   'multiprocess',
-  'raspi3',
   'raspi4',
   'replay',
   'reverse_debug',

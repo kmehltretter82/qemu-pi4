@@ -86,12 +86,10 @@ system_ss.add(when: 'CONFIG_NPCM7XX', if_true: files(
 system_ss.add(when: 'CONFIG_OMAP', if_true: files(
   'omap_clk.c',
 ))
-system_ss.add(when: 'CONFIG_RASPI', if_true: files(
+system_ss.add(when: 'CONFIG_RASPI4', if_true: files(
   'bcm2835_mbox.c',
   'bcm2835_mphi.c',
   'bcm2835_property.c',
-  'bcm2835_rng.c',
-  'bcm2835_thermal.c',
   'bcm2835_cprman.c',
   'bcm2835_powermgt.c',
 ))

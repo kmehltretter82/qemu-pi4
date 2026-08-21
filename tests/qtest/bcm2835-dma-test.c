@@ -1,6 +1,6 @@
 /*
- * QTest testcase for BCM283x DMA engine (on Raspberry Pi 3)
- * and its interrupts coming to Interrupt Controller.
+ * QTest testcase for BCM283x DMA engine (on Raspberry Pi 4)
+ * and its interrupts coming to the GIC.
  *
  * Copyright (c) 2022 Auriga LLC
  *
@@ -10,9 +10,8 @@
 #include "qemu/osdep.h"
 #include "libqtest-single.h"
 
-/* Offsets in raspi3b platform: */
-#define RASPI3_DMA_BASE 0x3f007000
-#define RASPI3_IC_BASE  0x3f00b200
+/* Offsets in the raspi4b platform. */
+#define RASPI4_DMA_BASE 0xfe007000
 
 /* Used register/fields definitions */
 
@@ -30,12 +29,6 @@
 #define BCM2708_DMA_D_INC      (1 << 4)
 #define BCM2708_DMA_S_INC      (1 << 8)
 
-/* Interrupt controller registers: */
-#define IRQ_PENDING_BASIC      0x00
-#define IRQ_GPU_PENDING1_AGGR  (1 << 8)
-#define IRQ_PENDING_1          0x04
-#define IRQ_ENABLE_1           0x10
-
 /* Data for the test: */
 #define SCB_ADDR   256
 #define S_ADDR     32
@@ -43,21 +36,16 @@
 #define TXFR_LEN   32
 const uint32_t check_data = 0x12345678;
 
-static void bcm2835_dma_test_interrupt(int dma_c, int irq_line)
+static void bcm2835_dma_test_interrupt(int dma_c, int gic_irq)
 {
-    uint64_t dma_base = RASPI3_DMA_BASE + dma_c * 0x100;
-    int gpu_irq_line = 16 + irq_line;
+    uint64_t dma_base = RASPI4_DMA_BASE + dma_c * 0x100;
 
     /* Check that interrupts are silent by default: */
-    writel(RASPI3_IC_BASE + IRQ_ENABLE_1, 1 << gpu_irq_line);
+    g_assert_false(get_irq(gic_irq));
     int isr = readl(dma_base + BCM2708_DMA_INT_STATUS);
     g_assert_cmpint(isr, ==, 0);
     uint32_t reg0 = readl(dma_base + BCM2708_DMA_CS);
     g_assert_cmpint(reg0, ==, 0);
-    uint32_t ic_pending = readl(RASPI3_IC_BASE + IRQ_PENDING_BASIC);
-    g_assert_cmpint(ic_pending, ==, 0);
-    uint32_t gpu_pending1 = readl(RASPI3_IC_BASE + IRQ_PENDING_1);
-    g_assert_cmpint(gpu_pending1, ==, 0);
 
     /* Prepare Control Block: */
     writel(SCB_ADDR + 0, BCM2708_DMA_S_INC | BCM2708_DMA_D_INC |
@@ -82,27 +70,25 @@ static void bcm2835_dma_test_interrupt(int dma_c, int irq_line)
         g_assert_cmpint(data, ==, ~check_data);
     }
 
-    /* Check that interrupt status is set both in DMA and IC controllers: */
-    isr = readl(RASPI3_DMA_BASE + BCM2708_DMA_INT_STATUS);
+    /* Check that interrupt status is set both in DMA and the GIC input. */
+    isr = readl(RASPI4_DMA_BASE + BCM2708_DMA_INT_STATUS);
     g_assert_cmpint(isr, ==, 1 << dma_c);
-
-    ic_pending = readl(RASPI3_IC_BASE + IRQ_PENDING_BASIC);
-    g_assert_cmpint(ic_pending, ==, IRQ_GPU_PENDING1_AGGR);
-
-    gpu_pending1 = readl(RASPI3_IC_BASE + IRQ_PENDING_1);
-    g_assert_cmpint(gpu_pending1, ==, 1 << gpu_irq_line);
+    g_assert_true(get_irq(gic_irq));
 
     /* Clean up, clear interrupt: */
     writel(dma_base + BCM2708_DMA_CS, BCM2708_DMA_INT);
+    g_assert_false(get_irq(gic_irq));
 }
 
 static void bcm2835_dma_test_interrupts(void)
 {
-    /* DMA engines 0--10 have separate IRQ lines, 11--14 - only one: */
-    bcm2835_dma_test_interrupt(0,  0);
-    bcm2835_dma_test_interrupt(10, 10);
-    bcm2835_dma_test_interrupt(11, 11);
-    bcm2835_dma_test_interrupt(14, 11);
+    /* Pi 4 has separate and paired DMA inputs on the GIC. */
+    bcm2835_dma_test_interrupt(0, 80);
+    bcm2835_dma_test_interrupt(6, 86);
+    bcm2835_dma_test_interrupt(7, 87);
+    bcm2835_dma_test_interrupt(8, 87);
+    bcm2835_dma_test_interrupt(9, 88);
+    bcm2835_dma_test_interrupt(10, 88);
 }
 
 int main(int argc, char **argv)
@@ -111,7 +97,8 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/bcm2835/dma/test_interrupts",
                    bcm2835_dma_test_interrupts);
-    qtest_start("-machine raspi3b");
+    qtest_start("-machine raspi4b");
+    qtest_irq_intercept_in(global_qtest, "/machine/soc/peripherals");
     ret = g_test_run();
     qtest_end();
     return ret;

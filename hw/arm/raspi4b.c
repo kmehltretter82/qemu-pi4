@@ -12,7 +12,7 @@
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/arm/machines-qom.h"
-#include "hw/arm/raspi_platform.h"
+#include "hw/arm/raspi4_platform.h"
 #include "hw/display/bcm2835_fb.h"
 #include "hw/core/registerfields.h"
 #include "qemu/error-report.h"
@@ -28,7 +28,7 @@
 OBJECT_DECLARE_SIMPLE_TYPE(Raspi4bMachineState, RASPI4B_MACHINE)
 
 struct Raspi4bMachineState {
-    RaspiBaseMachineState parent_obj;
+    Raspi4BaseMachineState parent_obj;
     BCM2838State soc;
 };
 
@@ -83,7 +83,7 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
         }
     }
 
-    ram_size = board_ram_size(info->board_id);
+    ram_size = raspi4_board_ram_size(info->board_id);
 
     if (info->ram_size > UPPER_RAM_BASE) {
         raspi_add_memory_node(fdt, UPPER_RAM_BASE, ram_size - UPPER_RAM_BASE);
@@ -93,37 +93,36 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
 static void raspi4b_machine_init(MachineState *machine)
 {
     Raspi4bMachineState *s = RASPI4B_MACHINE(machine);
-    RaspiBaseMachineState *s_base = RASPI_BASE_MACHINE(machine);
-    RaspiBaseMachineClass *mc = RASPI_BASE_MACHINE_GET_CLASS(machine);
+    Raspi4BaseMachineState *s_base = RASPI4_BASE_MACHINE(machine);
+    Raspi4BaseMachineClass *mc = RASPI4_BASE_MACHINE_GET_CLASS(machine);
     BCM2838State *soc = &s->soc;
 
     s_base->binfo.modify_dtb = raspi4_modify_dtb;
     s_base->binfo.board_id = mc->board_rev;
 
-    object_initialize_child(OBJECT(machine), "soc", soc,
-                            board_soc_type(mc->board_rev));
+    object_initialize_child(OBJECT(machine), "soc", soc, TYPE_BCM2838);
 
-    raspi_base_machine_init(machine, &soc->parent_obj);
+    raspi4_common_machine_init(machine, soc);
 }
 
 static void raspi4b_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
-    RaspiBaseMachineClass *rmc = RASPI_BASE_MACHINE_CLASS(oc);
+    Raspi4BaseMachineClass *rmc = RASPI4_BASE_MACHINE_CLASS(oc);
 
 #if HOST_LONG_BITS == 32
     rmc->board_rev = 0xa03111; /* Revision 1.1, 1 Gb RAM */
 #else
     rmc->board_rev = 0xb03115; /* Revision 1.5, 2 Gb RAM */
 #endif
-    raspi_machine_class_common_init(mc, rmc->board_rev);
+    raspi4_common_machine_class_init(mc, rmc->board_rev, "4B");
     mc->auto_create_sdcard = true;
     mc->init = raspi4b_machine_init;
 }
 
 static const TypeInfo raspi4b_machine_type = {
     .name           = TYPE_RASPI4B_MACHINE,
-    .parent         = TYPE_RASPI_BASE_MACHINE,
+    .parent         = TYPE_RASPI4_BASE_MACHINE,
     .instance_size  = sizeof(Raspi4bMachineState),
     .class_init     = raspi4b_machine_class_init,
     .interfaces     = aarch64_machine_interfaces,

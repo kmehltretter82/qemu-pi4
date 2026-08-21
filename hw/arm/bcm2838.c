@@ -9,10 +9,15 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
-#include "hw/arm/raspi_platform.h"
+#include "hw/arm/raspi4_platform.h"
 #include "hw/core/sysbus.h"
 #include "hw/arm/bcm2838.h"
+#include "target/arm/cpu-qom.h"
+#include "target/arm/gtimer.h"
 #include "trace.h"
+
+#define BCM2838_PERI_BASE           0xfe000000
+#define BCM2838_CTRL_BASE           0xff800000
 
 #define GIC400_MAINTENANCE_IRQ      9
 #define GIC400_TIMER_NS_EL2_IRQ     10
@@ -36,6 +41,10 @@
 
 #define VIRTUAL_PMU_IRQ 7
 
+static const Property bcm2838_enabled_cores_property =
+    DEFINE_PROP_UINT32("enabled-cpus", BCM2838State, enabled_cpus,
+                       BCM2838_NCPUS);
+
 static void bcm2838_gic_set_irq(void *opaque, int irq, int level)
 {
     BCM2838State *s = (BCM2838State *)opaque;
@@ -47,6 +56,16 @@ static void bcm2838_gic_set_irq(void *opaque, int irq, int level)
 static void bcm2838_init(Object *obj)
 {
     BCM2838State *s = BCM2838(obj);
+
+    qdev_property_add_static(DEVICE(obj), &bcm2838_enabled_cores_property);
+
+    for (int n = 0; n < BCM2838_NCPUS; n++) {
+        object_initialize_child(obj, "cpu[*]", &s->cpu[n].core,
+                                ARM_CPU_TYPE_NAME("cortex-a72"));
+    }
+
+    object_initialize_child(obj, "control", &s->control,
+                            TYPE_BCM2836_CONTROL);
 
     object_initialize_child(obj, "peripherals", &s->peripherals,
                             TYPE_BCM2838_PERIPHERALS);
@@ -65,41 +84,45 @@ static void bcm2838_init(Object *obj)
 static void bcm2838_realize(DeviceState *dev, Error **errp)
 {
     BCM2838State *s = BCM2838(dev);
-    BCM283XBaseState *s_base = BCM283X_BASE(dev);
-    BCM283XBaseClass *bc_base = BCM283X_BASE_GET_CLASS(dev);
     BCM2838PeripheralState *ps = BCM2838_PERIPHERALS(&s->peripherals);
     BCMSocPeripheralBaseState *ps_base =
         BCM_SOC_PERIPHERALS_BASE(&s->peripherals);
-
+    Object *ram;
     DeviceState *gicdev = NULL;
 
-    if (!bcm283x_common_realize(dev, ps_base, errp)) {
+    ram = object_property_get_link(OBJECT(dev), "ram", &error_abort);
+    object_property_add_const_link(OBJECT(ps), "ram", ram);
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(ps), errp)) {
         return;
     }
+
+    object_property_add_alias(OBJECT(s), "sd-bus", OBJECT(ps), "sd-bus");
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(ps), 0, BCM2838_PERI_BASE, 1);
     sysbus_mmio_map_overlap(SYS_BUS_DEVICE(ps), 1, BCM2838_PERI_LOW_BASE, 1);
 
     /* bcm2836 interrupt controller (and mailboxes, etc.) */
-    if (!sysbus_realize(SYS_BUS_DEVICE(&s_base->control), errp)) {
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->control), errp)) {
         return;
     }
-    sysbus_mmio_map(SYS_BUS_DEVICE(&s_base->control), 0, bc_base->ctrl_base);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->control), 0, BCM2838_CTRL_BASE);
 
     /* Create cores */
-    for (int n = 0; n < bc_base->core_count; n++) {
+    for (int n = 0; n < BCM2838_NCPUS; n++) {
 
-        object_property_set_int(OBJECT(&s_base->cpu[n].core), "mp-affinity",
-                                (bc_base->clusterid << 8) | n, &error_abort);
+        object_property_set_int(OBJECT(&s->cpu[n].core), "mp-affinity", n,
+                                &error_abort);
 
         /* set periphbase/CBAR value for CPU-local registers */
-        object_property_set_int(OBJECT(&s_base->cpu[n].core), "reset-cbar",
-                                bc_base->peri_base, &error_abort);
+        object_property_set_int(OBJECT(&s->cpu[n].core), "reset-cbar",
+                                BCM2838_PERI_BASE, &error_abort);
 
         /* start powered off if not enabled */
-        object_property_set_bool(OBJECT(&s_base->cpu[n].core),
+        object_property_set_bool(OBJECT(&s->cpu[n].core),
                                  "start-powered-off",
-                                 n >= s_base->enabled_cpus, &error_abort);
+                                 n >= s->enabled_cpus, &error_abort);
 
-        if (!qdev_realize(DEVICE(&s_base->cpu[n].core), NULL, errp)) {
+        if (!qdev_realize(DEVICE(&s->cpu[n].core), NULL, errp)) {
             return;
         }
     }
@@ -108,7 +131,7 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    if (!object_property_set_uint(OBJECT(&s->gic), "num-cpu", BCM283X_NCPUS,
+    if (!object_property_set_uint(OBJECT(&s->gic), "num-cpu", BCM2838_NCPUS,
                                   errp)) {
         return;
     }
@@ -129,36 +152,37 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
     }
 
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gic), 0,
-                    bc_base->ctrl_base + BCM2838_GIC_BASE + GIC_DIST_OFS);
+                    BCM2838_CTRL_BASE + BCM2838_GIC_BASE + GIC_DIST_OFS);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gic), 1,
-                    bc_base->ctrl_base + BCM2838_GIC_BASE + GIC_CPU_OFS);
+                    BCM2838_CTRL_BASE + BCM2838_GIC_BASE + GIC_CPU_OFS);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gic), 2,
-                    bc_base->ctrl_base + BCM2838_GIC_BASE + GIC_VIFACE_THIS_OFS);
+                    BCM2838_CTRL_BASE + BCM2838_GIC_BASE +
+                    GIC_VIFACE_THIS_OFS);
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->gic), 3,
-                    bc_base->ctrl_base + BCM2838_GIC_BASE + GIC_VCPU_OFS);
+                    BCM2838_CTRL_BASE + BCM2838_GIC_BASE + GIC_VCPU_OFS);
 
-    for (int n = 0; n < BCM283X_NCPUS; n++) {
+    for (int n = 0; n < BCM2838_NCPUS; n++) {
         sysbus_mmio_map(SYS_BUS_DEVICE(&s->gic), 4 + n,
-                        bc_base->ctrl_base + BCM2838_GIC_BASE
-                            + GIC_VIFACE_OTHER_OFS(n));
+                        BCM2838_CTRL_BASE + BCM2838_GIC_BASE +
+                        GIC_VIFACE_OTHER_OFS(n));
     }
 
     gicdev = DEVICE(&s->gic);
 
-    for (int n = 0; n < BCM283X_NCPUS; n++) {
-        DeviceState *cpudev = DEVICE(&s_base->cpu[n]);
+    for (int n = 0; n < BCM2838_NCPUS; n++) {
+        DeviceState *cpudev = DEVICE(&s->cpu[n].core);
 
         /* Connect the GICv2 outputs to the CPU */
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->gic), n,
                            qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
-        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gic), n + BCM283X_NCPUS,
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gic), n + BCM2838_NCPUS,
                            qdev_get_gpio_in(cpudev, ARM_CPU_FIQ));
-        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gic), n + 2 * BCM283X_NCPUS,
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gic), n + 2 * BCM2838_NCPUS,
                            qdev_get_gpio_in(cpudev, ARM_CPU_VIRQ));
-        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gic), n + 3 * BCM283X_NCPUS,
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gic), n + 3 * BCM2838_NCPUS,
                            qdev_get_gpio_in(cpudev, ARM_CPU_VFIQ));
 
-        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gic), n + 4 * BCM283X_NCPUS,
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gic), n + 4 * BCM2838_NCPUS,
                            qdev_get_gpio_in(gicdev,
                                             PPI(n, GIC400_MAINTENANCE_IRQ)));
 
@@ -201,7 +225,8 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
 
     /* Connect EMMC and EMMC2 to the interrupt controller */
     qdev_connect_gpio_out(mmc_irq_orgate, 0,
-                          qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_EMMC_EMMC2));
+                          qdev_get_gpio_in(gicdev,
+                                          GIC_SPI_INTERRUPT_EMMC_EMMC2));
 
     /* Connect USB OTG and MPHI to the interrupt controller */
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->mphi), 0,
@@ -240,22 +265,16 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
 static void bcm2838_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
-    BCM283XBaseClass *bc_base = BCM283X_BASE_CLASS(oc);
 
-    bc_base->cpu_type = ARM_CPU_TYPE_NAME("cortex-a72");
-    bc_base->core_count = BCM283X_NCPUS;
-    bc_base->peri_base = 0xfe000000;
-    bc_base->ctrl_base = 0xff800000;
-    bc_base->clusterid = 0x0;
+    dc->user_creatable = false;
     dc->realize = bcm2838_realize;
 }
 
 static const TypeInfo bcm2838_type = {
     .name           = TYPE_BCM2838,
-    .parent         = TYPE_BCM283X_BASE,
+    .parent         = TYPE_DEVICE,
     .instance_size  = sizeof(BCM2838State),
     .instance_init  = bcm2838_init,
-    .class_size     = sizeof(BCM283XBaseClass),
     .class_init     = bcm2838_class_init,
 };
 

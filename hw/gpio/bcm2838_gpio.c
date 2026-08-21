@@ -1,6 +1,6 @@
 /*
  * Raspberry Pi (BCM2838) GPIO Controller
- * This implementation is based on bcm2835_gpio (hw/gpio/bcm2835_gpio.c)
+ * This implementation is based on the BCM2835 GPIO programming model.
  *
  * Copyright (c) 2022 Auriga LLC
  *

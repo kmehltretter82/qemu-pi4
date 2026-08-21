@@ -9,7 +9,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
-#include "hw/arm/raspi_platform.h"
+#include "hw/arm/raspi4_platform.h"
 #include "hw/arm/bcm2838_peripherals.h"
 
 #define CLOCK_ISP_OFFSET        0xc11000

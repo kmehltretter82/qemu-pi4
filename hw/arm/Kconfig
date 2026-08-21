@@ -357,10 +357,10 @@ config MAX78000_SOC
     select MAX78000_TRNG
     select MAX78000_AES
 
-config RASPI
+config RASPI4
     bool
     default y
-    depends on TCG && ARM
+    depends on TCG && AARCH64
     select ARM_GIC
     select FRAMEBUFFER
     select PL011 # UART

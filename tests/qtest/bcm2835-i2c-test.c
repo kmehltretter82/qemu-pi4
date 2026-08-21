@@ -28,65 +28,56 @@
 #include "libqtest-single.h"
 
 #include "hw/i2c/bcm2835_i2c.h"
-#include "hw/sensor/tmp105_regs.h"
+
+#define RASPI4_GIC_I2C_IRQ 117
 
 static const uint32_t bsc_base_addrs[] = {
-    0x3f205000,                         /* I2C0 */
-    0x3f804000,                         /* I2C1 */
-    0x3f805000,                         /* I2C2 */
+    0xfe205000,                         /* I2C0 */
+    0xfe804000,                         /* I2C1 */
+    0xfe805000,                         /* I2C2 */
 };
 
-static void bcm2835_i2c_init_transfer(uint32_t base_addr, bool read)
+static void test_i2c_registers_and_nack(gconstpointer data)
 {
-    /* read flag is bit 0 so we can write it directly */
-    int interrupt = read ? BCM2835_I2C_C_INTR : BCM2835_I2C_C_INTT;
+    intptr_t index = (intptr_t)data;
+    uint32_t base_addr = bsc_base_addrs[index];
+    uint32_t status;
 
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_C), ==, 0);
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_S), ==,
+                    BCM2835_I2C_S_TXD | BCM2835_I2C_S_TXE);
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_DLEN), ==, 0);
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_A), ==, 0);
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_DIV), ==, 0x5dc);
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_DEL), ==, 0x00300030);
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_CLKT), ==, 0x40);
+
+    writel(base_addr + BCM2835_I2C_DIV, 0x1234);
+    writel(base_addr + BCM2835_I2C_DEL, 0x5678);
+    writel(base_addr + BCM2835_I2C_CLKT, 0x9abc);
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_DIV), ==, 0x1234);
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_DEL), ==, 0x5678);
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_CLKT), ==, 0x9abc);
+
+    /* A zero-length transfer to an unattached address must report NACK. */
+    writel(base_addr + BCM2835_I2C_A, 0x50);
+    writel(base_addr + BCM2835_I2C_DLEN, 0);
+    g_assert_false(get_irq(RASPI4_GIC_I2C_IRQ));
     writel(base_addr + BCM2835_I2C_C,
            BCM2835_I2C_C_I2CEN | BCM2835_I2C_C_INTD |
-           BCM2835_I2C_C_ST | BCM2835_I2C_C_CLEAR | interrupt | read);
-}
+           BCM2835_I2C_C_ST | BCM2835_I2C_C_CLEAR);
 
-static void test_i2c_read_write(gconstpointer data)
-{
-    uint32_t i2cdata;
-    intptr_t index = (intptr_t) data;
-    uint32_t base_addr = bsc_base_addrs[index];
+    status = readl(base_addr + BCM2835_I2C_S);
+    g_assert_cmphex(status & (BCM2835_I2C_S_ERR | BCM2835_I2C_S_DONE), ==,
+                    BCM2835_I2C_S_ERR | BCM2835_I2C_S_DONE);
+    g_assert_false(status & BCM2835_I2C_S_TA);
+    g_assert_true(get_irq(RASPI4_GIC_I2C_IRQ));
 
-    /* Write to TMP105 register */
-    writel(base_addr + BCM2835_I2C_A, 0x50);
-    writel(base_addr + BCM2835_I2C_DLEN, 3);
-
-    bcm2835_i2c_init_transfer(base_addr, 0);
-
-    writel(base_addr + BCM2835_I2C_FIFO, TMP105_REG_T_HIGH);
-    writel(base_addr + BCM2835_I2C_FIFO, 0xde);
-    writel(base_addr + BCM2835_I2C_FIFO, 0xad);
-
-    /* Clear flags */
-    writel(base_addr + BCM2835_I2C_S, BCM2835_I2C_S_DONE | BCM2835_I2C_S_ERR |
-                                      BCM2835_I2C_S_CLKT);
-
-    /* Read from TMP105 register */
-    writel(base_addr + BCM2835_I2C_A, 0x50);
-    writel(base_addr + BCM2835_I2C_DLEN, 1);
-
-    bcm2835_i2c_init_transfer(base_addr, 0);
-
-    writel(base_addr + BCM2835_I2C_FIFO, TMP105_REG_T_HIGH);
-
-    writel(base_addr + BCM2835_I2C_DLEN, 2);
-    bcm2835_i2c_init_transfer(base_addr, 1);
-
-    i2cdata = readl(base_addr + BCM2835_I2C_FIFO);
-    g_assert_cmpint(i2cdata, ==, 0xde);
-
-    i2cdata = readl(base_addr + BCM2835_I2C_FIFO);
-    g_assert_cmpint(i2cdata, ==, 0xa0);
-
-    /* Clear flags */
-    writel(base_addr + BCM2835_I2C_S, BCM2835_I2C_S_DONE | BCM2835_I2C_S_ERR |
-                                      BCM2835_I2C_S_CLKT);
-
+    writel(base_addr + BCM2835_I2C_S,
+           BCM2835_I2C_S_DONE | BCM2835_I2C_S_ERR | BCM2835_I2C_S_CLKT);
+    g_assert_cmphex(readl(base_addr + BCM2835_I2C_S), ==,
+                    BCM2835_I2C_S_TXD | BCM2835_I2C_S_TXE);
+    g_assert_false(get_irq(RASPI4_GIC_I2C_IRQ));
 }
 
 int main(int argc, char **argv)
@@ -98,16 +89,13 @@ int main(int argc, char **argv)
 
     for (i = 0; i < 3; i++) {
         g_autofree char *test_name =
-        g_strdup_printf("/bcm2835/bcm2835-i2c%d/read_write", i);
+            g_strdup_printf("/bcm2835/bcm2835-i2c%d/registers_and_nack", i);
         qtest_add_data_func(test_name, (void *)(intptr_t) i,
-                            test_i2c_read_write);
+                            test_i2c_registers_and_nack);
     }
 
-    /* Run I2C tests with TMP105 slaves on all three buses */
-    qtest_start("-M raspi3b "
-                "-device tmp105,address=0x50,bus=i2c-bus.0 "
-                "-device tmp105,address=0x50,bus=i2c-bus.1 "
-                "-device tmp105,address=0x50,bus=i2c-bus.2");
+    qtest_start("-M raspi4b");
+    qtest_irq_intercept_in(global_qtest, "/machine/soc/peripherals");
     ret = g_test_run();
     qtest_end();
 
