@@ -36,7 +36,9 @@ jobs:
             libpixman-1-dev \
             ninja-build \
             pkg-config \
-            python3-venv
+            python3-setuptools \
+            python3-venv \
+            python3-wheel
 
       - name: Configure focused Pi 4 build
         run: |
