@@ -89,4 +89,10 @@ jobs:
         run: make -C "$BUILD_DIR" precache-pi4 PI4_TEST_CACHE_DIR="$PI4_TEST_CACHE_DIR"
 
       - name: Build and run offline Pi 4 gate
-        run: make -C "$BUILD_DIR" -j2 check-pi4 PI4_TEST_CACHE_DIR="$PI4_TEST_CACHE_DIR"
+        run: |
+          if ! make -C "$BUILD_DIR" -j2 check-pi4 \
+              PI4_TEST_CACHE_DIR="$PI4_TEST_CACHE_DIR" 2>&1 | tee pi4-check.log; then
+            message="$(tail -n 10 pi4-check.log | tr '\n' ' ')"
+            echo "::error title=Pi 4 gate failed::$message"
+            exit 1
+          fi

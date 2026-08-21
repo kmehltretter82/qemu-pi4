@@ -134,13 +134,14 @@ precache-pi4:
 	 QEMU_TEST_REQUIRE_ASSETS=1 \
 	 $(BUILD_DIR)/run "$(PI4_FUNCTIONAL_TEST)"
 
-.ninja-goals.check-pi4 = qemu-system-aarch64 \
+PI4_NINJA_TARGETS = qemu-system-aarch64 \
 	tests/unit/test-qgraph \
 	tests/qtest/bcm2835-dma-test \
 	tests/qtest/bcm2835-i2c-test \
 	tests/qtest/qos-test
 .PHONY: check-pi4
-check-pi4: run-ninja
+check-pi4:
+	+$(MAKE) $(PI4_NINJA_TARGETS)
 	@$(PYTHON) "$(SRC_PATH)/scripts/check-pi4-machines.py" \
 		"$(BUILD_DIR)/qemu-system-aarch64"
 	@$(MESON) test --no-rebuild --print-errorlogs \
