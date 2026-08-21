@@ -19,6 +19,10 @@ Model B and is the foundation for a future Raspberry Pi 400 machine. A
 distinct Pi 400 model and improved Pi 4 peripheral coverage are project goals;
 they are not claimed as complete yet.
 
+The BCM2711 V3D 4.2 graphics accelerator is not implemented.  The current
+display support is a firmware-configured framebuffer, so Raspberry Pi DRM/Mesa
+3D acceleration is unavailable.
+
 Raspberry Pi 5 is not supported. It uses a substantially different BCM2712
 SoC and RP1 I/O controller, neither of which this project currently models.
 
@@ -47,6 +51,31 @@ legacy Pi 0, Pi 1, Pi 2, and Pi 3 machine and SoC implementations. The focused
 binary exposes only ``none`` and ``raspi4b`` as machine types. Device models
 whose names start with ``bcm2835`` remain where the Pi 4 still uses those
 compatible peripheral blocks.
+
+Pi 4 regression gate
+====================
+
+The focused regression gate builds the emulator, verifies that its public
+machine list contains only ``none`` and ``raspi4b``, runs the Pi 4 qtests, and
+boots a SHA-256-pinned Raspberry Pi Linux kernel both with and without a
+minimal initramfs.
+
+Asset download is deliberately separate from test execution.  From a
+configured focused build directory, populate the content-addressed cache once
+and then run the offline gate:
+
+.. code-block:: shell
+
+  make precache-pi4
+  make check-pi4
+
+``precache-pi4`` is the only step that accesses the network.  ``check-pi4``
+sets ``QEMU_TEST_NO_DOWNLOAD=1`` and treats a missing or corrupt cache entry as
+a failure rather than a skipped test.  The cache defaults to
+``build/pi4-test-cache``; set ``PI4_TEST_CACHE_DIR`` to an absolute path to
+share it between build directories.
+
+The same two-stage path runs in GitHub Actions for every push and pull request.
 
 Licensing
 =========

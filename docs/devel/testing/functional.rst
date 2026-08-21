@@ -329,6 +329,10 @@ default, but the location can be changed by setting the
 To force the test suite to re-download the cache, even if still valid,
 set the ``QEMU_TEST_REFRESH_CACHE`` environment variable.
 
+To make a missing asset or a transient pre-cache failure an error instead of
+skipping the affected test, set ``QEMU_TEST_REQUIRE_ASSETS=1``.  This is useful
+for offline CI stages that must prove their asset cache is complete.
+
 Skipping tests
 --------------
 

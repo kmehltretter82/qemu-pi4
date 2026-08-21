@@ -16,8 +16,8 @@ class Aarch64Raspi4Machine(LinuxKernelTest):
     and following the instructions on the on:
     https://www.raspberrypi.org/documentation/linux/kernel/building.md
     """
-    ASSET_KERNEL_20190215 = Asset(
-        ('http://archive.raspberrypi.org/debian/'
+    ASSET_KERNEL_20230106 = Asset(
+        ('https://archive.raspberrypi.org/debian/'
          'pool/main/r/raspberrypi-firmware/'
          'raspberrypi-kernel_1.20230106-1_arm64.deb'),
         '56d5713c8f6eee8a0d3f0e73600ec11391144fef318b08943e9abd94c0a9baf7')
@@ -29,9 +29,9 @@ class Aarch64Raspi4Machine(LinuxKernelTest):
         '7c0b16d1853772f6f4c3ca63e789b3b9ff4936efac9c8a01fb0c98c05c7a7648')
 
     def test_arm_raspi4(self):
-        kernel_path = self.archive_extract(self.ASSET_KERNEL_20190215,
+        kernel_path = self.archive_extract(self.ASSET_KERNEL_20230106,
                                            member='boot/kernel8.img')
-        dtb_path = self.archive_extract(self.ASSET_KERNEL_20190215,
+        dtb_path = self.archive_extract(self.ASSET_KERNEL_20230106,
                                         member='boot/bcm2711-rpi-4-b.dtb')
 
         self.set_machine('raspi4b')
@@ -58,9 +58,9 @@ class Aarch64Raspi4Machine(LinuxKernelTest):
 
 
     def test_arm_raspi4_initrd(self):
-        kernel_path = self.archive_extract(self.ASSET_KERNEL_20190215,
+        kernel_path = self.archive_extract(self.ASSET_KERNEL_20230106,
                                            member='boot/kernel8.img')
-        dtb_path = self.archive_extract(self.ASSET_KERNEL_20190215,
+        dtb_path = self.archive_extract(self.ASSET_KERNEL_20230106,
                                         member='boot/bcm2711-rpi-4-b.dtb')
         initrd_path = self.uncompress(self.ASSET_INITRD)
 

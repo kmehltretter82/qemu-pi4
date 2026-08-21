@@ -264,7 +264,8 @@ class Asset:
                 try:
                     asset.fetch()
                 except AssetError as e:
-                    if not e.transient:
+                    if (not e.transient or
+                            os.getenv("QEMU_TEST_REQUIRE_ASSETS")):
                         raise
                     log.error("%s: skipping asset precache", e)
 

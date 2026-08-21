@@ -234,6 +234,8 @@ class QemuBaseTest(unittest.TestCase):
         self.qmplog.addHandler(self._log_fh)
 
         if not self.assets_available():
+            if os.getenv("QEMU_TEST_REQUIRE_ASSETS"):
+                self.fail('One or more required assets is not available')
             self.skipTest('One or more assets is not available')
 
     def tearDown(self):

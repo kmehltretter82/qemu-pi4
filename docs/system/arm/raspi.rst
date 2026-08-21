@@ -30,6 +30,8 @@ Implemented devices
 Missing devices
 ---------------
 
+ * V3D 4.2 graphics accelerator (its MMIO range is an unimplemented
+   placeholder)
  * Pulse Width Modulation (PWM)
  * PCIe root port
  * GENET Ethernet controller
