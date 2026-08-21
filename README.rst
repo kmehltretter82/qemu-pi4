@@ -77,6 +77,19 @@ share it between build directories.
 
 The same two-stage path runs in GitHub Actions for every push and pull request.
 
+Pi 4 hardware comparison lab
+============================
+
+``scripts/pi4/build-linux.sh`` builds a kernel.org source archive pinned by
+version, upstream Git commit and SHA-256.  It produces one upstream Linux
+``Image``, Pi 4 Model B and Pi 400 DTBs, a deterministic smoke-test initramfs,
+and an artifact hash manifest.  ``scripts/pi4/capture-state.py`` records
+read-only Linux hardware state and ``scripts/pi4/compare-state.py`` generates
+a normalized Pi 400-versus-QEMU report.
+
+See ``docs/system/arm/raspi-lab.rst`` for build, boot and comparison
+instructions.
+
 Licensing
 =========
 

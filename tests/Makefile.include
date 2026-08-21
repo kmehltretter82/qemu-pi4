@@ -125,6 +125,7 @@ check-func check-func-quick:
 # dependency and cannot silently turn into a skip on a cold cache.
 PI4_TEST_CACHE_DIR ?= $(BUILD_DIR)/pi4-test-cache
 PI4_FUNCTIONAL_TEST = $(SRC_PATH)/tests/functional/aarch64/test_raspi4.py
+PI4_LAB_TEST = $(SRC_PATH)/tests/pi4/test_lab_tools.py
 
 .PHONY: precache-pi4
 precache-pi4:
@@ -154,6 +155,7 @@ check-pi4:
 	 QEMU_TEST_NO_DOWNLOAD=1 \
 	 QEMU_TEST_REQUIRE_ASSETS=1 \
 	 $(BUILD_DIR)/run "$(PI4_FUNCTIONAL_TEST)" -v
+	@$(PYTHON) "$(PI4_LAB_TEST)"
 
 # Consolidated targets
 

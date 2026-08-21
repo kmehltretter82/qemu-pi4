@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Linux 7.2 final, released 2026-08-16.  The commit is the peeled v7.2 tag
+# from Linus Torvalds' kernel.org repository.  The archive digest is published
+# in https://cdn.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc.
+
+LINUX_VERSION=7.2
+LINUX_GIT_COMMIT=8d3ae59288f1e7d58d76558a6ee96d533bc5019f
+LINUX_SOURCE_URL=https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.tar.xz
+LINUX_SOURCE_SHA256=f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3
+LINUX_SOURCE_DATE_EPOCH=1786915946
+LINUX_BUILD_TIMESTAMP='Sun Aug 16 21:32:26 UTC 2026'
