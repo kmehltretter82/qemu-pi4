@@ -361,12 +361,16 @@ config RASPI
     bool
     default y
     depends on TCG && ARM
+    select ARM_GIC
     select FRAMEBUFFER
     select PL011 # UART
     select SDHCI
     select USB_DWC2
     select BCM2835_SPI
     select BCM2835_I2C
+    select OR_IRQ
+    select SPLIT_IRQ
+    select UNIMP
 
 config STM32F100_SOC
     bool
