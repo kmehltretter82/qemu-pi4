@@ -1,6 +1,57 @@
-===========
-QEMU README
-===========
+=========
+QEMU Pi 4
+=========
+
+``qemu-pi4`` is an independent QEMU-derived project focused on improving
+system emulation for the Raspberry Pi 4 family, including the Raspberry Pi 4
+Model B and Raspberry Pi 400. It is not affiliated with the QEMU Project or
+Raspberry Pi Ltd.
+
+Project status
+==============
+
+The project started from QEMU 11.1.0, commit
+``84f07211cc5b4fc6a371559bf8a5de4fb068e648``. The unchanged starting point is
+marked by the ``qemu-pi4-base-v11.1.0`` tag.
+
+The current QEMU machine model is ``raspi4b``. A distinct Raspberry Pi 400
+machine and improved Pi 4 peripheral coverage are project goals; they are not
+claimed as complete yet.
+
+Focused build
+=============
+
+The ``pi4`` device configuration builds the AArch64 system emulator with the
+Raspberry Pi machines and their required devices, without the normal set of
+unrelated AArch64 boards:
+
+.. code-block:: shell
+
+  mkdir build
+  cd build
+  ../configure \
+    --target-list=aarch64-softmmu \
+    --without-default-devices \
+    --with-devices-aarch64=pi4 \
+    --disable-docs \
+    --disable-tools
+  ninja qemu-system-aarch64
+  ./qemu-system-aarch64 -machine help
+
+QEMU 11.1.0 groups Raspberry Pi 0 through Raspberry Pi 4 behind the shared
+``CONFIG_RASPI`` option, so this first focused build includes those related
+machines. Separating Pi 4 support more precisely can be done incrementally.
+
+Licensing
+=========
+
+This project retains QEMU's existing licenses and per-file license notices.
+QEMU as a whole is licensed under GPL-2.0; see ``LICENSE``, ``COPYING``, and
+``COPYING.LIB`` for the complete licensing information. No replacement license
+was added when the repository was created.
+
+Upstream QEMU README
+====================
 
 QEMU is a generic and open source machine & userspace emulator and
 virtualizer.
