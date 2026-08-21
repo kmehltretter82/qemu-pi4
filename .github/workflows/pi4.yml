@@ -1,0 +1,65 @@
+name: Pi 4
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi4-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BUILD_DIR: build-ci
+      PI4_TEST_CACHE_DIR: ${{ github.workspace }}/.cache/pi4-tests
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            libfdt-dev \
+            libglib2.0-dev \
+            libpixman-1-dev \
+            ninja-build \
+            pkg-config \
+            python3-venv
+
+      - name: Configure focused Pi 4 build
+        run: |
+          mkdir "$BUILD_DIR"
+          cd "$BUILD_DIR"
+          ../configure \
+            --target-list=aarch64-softmmu \
+            --without-default-devices \
+            --with-devices-aarch64=pi4 \
+            --disable-docs \
+            --disable-tools \
+            --disable-download
+
+      - name: Restore pinned Linux guest cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ env.PI4_TEST_CACHE_DIR }}/download
+          key: pi4-linux-v1-${{ hashFiles('tests/functional/aarch64/test_raspi4.py') }}
+          restore-keys: |
+            pi4-linux-v1-
+
+      - name: Precache pinned Linux guest
+        run: make -C "$BUILD_DIR" precache-pi4 PI4_TEST_CACHE_DIR="$PI4_TEST_CACHE_DIR"
+
+      - name: Build and run offline Pi 4 gate
+        run: make -C "$BUILD_DIR" -j2 check-pi4 PI4_TEST_CACHE_DIR="$PI4_TEST_CACHE_DIR"
