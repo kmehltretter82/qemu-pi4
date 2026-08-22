@@ -22,6 +22,8 @@ require separate models.
 
 Potential correctness fixes and enhancements suitable for later submission
 to QEMU are kept in the evidence-based :doc:`raspi-upstream` tracker.
+The fidelity requirements and staged acceptance tests for the missing Pi 400
+USB path are recorded in :doc:`raspi-pcie`.
 
 Implemented devices
 -------------------

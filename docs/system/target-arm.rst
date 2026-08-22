@@ -98,6 +98,7 @@ Board-specific documentation
    arm/orangepi
    arm/raspi
    arm/raspi-lab
+   arm/raspi-pcie
    arm/collie
    arm/sx1
    arm/stellaris

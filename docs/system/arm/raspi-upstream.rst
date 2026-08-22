@@ -234,6 +234,70 @@ QP4-UP-016: BCM2711 ASB bridge stubs prevent power-domain registration
 :Before sending: Include the Pi 400 register dump and keep control-register
   behavior explicitly documented as unimplemented.
 
+QP4-UP-017: BCM2835 timer and SPI outputs remain asserted across reset
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate
+:Fork commit: ``8e867d903779ab3b3a8742189beeac018a449375``
+:Observed issue: Resetting the system timer clears its registers without
+  deleting pending host timers or lowering its four IRQ outputs. The SPI reset
+  similarly clears controller state without lowering its output IRQ. A guest
+  can therefore start after reset with a stale interrupt or receive a callback
+  from the previous boot.
+:Fork change: Delete all pending system-timer callbacks, lower the timer and
+  SPI outputs, and extend qtests to prove assertion, reset deassertion, and the
+  absence of a delayed timer reassertion.
+:Before sending: Split the timer and SPI fixes, retain the focused reset tests,
+  and check whether each device should move to the three-phase reset API in a
+  separate cleanup.
+
+QP4-UP-018: Pi 4 upper-memory device-tree construction is incorrect
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate
+:Fork commit: ``5a8a2bf70784b5d6aaa6c98ce5804b114f2c5ed9``
+:Observed issue: ``raspi4_modify_dtb()`` decides whether to add upper memory by
+  testing ``info->ram_size``. That value is the boot-visible low range, capped
+  below 1 GiB by construction, so a 2 GiB ``raspi4b`` guest is told it has only
+  960 MiB. Simply correcting the condition would make a future 4 GiB board
+  describe the live ``0xfc000000`` BCM2711 peripheral window as RAM.
+:Fork change: Test the RAM size decoded from the board revision and cap the
+  upper range at ``BCM2838_PERI_LOW_BASE``. The pinned Linux tests now see
+  ``[0x40000000, 0x80000000)`` on ``raspi4b`` and
+  ``[0x40000000, 0xfc000000)`` on ``raspi400``.
+:Before sending: Split the dead-condition correction from the 4 GiB range cap
+  if requested, add a small generated-DTB unit test, and include the existing
+  Linux boot evidence for both memory sizes.
+
+QP4-UP-019: distinct Raspberry Pi 400 machine
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: enhancement candidate
+:Fork commit: ``5a8a2bf70784b5d6aaa6c98ce5804b114f2c5ed9``
+:Fork change: Add a 64-bit-host ``raspi400`` machine with board revision
+  ``0xc03130``, fixed 4 GiB RAM, the common BCM2711 SoC, and its board-specific
+  device tree. Qtests cover default RAM, invalid RAM rejection, upper-memory
+  access and the firmware board-revision response. A pinned Linux boot checks
+  the Pi 400 machine identity and 3968 MiB physical layout.
+:Before sending: Submit after the upper-memory fix, decide whether upstream
+  wants the 32-bit-host omission to be user-visible in documentation, and keep
+  the Pi 400 DTB boot test with the machine patch.
+
+Hardware-derived Pi 400 memory-map correction
+----------------------------------------------
+
+A read-only capture from the project's real Pi 400 on 2026-08-22 reports one
+``memory@0/reg`` property with the two ranges ``[0, 0x3b400000)`` and
+``[0x40000000, 0xfc000000)``. ``/proc/iomem`` likewise ends System RAM at
+``0xfbffffff`` and exposes no RAM above 4 GiB. The smaller first range reflects
+that system's firmware reservation; QEMU's default 64 MiB VideoCore carveout
+produces ``[0, 0x3c000000)`` while preserving the same address topology.
+
+This evidence supersedes an earlier local proposal to alias the obscured top
+64 MiB of SDRAM at ``0x100000000``. Neither the hardware DT nor the BCM2711
+address-map documentation supports that relocation, so ``qemu-pi4`` does not
+invent it.
+
 Known feature gaps, not bug candidates
 --------------------------------------
 
