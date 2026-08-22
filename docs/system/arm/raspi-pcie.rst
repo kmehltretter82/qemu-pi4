@@ -27,7 +27,7 @@ because Compute Module 4 exposes PCIe for external devices instead.
 Current fork status
 -------------------
 
-The first three implementation slices are now complete at the QEMU-device
+The first four implementation slices are now complete at the QEMU-device
 level.  The host-controller work provides the
 BCM2711 controller aperture, a Broadcom ``14e4:2711`` root port with PCI
 revision ``0x20`` and a Gen2 x1 capability, root and indirect configuration
@@ -64,14 +64,24 @@ BCM2711 doorbell to GIC SPI 148.  Both ``raspi4b`` and ``raspi400`` instantiate
 the fixed endpoint and its stable ``vl805.0`` USB bus.  A stopped-machine
 ``raspi400`` file-migration smoke test also succeeds.
 
+The firmware property interface implements ``NOTIFY_XHCI_RESET`` for the
+board-level VL805 at firmware-encoded BDF ``01:00.0``.  It returns the
+hardware-observed status value ``0`` for that address and ``0xffffffff`` for
+an invalid address.  A valid notification halts a running xHCI core while
+preserving its other operational registers and PCI configuration; it is not a
+PCI or xHCI cold reset.  BCM2711 PERST performs the fundamental endpoint reset,
+while this call tells VideoCore firmware to initialize the VL805 afterward.
+Qtests cover both status results, the valid-request halt, and preserved
+``CONFIG``, BAR and command-register state.
+
 This is deliberately not guest-visible PCIe support yet.  The PCIe
-device-tree node remains hidden until the firmware-requested VL805 reset, the
-external USB 2 hub and Pi 400 keyboard topology, and an unmodified Linux boot
-are complete.  The advertised debug capability and vendor-specific extended
-capabilities currently provide captured read-only identity values rather than
-their proprietary behavior.  Link-up follows the two reset bits rather than
-endpoint link training, and MDIO operations complete immediately.  The host
-controller-event interrupt and an active-mapping migration qtest also remain.
+device-tree node remains hidden until the external USB 2 hub and Pi 400
+keyboard topology and an unmodified Linux boot are complete.  The advertised
+debug capability and vendor-specific extended capabilities currently provide
+captured read-only identity values rather than their proprietary behavior.
+Link-up follows the two reset bits rather than endpoint link training, and
+MDIO operations complete immediately.  The host controller-event interrupt
+and an active-mapping migration qtest also remain.
 
 BCM2711 host requirements
 -------------------------
@@ -129,6 +139,22 @@ the ``2109:3431`` hub and ``04d9:0007`` Pi 400 keyboard.  Controller revision
 revision and Linux behavior; it has not yet been confirmed by a raw MMIO
 capture.
 
+A controlled follow-up with the xHCI driver unbound tested property tag
+``0x00030058`` directly through ``/dev/vcio``.  Request data ``0x00100000``
+(bus 1, slot 0, function 0) was replaced with status ``0``; request data
+``0`` was replaced with ``0xffffffff``.  In both cases a deliberately set
+xHCI ``CONFIG`` value remained unchanged.  The VL805 BAR also survived the
+driver unbind/rebind cycle, after which the external hub and integrated
+keyboard enumerated again.  A second request while the driver was active
+changed ``USBCMD`` from ``0x5`` to ``0`` and ``USBSTS`` from ``0`` to
+``0x1009``, while preserving ``CONFIG`` at ``0x20``.  USB was restored by an
+immediate driver unbind/rebind.  Active use is outside Linux's normal sequence,
+so the model reproduces the durable halt and preserved-register behavior, not
+the incidental error bits.  This evidence corrects the earlier assumption
+that the notification either does nothing or cold-resets the endpoint.  It
+does not characterize proprietary firmware loading after physical PERST on
+every Pi 4 board revision.
+
 VL805 requirements
 ------------------
 
@@ -154,8 +180,10 @@ Implementation stages
 3. Add the VL805 xHCI personality, populate it from the Pi board model, and
    prove endpoint enumeration, DMA-backed events, MSI and PERST.  This slice
    is implemented and covered by qtests.
-4. Implement the firmware ``NOTIFY_XHCI_RESET`` request as an observable
-   endpoint reset without attempting to emulate proprietary VL805 firmware.
+4. Implement the firmware ``NOTIFY_XHCI_RESET`` request with the observed
+   valid/invalid BDF status values and controller halt without turning it into
+   a cold reset or attempting to emulate proprietary VL805 firmware.  This
+   slice is implemented and covered by qtests.
 5. Add the Pi 400 hub and integrated-keyboard topology.
 
 Required tests
@@ -164,7 +192,8 @@ Required tests
 Qtests must cover reset and link transitions, revision and MDIO completion,
 root and endpoint IDs, indirect configuration, both known outbound-window
 layouts, DMA below 3 GiB, DMA rejection outside the inbound range, INTx, MSI
-masking and clearing, firmware-requested reset, and migration.
+masking and clearing, firmware-notification status, halt-without-cold-reset
+behavior, preserved register state, and migration.
 
 The Linux acceptance test must boot an unmodified Pi DT with its PCIe node
 enabled. It must show ``14e4:2711`` and ``1106:3483`` in ``lspci -nn``,

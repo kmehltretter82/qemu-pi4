@@ -46,14 +46,15 @@ Implemented devices
    BCM54213PE-compatible PHY
  * MailBox controller (MBOX)
  * VideoCore firmware property interface, including firmware-controlled GPIOs
+   and the Pi 4-family VL805 initialization notification
  * Peripheral SPI controller (SPI)
  * Broadcom Serial Controller (I2C)
  * BCM2711 PCIe host and root port, including dynamic outbound and inbound
    DMA windows, INTx, and MSI
  * Pi 4-family VIA VL805 PCIe xHCI personality, including the captured PCI and
    xHCI register layout, DMA-backed controller events, MSI, and PERST; the
-   guest PCIe node remains hidden pending the firmware reset interface, fixed
-   USB topology, and Linux boot validation
+   guest PCIe node remains hidden pending the fixed USB topology and Linux boot
+   validation
 
 Missing devices
 ---------------
