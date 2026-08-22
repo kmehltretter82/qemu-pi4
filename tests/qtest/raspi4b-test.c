@@ -87,6 +87,20 @@ static bool qom_bus_has_sd_card(const char *path)
     return found;
 }
 
+static void test_cpu_configuration(void)
+{
+    QDict *response;
+
+    response = qtest_qmp(global_qtest,
+                         "{ 'execute': 'qom-get',"
+                         "  'arguments': {"
+                         "    'path': '/machine/soc/cpu[0]',"
+                         "    'property': 'cntfrq' } }");
+    g_assert(qdict_haskey(response, "return"));
+    g_assert_cmpint(qdict_get_int(response, "return"), ==, 54000000);
+    qobject_unref(response);
+}
+
 static void test_sd_card_on_emmc2(void)
 {
     g_assert_true(qom_bus_has_sd_card(
@@ -346,6 +360,7 @@ int main(int argc, char **argv)
 #endif
 
     g_test_init(&argc, &argv, NULL);
+    qtest_add_func("/raspi4b/cpu/configuration", test_cpu_configuration);
     qtest_add_func("/raspi4b/sd/card_on_emmc2", test_sd_card_on_emmc2);
     qtest_add_func("/raspi4b/firmware_gpio", test_firmware_gpio);
     qtest_add_func("/raspi4b/genet/registers_and_mdio",

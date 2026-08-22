@@ -13,6 +13,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/arm/bcm2838.h"
 #include "target/arm/cpu-qom.h"
+#include "target/arm/cpu-features.h"
 #include "target/arm/gtimer.h"
 #include "trace.h"
 
@@ -40,6 +41,8 @@
 #define GIC_VCPU_OFS                0x6000
 
 #define VIRTUAL_PMU_IRQ 7
+
+#define BCM2838_GTIMER_FREQ 54000000
 
 static const Property bcm2838_enabled_cores_property =
     DEFINE_PROP_UINT32("enabled-cpus", BCM2838State, enabled_cpus,
@@ -109,20 +112,28 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
 
     /* Create cores */
     for (int n = 0; n < BCM2838_NCPUS; n++) {
+        ARMCPU *cpu = &s->cpu[n].core;
 
-        object_property_set_int(OBJECT(&s->cpu[n].core), "mp-affinity", n,
+        /* BCM2711's Cortex-A72 implementation omits the crypto extension. */
+        FIELD_DP64_IDREG(&cpu->isar, ID_AA64ISAR0, AES, 0);
+        FIELD_DP64_IDREG(&cpu->isar, ID_AA64ISAR0, SHA1, 0);
+        FIELD_DP64_IDREG(&cpu->isar, ID_AA64ISAR0, SHA2, 0);
+
+        object_property_set_int(OBJECT(cpu), "cntfrq", BCM2838_GTIMER_FREQ,
+                                &error_abort);
+
+        object_property_set_int(OBJECT(cpu), "mp-affinity", n,
                                 &error_abort);
 
         /* set periphbase/CBAR value for CPU-local registers */
-        object_property_set_int(OBJECT(&s->cpu[n].core), "reset-cbar",
+        object_property_set_int(OBJECT(cpu), "reset-cbar",
                                 BCM2838_PERI_BASE, &error_abort);
 
         /* start powered off if not enabled */
-        object_property_set_bool(OBJECT(&s->cpu[n].core),
-                                 "start-powered-off",
+        object_property_set_bool(OBJECT(cpu), "start-powered-off",
                                  n >= s->enabled_cpus, &error_abort);
 
-        if (!qdev_realize(DEVICE(&s->cpu[n].core), NULL, errp)) {
+        if (!qdev_realize(DEVICE(cpu), NULL, errp)) {
             return;
         }
     }

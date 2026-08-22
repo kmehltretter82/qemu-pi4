@@ -80,10 +80,16 @@ class Aarch64Raspi4Machine(LinuxKernelTest):
         #                '-device', 'qemu-xhci,bus=pcie.1,id=xhci',
         #                '-device', 'usb-kbd,bus=xhci.0',
         self.vm.launch()
+        self.wait_for_console_pattern(
+            'arch_timer: cp15 timer(s) running at 54.00MHz')
         self.wait_for_console_pattern('Boot successful.')
 
         exec_command_and_wait_for_pattern(self, 'cat /proc/cpuinfo',
                                                 'BCM2835')
+        exec_command_and_wait_for_pattern(
+            self,
+            'grep -qw aes /proc/cpuinfo && echo unexpected || echo no-crypto',
+            'no-crypto')
         exec_command_and_wait_for_pattern(self, 'cat /proc/iomem',
                                                 'cprman@7e101000')
         exec_command_and_wait_for_pattern(self, 'halt', 'reboot: System halted')
