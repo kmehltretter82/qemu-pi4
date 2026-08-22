@@ -186,6 +186,15 @@ static void test_firmware_gpio(void)
     g_assert_cmphex(property_payload(1), ==, 0);
 }
 
+static void test_firmware_dma_channels(void)
+{
+    const uint32_t payload[] = { 0 };
+
+    property_request(RPI_FWREQ_GET_DMA_CHANNELS, payload,
+                     G_N_ELEMENTS(payload), sizeof(payload));
+    g_assert_cmphex(property_payload(0), ==, 0x07f5);
+}
+
 static uint32_t genet_mdio_read(unsigned int phy, unsigned int reg)
 {
     uint32_t command = GENET_MDIO_BUSY | GENET_MDIO_READ |
@@ -363,6 +372,8 @@ int main(int argc, char **argv)
     qtest_add_func("/raspi4b/cpu/configuration", test_cpu_configuration);
     qtest_add_func("/raspi4b/sd/card_on_emmc2", test_sd_card_on_emmc2);
     qtest_add_func("/raspi4b/firmware_gpio", test_firmware_gpio);
+    qtest_add_func("/raspi4b/firmware_dma_channels",
+                   test_firmware_dma_channels);
     qtest_add_func("/raspi4b/genet/registers_and_mdio",
                    test_genet_registers_and_mdio);
 #ifndef _WIN32

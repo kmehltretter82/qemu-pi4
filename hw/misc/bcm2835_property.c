@@ -307,8 +307,7 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             break;
 
         case RPI_FWREQ_GET_DMA_CHANNELS:
-            /* channels 2-5 */
-            stl_le_phys(&s->dma_as, value + 12, 0x003C);
+            stl_le_phys(&s->dma_as, value + 12, s->dma_channels);
             resplen = 4;
             break;
 
@@ -657,6 +656,8 @@ static void bcm2835_property_realize(DeviceState *dev, Error **errp)
 
 static const Property bcm2835_property_props[] = {
     DEFINE_PROP_UINT32("board-rev", BCM2835PropertyState, board_rev, 0),
+    DEFINE_PROP_UINT32("dma-channels", BCM2835PropertyState, dma_channels,
+                       0x003c),
     DEFINE_PROP_STRING("command-line", BCM2835PropertyState, command_line),
 };
 

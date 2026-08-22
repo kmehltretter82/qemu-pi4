@@ -20,6 +20,8 @@
 /* Lower peripheral base address on the VC (GPU) system bus */
 #define BCM2838_VC_PERI_LOW_BASE 0x7c000000
 
+#define BCM2838_DMA_CHANNEL_MASK 0x07f5
+
 /* Capabilities for SD controller: no DMA, high-speed, default clocks etc. */
 #define BCM2835_SDHC_CAPAREG 0x52134b4
 
@@ -73,6 +75,9 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     BCM2838PeripheralState *s = BCM2838_PERIPHERALS(dev);
     BCMSocPeripheralBaseState *s_base = BCM_SOC_PERIPHERALS_BASE(dev);
     int n;
+
+    object_property_set_uint(OBJECT(&s_base->property), "dma-channels",
+                             BCM2838_DMA_CHANNEL_MASK, &error_abort);
 
     bcm_soc_peripherals_common_realize(dev, errp);
 
