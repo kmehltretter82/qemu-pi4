@@ -85,7 +85,10 @@ Qtests cover both status results, the valid-request halt, and preserved
 ``CONFIG``, BAR and command-register state.
 
 The guest-visible path passes the pinned unmodified Linux v7.2 acceptance boot
-on both boards.  Remaining approximations are narrower: the advertised debug
+on both boards.  Those boots also attach a disposable mass-storage device to
+the VIA hub, verify data transfers with the guest block cache flushed, retain
+the data across xHCI driver unbind/rebind, and complete a fresh transfer after
+re-enumeration.  Remaining approximations are narrower: the advertised debug
 capability and vendor-specific extended capabilities provide captured
 read-only identity values rather than proprietary behavior, link-up follows
 the two reset bits rather than endpoint link training, MDIO operations
@@ -212,9 +215,10 @@ The pinned unmodified Linux v7.2 acceptance test passes on ``raspi4b`` and
 ``1106:3483``, both xHCI root hubs, the ``2109:3431`` hub, and nonzero MSI
 activity.  On ``raspi400`` it additionally verifies ``04d9:0007`` and both HID
 interfaces.  It unbinds and rebinds the xHCI driver, proves that the hub,
-keyboard and HID interfaces re-enumerate as applicable, observes fresh MSI
-activity, and obtains a DHCP lease through GENET.  Pi 4 Model B correctly has
-no integrated keyboard.
+keyboard, HID interfaces and disposable USB mass-storage device re-enumerate
+as applicable, verifies storage data across the rebind, performs a second
+write/read cycle, observes fresh MSI activity, and obtains a DHCP lease through
+GENET.  Pi 4 Model B correctly has no integrated keyboard.
 
 External work under review
 --------------------------

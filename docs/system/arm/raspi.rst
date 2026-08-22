@@ -104,6 +104,21 @@ For a Pi 400 guest, change the machine and device tree together::
 Supplying a Pi 4 Model B DTB to ``raspi400`` (or the reverse) gives the guest
 the wrong board identity and peripherals even though both boards use BCM2711.
 
+Attaching USB storage
+---------------------
+
+The focused build includes QEMU's standard USB mass-storage device so that
+external-stick workloads can exercise the complete BCM2711 PCIe, VL805 and
+VIA-hub path.  For example, attach a raw image to hub port one with safe
+snapshot writes::
+
+  -drive file=stick.raw,if=none,id=stick,format=raw,snapshot=on \
+  -device usb-storage,drive=stick,bus=vl805.0,port=1.1
+
+Ports ``1.1`` through ``1.3`` are free on both machines.  Port ``1.4`` is also
+free on ``raspi4b`` but contains the integrated keyboard on ``raspi400``.
+Remove ``snapshot=on`` only when writes to the host image should persist.
+
 Ethernet
 --------
 

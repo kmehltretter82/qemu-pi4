@@ -26,8 +26,9 @@ Both boards expose the BCM2711 PCIe root complex and the fixed VIA VL805 xHCI
 controller used for their external USB ports.  The model includes private PCI
 DMA, MSI, multi-segment xHCI event rings, the VIA four-port USB 2 hub, and the
 Pi 400's dual-interface integrated keyboard.  The pinned upstream Linux lab
-also validates PCI identities, USB topology, MSI activity, and xHCI
-unbind/rebind recovery on both machines.
+also validates PCI identities, USB topology, MSI activity, xHCI
+unbind/rebind recovery, and data integrity on a disposable USB mass-storage
+device on both machines.
 
 The BCM2711 V3D 4.2 graphics accelerator is not implemented.  The current
 display support is a firmware-configured framebuffer, so Raspberry Pi DRM/Mesa
@@ -69,7 +70,8 @@ The focused regression gate builds the emulator, verifies that its public
 machine list contains only ``none``, ``raspi400`` and ``raspi4b``, runs the Pi
 4 qtests, and boots a SHA-256-pinned Raspberry Pi Linux kernel on both board
 models.  The boots check machine identity, usable physical RAM, PCIe/VL805,
-the board-specific USB topology, xHCI MSI and rebind recovery, and GENET DHCP.
+the board-specific USB topology, an external USB-storage transfer, and GENET
+DHCP.  The separate Linux 7.2 lab adds xHCI MSI and rebind recovery checks.
 
 Asset download is deliberately separate from test execution.  From a
 configured focused build directory, populate the content-addressed cache once

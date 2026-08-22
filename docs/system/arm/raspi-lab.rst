@@ -64,15 +64,27 @@ add::
   --machine raspi400
 
 The runner connects the emulated GENET controller to QEMU user-mode
-networking and requests a DHCP lease.  The initramfs verifies the exact
-BCM2711 root-port and VL805 PCI identities, both xHCI root hubs, the VIA
-``2109:3431`` hub, nonzero MSI activity, and a successful xHCI driver
-unbind/rebind followed by re-enumeration and fresh MSI activity.  On
-``raspi400`` it also requires the ``04d9:0007`` integrated keyboard and both
-of its HID interfaces; ``raspi4b`` correctly omits those checks.  It prints
-basic kernel and network state, the assigned IPv4 address, and the marker
-``PI4-LAB: upstream Linux boot successful``, then requests reboot.  The runner
-uses ``-no-reboot``, so that successful request terminates QEMU.
+networking and requests a DHCP lease.  It also creates an 8 MiB sparse raw
+image, attaches it as a QEMU ``46f4:0001`` mass-storage device on VIA hub port
+one, and deletes it when QEMU exits.  The guest receives no physical disk or
+user-supplied disk image; only that temporary file is modified.
+
+The initramfs verifies the exact BCM2711 root-port and VL805 PCI identities,
+both xHCI root hubs, the VIA ``2109:3431`` hub, and nonzero MSI activity.  It
+writes and reads a deterministic 256 KiB pattern on the disposable USB disk
+after flushing the guest block cache.  It then unbinds and rebinds the xHCI
+driver, requires the complete USB topology and block device to re-enumerate,
+checks that the first pattern survived, and performs a second write/read
+cycle.  On ``raspi400`` it also requires the ``04d9:0007`` integrated keyboard
+and both of its HID interfaces; ``raspi4b`` correctly omits those checks.  It
+prints basic kernel and network state, the assigned IPv4 address, and the
+marker ``PI4-LAB: upstream Linux boot successful``, then requests reboot.  The
+runner uses ``-no-reboot``, so that successful request terminates QEMU.
+
+Linux can print a failed ``SYNCHRONIZE CACHE`` command while the deliberate
+driver unbind tears down the USB transport.  The test flushes and closes its
+own transfer before unbinding, then proves that the bytes survived after the
+device returns; this disconnect-time message does not by itself fail the lab.
 
 The same kernel and unmodified upstream Pi 4 DTB can also mount a normal
 Linux root filesystem from the emulated external SD card.  Attach the image

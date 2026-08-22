@@ -491,4 +491,8 @@ Fork-only changes
 Removing legacy Raspberry Pi machines, renaming the build option to
 ``CONFIG_RASPI4``, and making the focused ``pi4`` device configuration the
 project default are intentional product-scope decisions.  They are not
-upstream candidates.
+upstream candidates.  Selecting QEMU's standard ``usb-storage`` device in the
+focused configuration is likewise a product and regression-test choice, not a
+machine dependency: external USB disks are optional guest-configured devices.
+The storage acceptance workload found no new generic QEMU USB, SCSI, or block
+bug candidate.
