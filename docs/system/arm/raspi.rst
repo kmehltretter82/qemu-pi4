@@ -49,8 +49,11 @@ Implemented devices
  * Peripheral SPI controller (SPI)
  * Broadcom Serial Controller (I2C)
  * BCM2711 PCIe host and root port, including dynamic outbound and inbound
-   DMA windows, INTx, and MSI; the guest PCIe node remains hidden until the
-   VL805 path is implemented
+   DMA windows, INTx, and MSI
+ * Pi 4-family VIA VL805 PCIe xHCI personality, including the captured PCI and
+   xHCI register layout, DMA-backed controller events, MSI, and PERST; the
+   guest PCIe node remains hidden pending the firmware reset interface, fixed
+   USB topology, and Linux boot validation
 
 Missing devices
 ---------------
@@ -60,9 +63,9 @@ Missing devices
  * BCM2711 HDMI/display pipeline and HDMI DDC I2C controllers
  * BCM2711 always-on L2 interrupt controller used by HDMI
  * Pulse Width Modulation (PWM)
- * Pi 4-family VIA VL805 USB 3 controller and remaining BCM2711 PCIe
-   controller-event behavior
- * Raspberry Pi 400 integrated keyboard, which is attached through the VL805
+ * Remaining BCM2711 PCIe controller-event behavior
+ * Pi 4-family external USB 2 hub and Raspberry Pi 400 integrated keyboard
+   topology behind the VL805
  * RNG200 random number generator
  * BCM2711 thermal sensor
 

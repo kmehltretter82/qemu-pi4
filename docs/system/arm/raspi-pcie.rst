@@ -27,7 +27,8 @@ because Compute Module 4 exposes PCIe for external devices instead.
 Current fork status
 -------------------
 
-The first two host-controller slices are implemented.  They provide the
+The first three implementation slices are now complete at the QEMU-device
+level.  The host-controller work provides the
 BCM2711 controller aperture, a Broadcom ``14e4:2711`` root port with PCI
 revision ``0x20`` and a Gen2 x1 capability, root and indirect configuration
 access, reset/link scaffolding, minimal synchronous MDIO/SSC behavior, four
@@ -47,13 +48,30 @@ PCI address, rejection outside the inbound window, reset gating, and MSI
 masking and clearing.  The earlier root, MDIO, absent-BDF, outbound-window and
 system-reset coverage remains.
 
+A fixed VIA ``1106:3483`` revision-one endpoint is populated at downstream
+slot zero by the Pi 4 Model B and Pi 400 boards, but not by the BCM2711 SoC
+model.  Its 4 KiB 64-bit BAR wraps QEMU's xHCI engine with the captured VL805
+register layout: 32 slots, four interrupters, one USB 2 port followed by four
+USB 3 ports, capability length ``0x20``, doorbells at ``0x100`` and runtime
+registers at ``0x200``.  The captured PM, four-vector MSI, PCIe v2, AER and
+xHCI extended-capability identities are present; MSI-X is absent.
+
+Qtests additionally prove the VL805 PCI identity and BAR, captured PCI and
+xHCI capability values, endpoint reset, and the functional data path.  A
+hot-plugged USB keyboard produces a port-status event which the xHCI engine
+writes through the private PCI DMA window before sending MSI through the
+BCM2711 doorbell to GIC SPI 148.  Both ``raspi4b`` and ``raspi400`` instantiate
+the fixed endpoint and its stable ``vl805.0`` USB bus.  A stopped-machine
+``raspi400`` file-migration smoke test also succeeds.
+
 This is deliberately not guest-visible PCIe support yet.  The PCIe
-device-tree node remains hidden while controller-event behavior, the VL805
-endpoint, firmware-requested reset, and the Pi 400 hub and keyboard topology
-are missing.  Link-up currently follows the two reset bits rather than
-endpoint link training, and the MDIO model completes operations immediately.
-An active-mapping migration qtest and a Linux boot with PCIe enabled also
-remain to be added.
+device-tree node remains hidden until the firmware-requested VL805 reset, the
+external USB 2 hub and Pi 400 keyboard topology, and an unmodified Linux boot
+are complete.  The advertised debug capability and vendor-specific extended
+capabilities currently provide captured read-only identity values rather than
+their proprietary behavior.  Link-up follows the two reset bits rather than
+endpoint link training, and MDIO operations complete immediately.  The host
+controller-event interrupt and an active-mapping migration qtest also remain.
 
 BCM2711 host requirements
 -------------------------
@@ -98,6 +116,12 @@ A read-only capture on 2026-08-22 confirms the controller aperture at
 * a 4 KiB 64-bit VL805 BAR mapped at CPU address ``0x600000000``; and
 * xHCI using MSI vector zero.
 
+The endpoint exposes PM at ``0x80``, a 64-bit four-vector MSI capability at
+``0x90``, PCIe v2 at ``0xc4``, and AER at ``0x100``.  Its xHCI capability
+registers report 32 slots, four interrupters and five protocol ports, with the
+single USB 2 port numbered before the four USB 3 ports.  The capability,
+doorbell and runtime offsets are ``0x20``, ``0x100`` and ``0x200``.
+
 The device tree assigns INTx A through D to SPIs 143 through 146, the
 controller event to SPI 147, and MSI to SPI 148.  USB enumeration confirms
 the ``2109:3431`` hub and ``04d9:0007`` Pi 400 keyboard.  Controller revision
@@ -128,7 +152,8 @@ Implementation stages
 2. Add the private inbound DMA mapping and complete MSI delivery.  This slice
    is implemented and covered with a DMA-capable test endpoint.
 3. Add the VL805 xHCI personality, populate it from the Pi board model, and
-   prove endpoint enumeration.
+   prove endpoint enumeration, DMA-backed events, MSI and PERST.  This slice
+   is implemented and covered by qtests.
 4. Implement the firmware ``NOTIFY_XHCI_RESET`` request as an observable
    endpoint reset without attempting to emulate proprietary VL805 firmware.
 5. Add the Pi 400 hub and integrated-keyboard topology.
