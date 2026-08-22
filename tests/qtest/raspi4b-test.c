@@ -7,6 +7,8 @@
 #include "qemu/osdep.h"
 #include "hw/arm/raspberrypi-fw-defs.h"
 #include "hw/misc/bcm2835_mbox_defs.h"
+#include "hw/pci/pci_ids.h"
+#include "hw/pci/pci_regs.h"
 #include "libqtest-single.h"
 #include "qemu/bswap.h"
 #include "qemu/iov.h"
@@ -75,6 +77,47 @@
 #define GENET_MDIO_DONE_IRQ           (1U << 23)
 #define GENET_MDIO_ERROR_IRQ          (1U << 24)
 
+#define RASPI4_PCIE_BASE             0xfd500000ULL
+#define RASPI4_PCIE_MDIO_ADDR        (RASPI4_PCIE_BASE + 0x1100)
+#define RASPI4_PCIE_MDIO_WR_DATA     (RASPI4_PCIE_BASE + 0x1104)
+#define RASPI4_PCIE_MDIO_RD_DATA     (RASPI4_PCIE_BASE + 0x1108)
+#define RASPI4_PCIE_OUT_LO           (RASPI4_PCIE_BASE + 0x400c)
+#define RASPI4_PCIE_OUT_HI           (RASPI4_PCIE_BASE + 0x4010)
+#define RASPI4_PCIE_STATUS           (RASPI4_PCIE_BASE + 0x4068)
+#define RASPI4_PCIE_MISC_REVISION    (RASPI4_PCIE_BASE + 0x406c)
+#define RASPI4_PCIE_BASE_LIMIT       (RASPI4_PCIE_BASE + 0x4070)
+#define RASPI4_PCIE_BASE_HI          (RASPI4_PCIE_BASE + 0x4080)
+#define RASPI4_PCIE_LIMIT_HI         (RASPI4_PCIE_BASE + 0x4084)
+#define RASPI4_PCIE_EXT_CFG_DATA     (RASPI4_PCIE_BASE + 0x8000)
+#define RASPI4_PCIE_EXT_CFG_INDEX    (RASPI4_PCIE_BASE + 0x9000)
+#define RASPI4_PCIE_SW_INIT          (RASPI4_PCIE_BASE + 0x9210)
+#define RASPI4_PCIE_VENDOR_REG1      (RASPI4_PCIE_BASE + 0x0188)
+#define RASPI4_PCIE_ID_VAL3          (RASPI4_PCIE_BASE + 0x043c)
+#define RASPI4_PCIE_PRIV_LINK_CAP    (RASPI4_PCIE_BASE + 0x04dc)
+#define RASPI4_PCIE_PRIV_ROOT_CAP    (RASPI4_PCIE_BASE + 0x04f8)
+
+#define PCIE_SW_INIT_PERST           (1U << 0)
+#define PCIE_SW_INIT_BRIDGE          (1U << 1)
+#define PCIE_SW_INIT_MASK            (PCIE_SW_INIT_PERST | \
+                                      PCIE_SW_INIT_BRIDGE)
+#define PCIE_STATUS_PHY_LINK_UP      (1U << 4)
+#define PCIE_STATUS_DL_ACTIVE        (1U << 5)
+#define PCIE_STATUS_RC_MODE          (1U << 7)
+#define PCIE_STATUS_LINK_MASK        (PCIE_STATUS_PHY_LINK_UP | \
+                                      PCIE_STATUS_DL_ACTIVE)
+#define PCIE_STATUS_TEST_MASK        (PCIE_STATUS_RC_MODE | \
+                                      PCIE_STATUS_LINK_MASK)
+
+#define BCM2711_PCIE_ID              0x271114e4U
+#define BCM2711_PCIE_REVISION        0x20U
+#define BCM2711_PCIE_CLASS_REV       \
+    (((uint32_t)PCI_CLASS_BRIDGE_PCI << 16) | BCM2711_PCIE_REVISION)
+#define BCM2711_PCIE_HW_REVISION     0x0320U
+#define BCM2711_PCIE_MDIO_DONE       (1U << 31)
+#define BCM2711_PCIE_MDIO_SSC_PLL    ((1U << 10) | (1U << 11))
+
+#define RASPI4_PCIE_CPU_WINDOW       0x600000000ULL
+
 #ifndef _WIN32
 static int genet_test_socket = -1;
 #endif
@@ -103,6 +146,252 @@ static bool qom_bus_has_sd_card(const char *path)
 
     qobject_unref(response);
     return found;
+}
+
+static uint32_t pcie_cfg_index(unsigned int bus, unsigned int slot,
+                               unsigned int function)
+{
+    return (bus << 20) | (slot << 15) | (function << 12);
+}
+
+static void pcie_assert_link(bool up)
+{
+    uint32_t expected = PCIE_STATUS_RC_MODE;
+
+    if (up) {
+        expected |= PCIE_STATUS_LINK_MASK;
+    }
+
+    g_assert_cmphex(readl(RASPI4_PCIE_STATUS) & PCIE_STATUS_TEST_MASK,
+                    ==, expected);
+}
+
+static void pcie_assert_root_identity(void)
+{
+    g_assert_cmphex(readl(RASPI4_PCIE_BASE + PCI_VENDOR_ID),
+                    ==, BCM2711_PCIE_ID);
+    g_assert_cmphex(readl(RASPI4_PCIE_BASE + PCI_CLASS_REVISION),
+                    ==, BCM2711_PCIE_CLASS_REV);
+    g_assert_cmphex(readb(RASPI4_PCIE_BASE + PCI_HEADER_TYPE) &
+                    PCI_HEADER_TYPE_MASK, ==, PCI_HEADER_TYPE_BRIDGE);
+    g_assert_cmphex(readb(RASPI4_PCIE_BASE + 0xac), ==, PCI_CAP_ID_EXP);
+    g_assert_cmphex(readl(RASPI4_PCIE_MISC_REVISION), ==,
+                    BCM2711_PCIE_HW_REVISION);
+    g_assert_cmphex(readl(RASPI4_PCIE_VENDOR_REG1), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PCIE_ID_VAL3), ==, 0x00060400);
+    g_assert_cmphex(readl(RASPI4_PCIE_PRIV_LINK_CAP), ==, 0x10);
+    g_assert_cmphex(readl(RASPI4_PCIE_PRIV_ROOT_CAP), ==, 0);
+}
+
+static void pcie_assert_qmp_root(uint8_t primary, uint8_t secondary,
+                                 uint8_t subordinate)
+{
+    g_autoptr(QDict) response =
+        qtest_qmp(global_qtest, "{ 'execute': 'query-pci' }");
+    QList *buses = qdict_get_qlist(response, "return");
+    QListEntry *bus_entry;
+
+    QLIST_FOREACH_ENTRY(buses, bus_entry) {
+        QDict *bus = qobject_to(QDict, qlist_entry_obj(bus_entry));
+        QList *devices;
+        QListEntry *dev_entry;
+
+        if (qdict_get_int(bus, "bus") != 0) {
+            continue;
+        }
+
+        devices = qdict_get_qlist(bus, "devices");
+        QLIST_FOREACH_ENTRY(devices, dev_entry) {
+            QDict *dev = qobject_to(QDict, qlist_entry_obj(dev_entry));
+            QDict *id;
+            QDict *class_info;
+            QDict *bridge;
+            QDict *bus_info;
+
+            if (qdict_get_int(dev, "slot") != 0 ||
+                qdict_get_int(dev, "function") != 0) {
+                continue;
+            }
+
+            id = qdict_get_qdict(dev, "id");
+            class_info = qdict_get_qdict(dev, "class_info");
+            bridge = qdict_get_qdict(dev, "pci_bridge");
+            bus_info = qdict_get_qdict(bridge, "bus");
+
+            g_assert_cmpint(qdict_get_int(id, "vendor"), ==, 0x14e4);
+            g_assert_cmpint(qdict_get_int(id, "device"), ==, 0x2711);
+            g_assert_cmpint(qdict_get_int(class_info, "class"), ==,
+                            PCI_CLASS_BRIDGE_PCI);
+            g_assert_cmpint(qdict_get_int(bus_info, "number"), ==, primary);
+            g_assert_cmpint(qdict_get_int(bus_info, "secondary"), ==,
+                            secondary);
+            g_assert_cmpint(qdict_get_int(bus_info, "subordinate"), ==,
+                            subordinate);
+            return;
+        }
+    }
+
+    g_assert_not_reached();
+}
+
+static void test_pcie_root_config(void)
+{
+    const uint32_t initial_buses = 0x00080100;
+    const uint32_t final_buses = 0x00080700;
+    const uint16_t command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
+
+    qtest_system_reset(global_qtest);
+    pcie_assert_root_identity();
+
+    writel(RASPI4_PCIE_BASE + PCI_VENDOR_ID, 0);
+    writel(RASPI4_PCIE_BASE + PCI_CLASS_REVISION, 0);
+    pcie_assert_root_identity();
+
+    writel(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS, initial_buses);
+    writeb(RASPI4_PCIE_BASE + PCI_SECONDARY_BUS, 7);
+    g_assert_cmphex(readl(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS), ==,
+                    final_buses);
+
+    writew(RASPI4_PCIE_BASE + PCI_COMMAND, command);
+    g_assert_cmphex(readw(RASPI4_PCIE_BASE + PCI_COMMAND), ==, command);
+
+    writel(RASPI4_PCIE_SW_INIT, 0);
+    writel(RASPI4_PCIE_SW_INIT, PCIE_SW_INIT_PERST);
+    g_assert_cmphex(readl(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS), ==,
+                    final_buses);
+    g_assert_cmphex(readw(RASPI4_PCIE_BASE + PCI_COMMAND), ==, command);
+
+    pcie_assert_qmp_root(0, 7, 8);
+    qtest_system_reset(global_qtest);
+}
+
+static void test_pcie_reset_link_and_mdio(void)
+{
+    qtest_system_reset(global_qtest);
+
+    g_assert_cmphex(readl(RASPI4_PCIE_SW_INIT), ==, PCIE_SW_INIT_MASK);
+    pcie_assert_link(false);
+
+    writel(RASPI4_PCIE_SW_INIT, PCIE_SW_INIT_PERST);
+    pcie_assert_link(false);
+    writel(RASPI4_PCIE_SW_INIT, 0);
+    pcie_assert_link(true);
+
+    writel(RASPI4_PCIE_SW_INIT, PCIE_SW_INIT_PERST);
+    pcie_assert_link(false);
+    writel(RASPI4_PCIE_SW_INIT, 0);
+    pcie_assert_link(true);
+    writel(RASPI4_PCIE_SW_INIT, PCIE_SW_INIT_BRIDGE);
+    pcie_assert_link(false);
+    writel(RASPI4_PCIE_SW_INIT, 0);
+    pcie_assert_link(true);
+
+    writel(RASPI4_PCIE_MDIO_ADDR, (1U << 20) | 1);
+    g_assert_cmphex(readl(RASPI4_PCIE_MDIO_RD_DATA), ==,
+                    BCM2711_PCIE_MDIO_DONE | BCM2711_PCIE_MDIO_SSC_PLL);
+    writel(RASPI4_PCIE_MDIO_WR_DATA, BCM2711_PCIE_MDIO_DONE | 0x1234);
+    g_assert_cmphex(readl(RASPI4_PCIE_MDIO_WR_DATA), ==, 0x1234);
+
+    qtest_system_reset(global_qtest);
+}
+
+static void test_pcie_indirect_absent(void)
+{
+    const uint32_t index = pcie_cfg_index(1, 31, 7);
+
+    qtest_system_reset(global_qtest);
+    writel(RASPI4_PCIE_EXT_CFG_INDEX, index);
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_INDEX), ==, index);
+
+    g_assert_cmphex(readb(RASPI4_PCIE_EXT_CFG_DATA), ==, 0xff);
+    g_assert_cmphex(readw(RASPI4_PCIE_EXT_CFG_DATA + PCI_DEVICE_ID), ==,
+                    0xffff);
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA + PCI_CLASS_REVISION), ==,
+                    0xffffffff);
+
+    writel(RASPI4_PCIE_SW_INIT, 0);
+    pcie_assert_link(true);
+    g_assert_cmphex(readb(RASPI4_PCIE_EXT_CFG_DATA), ==, 0xff);
+    g_assert_cmphex(readw(RASPI4_PCIE_EXT_CFG_DATA + PCI_DEVICE_ID), ==,
+                    0xffff);
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA + PCI_CLASS_REVISION), ==,
+                    0xffffffff);
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA + 0xffc), ==,
+                    0xffffffff);
+
+    writel(RASPI4_PCIE_EXT_CFG_DATA + PCI_VENDOR_ID, 0);
+    writew(RASPI4_PCIE_EXT_CFG_DATA + PCI_COMMAND, 0);
+    writeb(RASPI4_PCIE_EXT_CFG_DATA + 0xfff, 0);
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA), ==, 0xffffffff);
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA + 0xffc), ==,
+                    0xffffffff);
+
+    qtest_system_reset(global_qtest);
+}
+
+static void test_pcie_outbound_windows(void)
+{
+    qtest_system_reset(global_qtest);
+    g_assert_cmphex(readl(RASPI4_PCIE_CPU_WINDOW), ==, 0);
+
+    /* Linux 7.2 DT: CPU 0x600000000 -> PCI 0xf8000000, 64 MiB. */
+    writel(RASPI4_PCIE_OUT_LO, 0xf8000000);
+    writel(RASPI4_PCIE_OUT_HI, 0);
+    writel(RASPI4_PCIE_BASE_LIMIT, 0x03f00000);
+    writel(RASPI4_PCIE_BASE_HI, 6);
+    writel(RASPI4_PCIE_LIMIT_HI, 6);
+    g_assert_cmphex(readl(RASPI4_PCIE_CPU_WINDOW), ==, 0xffffffff);
+
+    /* Deployed firmware DT: the same CPU base maps 1 GiB at PCI c0000000. */
+    writel(RASPI4_PCIE_OUT_LO, 0xc0000000);
+    writel(RASPI4_PCIE_BASE_LIMIT, 0x3ff00000);
+    g_assert_cmphex(readl(RASPI4_PCIE_CPU_WINDOW), ==, 0xffffffff);
+
+    /* Making base greater than limit removes the old CPU mapping. */
+    writel(RASPI4_PCIE_BASE_HI, 0xff);
+    g_assert_cmphex(readl(RASPI4_PCIE_CPU_WINDOW), ==, 0);
+
+    qtest_system_reset(global_qtest);
+}
+
+static void test_pcie_system_reset(void)
+{
+    const uint32_t index = pcie_cfg_index(1, 31, 7);
+
+    qtest_system_reset(global_qtest);
+    writel(RASPI4_PCIE_SW_INIT, 0);
+    writel(RASPI4_PCIE_EXT_CFG_INDEX, index);
+    writel(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS, 0x5a080700);
+    writew(RASPI4_PCIE_BASE + PCI_COMMAND,
+           PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+    writel(RASPI4_PCIE_VENDOR_REG1, 0xffffffff);
+    writel(RASPI4_PCIE_ID_VAL3, 0xffffffff);
+    writel(RASPI4_PCIE_PRIV_LINK_CAP, 0xffffffff);
+    writel(RASPI4_PCIE_PRIV_ROOT_CAP, 0xffffffff);
+    g_assert_cmphex(readl(RASPI4_PCIE_VENDOR_REG1), ==, 0x0c);
+    g_assert_cmphex(readl(RASPI4_PCIE_ID_VAL3), ==, 0x00ffffff);
+    g_assert_cmphex(readl(RASPI4_PCIE_PRIV_LINK_CAP), ==, 0x1f0);
+    g_assert_cmphex(readl(RASPI4_PCIE_PRIV_ROOT_CAP), ==, 0xf8);
+
+    writel(RASPI4_PCIE_OUT_LO, 0xf8000000);
+    writel(RASPI4_PCIE_OUT_HI, 0);
+    writel(RASPI4_PCIE_BASE_LIMIT, 0x03f00000);
+    writel(RASPI4_PCIE_BASE_HI, 6);
+    writel(RASPI4_PCIE_LIMIT_HI, 6);
+    g_assert_cmphex(readl(RASPI4_PCIE_CPU_WINDOW), ==, 0xffffffff);
+
+    pcie_assert_link(true);
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_INDEX), ==, index);
+
+    qtest_system_reset(global_qtest);
+    pcie_assert_root_identity();
+    g_assert_cmphex(readl(RASPI4_PCIE_SW_INIT), ==, PCIE_SW_INIT_MASK);
+    pcie_assert_link(false);
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_INDEX), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS), ==, 0);
+    g_assert_cmphex(readw(RASPI4_PCIE_BASE + PCI_COMMAND), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PCIE_CPU_WINDOW), ==, 0);
+    pcie_assert_qmp_root(0, 0, 0);
 }
 
 static void test_cpu_configuration(void)
@@ -449,6 +738,14 @@ int main(int argc, char **argv)
     qtest_add_func("/raspi4b/firmware_gpio", test_firmware_gpio);
     qtest_add_func("/raspi4b/firmware_dma_channels",
                    test_firmware_dma_channels);
+    qtest_add_func("/raspi4b/pcie/root_config", test_pcie_root_config);
+    qtest_add_func("/raspi4b/pcie/reset_link_and_mdio",
+                   test_pcie_reset_link_and_mdio);
+    qtest_add_func("/raspi4b/pcie/indirect_absent",
+                   test_pcie_indirect_absent);
+    qtest_add_func("/raspi4b/pcie/outbound_windows",
+                   test_pcie_outbound_windows);
+    qtest_add_func("/raspi4b/pcie/system_reset", test_pcie_system_reset);
     qtest_add_func("/raspi4b/genet/registers_and_mdio",
                    test_genet_registers_and_mdio);
 #ifndef _WIN32

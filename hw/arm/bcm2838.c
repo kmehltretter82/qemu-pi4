@@ -259,6 +259,13 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
                        qdev_get_gpio_in(gicdev,
                                        GIC_SPI_INTERRUPT_GENET_B));
 
+    /* Connect PCIe INTx A-D, controller-event, and MSI outputs. */
+    for (int n = 0; n < BCM2711_PCIE_NUM_IRQS; n++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ps->pcie), n,
+                           qdev_get_gpio_in(gicdev,
+                                           GIC_SPI_INTERRUPT_PCI_INT_A + n));
+    }
+
     /* Connect USB OTG and MPHI to the interrupt controller */
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->mphi), 0,
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_MPHI));

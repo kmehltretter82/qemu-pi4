@@ -369,6 +369,7 @@ config RASPI4
     select BCM2835_SPI
     select BCM2835_I2C
     select BCM2838_GENET
+    select PCI_EXPRESS_BCM2711
     select OR_IRQ
     select SPLIT_IRQ
     select UNIMP

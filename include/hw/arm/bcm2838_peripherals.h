@@ -13,6 +13,7 @@
 #include "hw/sd/sdhci.h"
 #include "hw/gpio/bcm2838_gpio.h"
 #include "hw/net/bcm2838_genet.h"
+#include "hw/pci-host/bcm2711.h"
 
 /* SPI */
 #define GIC_SPI_INTERRUPT_MBOX         33
@@ -32,6 +33,11 @@
 #define GIC_SPI_INTERRUPT_RNG200       125
 #define GIC_SPI_INTERRUPT_EMMC_EMMC2   126
 #define GIC_SPI_INTERRUPT_PCI_INT_A    143
+#define GIC_SPI_INTERRUPT_PCI_INT_B    144
+#define GIC_SPI_INTERRUPT_PCI_INT_C    145
+#define GIC_SPI_INTERRUPT_PCI_INT_D    146
+#define GIC_SPI_INTERRUPT_PCIE         147
+#define GIC_SPI_INTERRUPT_PCIE_MSI     148
 #define GIC_SPI_INTERRUPT_GENET_A      157
 #define GIC_SPI_INTERRUPT_GENET_B      158
 
@@ -71,6 +77,7 @@ struct BCM2838PeripheralState {
     SDHCIState emmc2;
     BCM2838GpioState gpio;
     BCM2838GenetState genet;
+    BCM2711PcieHostState pcie;
 
     OrIRQState mmc_irq_orgate;
     OrIRQState dma_7_8_irq_orgate;

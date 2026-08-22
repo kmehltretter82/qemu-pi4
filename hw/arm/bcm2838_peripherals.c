@@ -70,6 +70,10 @@ static void bcm2838_peripherals_init(Object *obj)
     /* GENET v5 Ethernet controller */
     object_initialize_child(obj, "genet", &s->genet, TYPE_BCM2838_GENET);
 
+    /* BCM2711 PCIe host controller */
+    object_initialize_child(obj, "pcie", &s->pcie,
+                            TYPE_BCM2711_PCIE_HOST);
+
     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhci",
                                    OBJECT(&s_base->sdhci.sdbus));
     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhost",
@@ -224,6 +228,14 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(
         &s_base->peri_mr, GPIO_OFFSET,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpio), 0));
+
+    /* PCIe host registers are in the BCM2711 lower-peripheral window. */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->pcie), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s->peri_low_mr, PCIE_RC_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pcie), 0));
 
     /* GENET is in the BCM2711 lower-peripheral window. */
     qemu_configure_nic_device(DEVICE(&s->genet), true, "genet");

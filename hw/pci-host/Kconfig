@@ -50,6 +50,12 @@ config PCI_EXPRESS_ASPEED
     bool
     select PCI_EXPRESS
 
+config PCI_EXPRESS_BCM2711
+    bool
+    select PCI_EXPRESS
+    select MSI_NONBROKEN
+    select PCIE_PORT
+
 config PCI_EXPRESS_Q35
     bool
     select PCI_EXPRESS

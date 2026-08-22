@@ -1019,8 +1019,10 @@ L: qemu-arm@nongnu.org
 S: Odd Fixes
 F: hw/arm/raspi*.c
 F: hw/*/bcm283*
+F: hw/pci-host/bcm2711.c
 F: include/hw/arm/rasp*
 F: include/hw/*/bcm283*
+F: include/hw/pci-host/bcm2711.h
 F: docs/system/arm/raspi*.rst
 F: scripts/check-pi4-machines.py
 F: scripts/pi4/
