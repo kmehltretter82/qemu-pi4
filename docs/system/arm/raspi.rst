@@ -22,8 +22,8 @@ require separate models.
 
 Potential correctness fixes and enhancements suitable for later submission
 to QEMU are kept in the evidence-based :doc:`raspi-upstream` tracker.
-The fidelity requirements and staged acceptance tests for the missing Pi 400
-USB path are recorded in :doc:`raspi-pcie`.
+The implementation evidence and remaining fidelity work for the Pi 4-family
+PCIe and external USB path are recorded in :doc:`raspi-pcie`.
 The separate :doc:`raspi-gicv2-lab` project will exercise the GICv2
 virtualization interface across this fork, Linux KVM, and real Pi 4-family
 hardware.  Its first real Pi 400 boot is intentionally deferred until its
@@ -52,9 +52,12 @@ Implemented devices
  * BCM2711 PCIe host and root port, including dynamic outbound and inbound
    DMA windows, INTx, and MSI
  * Pi 4-family VIA VL805 PCIe xHCI personality, including the captured PCI and
-   xHCI register layout, DMA-backed controller events, MSI, and PERST; the
-   guest PCIe node remains hidden pending the fixed USB topology and Linux boot
-   validation
+   xHCI register layout, multi-segment event rings, DMA-backed controller
+   events, MSI, PERST, migration state, and a guest-visible PCIe device-tree
+   node
+ * VIA ``2109:3431`` four-port high-speed USB hub on both boards
+ * Raspberry Pi 400 ``04d9:0007`` low-speed integrated keyboard, including
+   its keyboard and consumer-control HID interfaces
 
 Missing devices
 ---------------
@@ -65,8 +68,9 @@ Missing devices
  * BCM2711 always-on L2 interrupt controller used by HDMI
  * Pulse Width Modulation (PWM)
  * Remaining BCM2711 PCIe controller-event behavior
- * Pi 4-family external USB 2 hub and Raspberry Pi 400 integrated keyboard
-   topology behind the VL805
+ * Consumer-control key-event production for the Pi 400 keyboard's second HID
+   interface; its identity, descriptors, enumeration and migration already
+   work
  * RNG200 random number generator
  * BCM2711 thermal sensor
 

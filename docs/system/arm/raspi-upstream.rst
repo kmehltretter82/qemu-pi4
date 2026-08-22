@@ -25,6 +25,17 @@ Classification
   Missing behavior may be useful upstream, but its absence is not itself a
   regression or implementation error.
 
+``known limitation``
+  An upstream approximation is already acknowledged; a new report needs
+  materially new impact or a viable improvement.
+
+``needs specification``
+  An observation is not yet tied to a current-upstream contract violation.
+
+``not a bug``
+  The tested behavior is permitted, the test is invalid, or the difference is
+  solely project policy.
+
 ``fork-only``
   The change serves this project's deliberately narrow scope and should not
   be proposed to general-purpose QEMU.
@@ -293,6 +304,7 @@ QP4-UP-020: BCM2711 PCIe host and root-port model
 :Classification: enhancement candidate
 :Fork commit: ``1bf939f2b26d4d2f5300a191d5d3e27f7060a88d``
 :Fork follow-up: ``4c0d24ef7728a4050357ebf980d9b3b94be1cd50``
+:Fork completion: ``e5ff7235c7ea8b1cacd43337b9200cb410c02f50``
 :Observed issue: Upstream QEMU has no BCM2711 PCIe host model, so the
   Raspberry Pi 4 machine must hide the PCIe device-tree node and cannot expose
   the board's VL805 USB path.
@@ -300,13 +312,16 @@ QP4-UP-020: BCM2711 PCIe host and root-port model
   indirect configuration access, reset/link and minimal MDIO behavior,
   programmable outbound windows, INTx routing, GIC outputs, and migration
   state.  The follow-up adds a private RAM-only DMA address space, BAR2 inbound
-  mapping, and the 32-vector MSI status/mask/doorbell path.  VL805 and guest DT
-  exposure remain intentionally out of scope.
+  mapping, and the 32-vector MSI status/mask/doorbell path.  The completed fork
+  also adds the fixed VL805 endpoint, its firmware-notification behavior,
+  active-mapping migration coverage, a VIA hub and the Pi 400 keyboard, then
+  exposes the guest DT node.  Pinned unmodified Linux v7.2 passes the full path
+  on both board models.
 :Before sending: Confirm controller revision and reset semantics with raw Pi
-  400 MMIO, add an active-mapping migration test, split model, SoC wiring and
-  qtests as appropriate, and address machine-version compatibility before
-  adding a PCI root bus to an existing machine type.  Downstream-device, INTx,
-  private-DMA and MSI qtests now provide the functional controller evidence.
+  400 MMIO, split model, SoC wiring and qtests as appropriate, and address
+  machine-version compatibility before adding a PCI root bus to an existing
+  machine type.  Downstream-device, INTx, private-DMA, MSI, active-migration
+  qtests and the Linux boots provide the functional controller evidence.
 
 QP4-UP-021: virtual SGI source is missing from GICV_HPPIR
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -355,6 +370,56 @@ QP4-UP-022: first unimplemented GICH List Register is not RAZ/WI
   write-ignored when VTR advertises four LRs.  The disposable AI-assisted lab
   check is research evidence only and must not be submitted as an upstream
   test or patch.
+
+QP4-UP-023: multi-segment xHCI event-ring support
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: enhancement candidate
+:Fork commit: ``e5ff7235c7ea8b1cacd43337b9200cb410c02f50``
+:Upstream source checked: ``ae4f3443209ab154b48b706a146e5f557ab147cb``
+:Contract: ``HCSPARAMS2.ERST Max`` advertises the number of event-ring
+  segments a controller accepts.  Generic upstream QEMU advertises exponent
+  zero, or one segment, and therefore does not violate its advertised
+  contract by rejecting ``ERSTSZ != 1``.
+:Fork requirement: The captured VL805 value advertises exponent three, or up
+  to eight segments.  Pinned unmodified Linux v7.2 programs two segments and
+  otherwise enters Host Controller Error when run against the old
+  single-segment engine.
+:Fork change: Retain the one-segment generic personality, let the VL805 use up
+  to eight validated noncontiguous segments, handle DESI/dequeue and complete
+  ring wrap correctly, migrate the active segment and index while accepting
+  version-one streams, and add focused active-ring and migration qtests.
+:Before sending: Treat this only as a generic xHCI enhancement, decouple it
+  from the fork's VL805 personality, decide how a general device opts into a
+  larger advertised maximum, test additional guests and migration
+  compatibility, and have a human reimplement any proposal under QEMU's
+  current code-provenance rules.
+
+QP4-UP-024: repeated qtest system reset can hang on macOS
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: needs specification
+:Fork workaround commit: ``e5ff7235c7ea8b1cacd43337b9200cb410c02f50``
+:Observed issue: On macOS 14.8.7 on Apple Silicon, a full default-device
+  build repeatedly hung while one ``-accel qtest`` process served several
+  ``raspi4b`` test cases separated by QMP ``system_reset``.  The QMP client
+  waited for the reset response, QEMU's main thread was in
+  ``pause_all_vcpus()``, and one of the four dummy CPU threads was waiting in
+  ``sigwait()``.  This was reproducible in the fork test layout and could leave
+  orphaned qtest processes.  Giving every test case a fresh QEMU process made
+  normal focused and default-device runs reliable, but a three-way parallel
+  repetition of the focused suite still wedged two fresh QEMU instances on
+  their sole QMP reset; the qtest harness killed them after 30 seconds.  The
+  device-reset tests now use the emulated Pi watchdog's guest reset path,
+  which preserves reset coverage without depending on the suspect QMP path.
+:Why not a bug candidate yet: The observation has not been reduced or
+  reproduced on an unmodified current ``master`` build, and no Pi-specific
+  device has been excluded as the trigger.  There is therefore no E1 evidence
+  or established current-upstream regression.
+:Before sending: Build current unmodified upstream on the same host, minimize
+  to a generic four-CPU qtest machine and repeated valid QMP resets, search
+  GitLab and qemu-devel for Darwin signal/reset duplicates, retain exact
+  commands and thread stacks, and have the user manually validate the result.
 
 Rejected and research-only findings
 ------------------------------------
@@ -408,11 +473,13 @@ invent it.
 Known feature gaps, not bug candidates
 --------------------------------------
 
-The absence of PCIe/VL805 USB 3, V3D 4.2, RNG200, thermal, and HDMI models is
-tracked as implementation scope in :doc:`raspi`.  These are substantial
+The absence of V3D 4.2, RNG200, thermal, and HDMI models, the unimplemented
+BCM2711 PCIe controller-event path, and missing Pi 400 consumer-control event
+production are tracked as implementation scope in :doc:`raspi`.  These are
 upstream enhancement opportunities, but should not be described as
-correctness bugs merely because the models do not exist.  The fork's GENET v5
-model belongs in the same enhancement category and is tracked as QP4-UP-014.
+correctness bugs merely because the models or optional behavior do not exist.
+The fork's GENET v5, BCM2711 PCIe and VL805 models belong in the same
+enhancement category and are tracked above.
 
 The defects found while reviewing the unmerged July 2026 PCIe series are kept
 in :doc:`raspi-pcie` and intentionally have no ``QP4-UP`` bug IDs.  They are

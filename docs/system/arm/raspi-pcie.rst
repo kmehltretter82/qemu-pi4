@@ -1,5 +1,5 @@
-Raspberry Pi 4 PCIe and VL805 implementation status and plan
-============================================================
+Raspberry Pi 4 PCIe, VL805 and external USB status
+==================================================
 
 The Pi 4 family's external USB ports are not attached to BCM2711's internal
 xHCI block. They are reached through the BCM2711 PCIe root complex and a VIA
@@ -8,16 +8,16 @@ that VL805 path as well. Enabling the internal xHCI or substituting a generic
 ECAM host would therefore produce a useful virtual computer but not a faithful
 Pi 400.
 
-Target topology
----------------
+Implemented topology
+--------------------
 
-The first complete topology should be::
+The board models now expose::
 
   BCM2711 PCIe host at 0xfd500000
     00:00.0 Broadcom root port [14e4:2711]
       01:00.0 VIA Labs VL805 xHCI [1106:3483]
-        USB 2 hub [2109:3431]
-          Pi 400 keyboard [04d9:0007]
+        USB 2 hub [2109:3431], four high-speed downstream ports
+          Pi 400 keyboard [04d9:0007], on hub port 4 (Pi 400 only)
         USB 3 ports
 
 The host controller belongs to the BCM2711 SoC. The fixed VL805 population is
@@ -27,13 +27,12 @@ because Compute Module 4 exposes PCIe for external devices instead.
 Current fork status
 -------------------
 
-The first four implementation slices are now complete at the QEMU-device
-level.  The host-controller work provides the
-BCM2711 controller aperture, a Broadcom ``14e4:2711`` root port with PCI
-revision ``0x20`` and a Gen2 x1 capability, root and indirect configuration
-access, reset/link scaffolding, minimal synchronous MDIO/SSC behavior, four
-guest-programmed outbound windows, INTx routing, all six GIC outputs, and
-migration state.
+All five implementation slices are complete, and the PCIe device-tree node is
+guest-visible.  The host-controller work provides the BCM2711 controller
+aperture, a Broadcom ``14e4:2711`` root port with PCI revision ``0x20`` and a
+Gen2 x1 capability, root and indirect configuration access, reset/link
+scaffolding, minimal synchronous MDIO/SSC behavior, four guest-programmed
+outbound windows, INTx routing, all six GIC outputs, and migration state.
 
 Downstream bus masters now use a private PCI DMA address space.  BCM2711 BAR2
 maps only the guest-programmed inbound portion of SDRAM; CPU peripheral MMIO
@@ -57,12 +56,23 @@ registers at ``0x200``.  The captured PM, four-vector MSI, PCIe v2, AER and
 xHCI extended-capability identities are present; MSI-X is absent.
 
 Qtests additionally prove the VL805 PCI identity and BAR, captured PCI and
-xHCI capability values, endpoint reset, and the functional data path.  A
-hot-plugged USB keyboard produces a port-status event which the xHCI engine
-writes through the private PCI DMA window before sending MSI through the
-BCM2711 doorbell to GIC SPI 148.  Both ``raspi4b`` and ``raspi400`` instantiate
-the fixed endpoint and its stable ``vl805.0`` USB bus.  A stopped-machine
-``raspi400`` file-migration smoke test also succeeds.
+xHCI capability values, endpoint reset, and the functional data path.  A USB
+port reset produces a port-status event which the xHCI engine writes through
+the private PCI DMA window before sending MSI through the BCM2711 doorbell to
+GIC SPI 148.  Both ``raspi4b`` and ``raspi400`` instantiate the fixed endpoint,
+its stable ``vl805.0`` USB bus, and a high-speed VIA ``2109:3431`` hub.  The
+``raspi400`` board additionally places its low-speed ``04d9:0007`` integrated
+keyboard on hub port four.  Its two HID interfaces reproduce the captured
+keyboard and consumer-control descriptors; QEMU input events currently drive
+only the keyboard interface.
+
+The VL805 advertises an ERST Max exponent of three and accepts up to eight
+event-ring segments.  The engine validates each segment, crosses noncontiguous
+segment boundaries, interprets the ERDP DESI hint, and toggles the producer
+cycle only on a complete ring wrap.  Qtests exercise a two-segment active ring
+and file-migrate it while the producer is in the second segment, then prove
+that the destination writes the next event at the migrated segment and index.
+Version-one single-segment xHCI migration streams remain loadable.
 
 The firmware property interface implements ``NOTIFY_XHCI_RESET`` for the
 board-level VL805 at firmware-encoded BDF ``01:00.0``.  It returns the
@@ -74,14 +84,14 @@ while this call tells VideoCore firmware to initialize the VL805 afterward.
 Qtests cover both status results, the valid-request halt, and preserved
 ``CONFIG``, BAR and command-register state.
 
-This is deliberately not guest-visible PCIe support yet.  The PCIe
-device-tree node remains hidden until the external USB 2 hub and Pi 400
-keyboard topology and an unmodified Linux boot are complete.  The advertised
-debug capability and vendor-specific extended capabilities currently provide
-captured read-only identity values rather than their proprietary behavior.
-Link-up follows the two reset bits rather than endpoint link training, and
-MDIO operations complete immediately.  The host controller-event interrupt
-and an active-mapping migration qtest also remain.
+The guest-visible path passes the pinned unmodified Linux v7.2 acceptance boot
+on both boards.  Remaining approximations are narrower: the advertised debug
+capability and vendor-specific extended capabilities provide captured
+read-only identity values rather than proprietary behavior, link-up follows
+the two reset bits rather than endpoint link training, MDIO operations
+complete immediately, and the host controller-event interrupt is not yet
+modeled.  The Pi 400 consumer-control HID endpoint enumerates but does not yet
+produce media-key events.
 
 BCM2711 host requirements
 -------------------------
@@ -133,11 +143,13 @@ single USB 2 port numbered before the four USB 3 ports.  The capability,
 doorbell and runtime offsets are ``0x20``, ``0x100`` and ``0x200``.
 
 The device tree assigns INTx A through D to SPIs 143 through 146, the
-controller event to SPI 147, and MSI to SPI 148.  USB enumeration confirms
-the ``2109:3431`` hub and ``04d9:0007`` Pi 400 keyboard.  Controller revision
-``0x0320`` at offset ``0x406c`` is currently inferred from the observed PCI
-revision and Linux behavior; it has not yet been confirmed by a raw MMIO
-capture.
+controller event to SPI 147, and MSI to SPI 148.  USB enumeration shows a
+480 Mbit/s USB 2 root hub with one port leading to a four-port high-speed
+``2109:3431`` hub.  The ``04d9:0007`` Pi 400 keyboard is a 1.5 Mbit/s device on
+hub port four with two HID interfaces.  The separate USB 3 root hub has four
+5 Gbit/s ports.  Controller revision ``0x0320`` at offset ``0x406c`` is
+currently inferred from the observed PCI revision and Linux behavior; it has
+not yet been confirmed by a raw MMIO capture.
 
 A controlled follow-up with the xHCI driver unbound tested property tag
 ``0x00030058`` directly through ``/dev/vcio``.  Request data ``0x00100000``
@@ -158,16 +170,14 @@ every Pi 4 board revision.
 VL805 requirements
 ------------------
 
-The first functional endpoint can wrap QEMU's existing xHCI engine, but it must
-identify as VIA ``1106:3483`` and should evolve into a parameterized VL805
-personality. Generic ``qemu-xhci`` differs in BAR size, capability length,
-doorbell and runtime offsets, ports, slots, interrupters and PCI capabilities.
-A faithful personality should expose the hardware's PM, MSI, PCIe and AER
-capability chain and omit MSI-X.
+The endpoint wraps QEMU's xHCI engine in a VL805 register and PCI personality.
+It identifies as VIA ``1106:3483`` and differs from generic ``qemu-xhci`` in
+BAR size, capability length, doorbell and runtime offsets, ports, slots,
+interrupters, ERST maximum and PCI capabilities.  It exposes the captured PM,
+MSI, PCIe and AER capability chain and omits MSI-X.
 
-Disabling MSI is only a diagnostic fallback. The PCIe node must remain hidden
-from the guest until DMA-backed xHCI events and MSI delivery work; enumeration
-alone is not the completion criterion.
+MSI, private DMA, event delivery and the fixed board topology are required
+parts of the guest-visible model, not optional enumeration shortcuts.
 
 Implementation stages
 ---------------------
@@ -184,21 +194,27 @@ Implementation stages
    valid/invalid BDF status values and controller halt without turning it into
    a cold reset or attempting to emulate proprietary VL805 firmware.  This
    slice is implemented and covered by qtests.
-5. Add the Pi 400 hub and integrated-keyboard topology.
+5. Add the Pi 4-family VIA hub and Pi 400 integrated-keyboard topology.  This
+   slice is implemented and covered by qtests and Linux acceptance boots.
 
 Required tests
 --------------
 
-Qtests must cover reset and link transitions, revision and MDIO completion,
-root and endpoint IDs, indirect configuration, both known outbound-window
-layouts, DMA below 3 GiB, DMA rejection outside the inbound range, INTx, MSI
-masking and clearing, firmware-notification status, halt-without-cold-reset
-behavior, preserved register state, and migration.
+Qtests cover reset and link transitions, revision and MDIO completion, root
+and endpoint IDs, indirect configuration, both known outbound-window layouts,
+DMA below 3 GiB, DMA rejection outside the inbound range, INTx, MSI masking
+and clearing, firmware-notification status, halt-without-cold-reset behavior,
+preserved register state, fixed USB topology, multi-segment event rings, and
+active-ring migration.
 
-The Linux acceptance test must boot an unmodified Pi DT with its PCIe node
-enabled. It must show ``14e4:2711`` and ``1106:3483`` in ``lspci -nn``,
-enumerate xHCI root hubs, transfer keyboard or storage traffic, show increasing
-MSI interrupt counters, and survive controller unbind/rebind or reset.
+The pinned unmodified Linux v7.2 acceptance test passes on ``raspi4b`` and
+``raspi400`` with their upstream DTBs.  It verifies ``14e4:2711`` and
+``1106:3483``, both xHCI root hubs, the ``2109:3431`` hub, and nonzero MSI
+activity.  On ``raspi400`` it additionally verifies ``04d9:0007`` and both HID
+interfaces.  It unbinds and rebinds the xHCI driver, proves that the hub,
+keyboard and HID interfaces re-enumerate as applicable, observes fresh MSI
+activity, and obtains a DHCP lease through GENET.  Pi 4 Model B correctly has
+no integrated keyboard.
 
 External work under review
 --------------------------

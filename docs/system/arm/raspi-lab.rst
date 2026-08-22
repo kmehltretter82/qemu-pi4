@@ -64,9 +64,15 @@ add::
   --machine raspi400
 
 The runner connects the emulated GENET controller to QEMU user-mode
-networking and requests a DHCP lease.  The initramfs prints basic kernel
-hardware state, carrier, the assigned IPv4 address, network counters and the
-marker ``PI4-LAB: upstream Linux boot successful``, then requests poweroff.
+networking and requests a DHCP lease.  The initramfs verifies the exact
+BCM2711 root-port and VL805 PCI identities, both xHCI root hubs, the VIA
+``2109:3431`` hub, nonzero MSI activity, and a successful xHCI driver
+unbind/rebind followed by re-enumeration and fresh MSI activity.  On
+``raspi400`` it also requires the ``04d9:0007`` integrated keyboard and both
+of its HID interfaces; ``raspi4b`` correctly omits those checks.  It prints
+basic kernel and network state, the assigned IPv4 address, and the marker
+``PI4-LAB: upstream Linux boot successful``, then requests reboot.  The runner
+uses ``-no-reboot``, so that successful request terminates QEMU.
 
 The same kernel and unmodified upstream Pi 4 DTB can also mount a normal
 Linux root filesystem from the emulated external SD card.  Attach the image
