@@ -144,8 +144,46 @@
 #define RASPI4_PCIE_EDU_CPU_BAR      RASPI4_PCIE_CPU_WINDOW
 #define RASPI4_PCIE_EDU_ID           0x11e81234U
 #define RASPI4_PCIE_EDU_MAGIC        0x010000edU
-#define RASPI4_PCIE_EDU_GIC_INTX     143
+#define RASPI4_PCIE_INTX_FIRST       143
+#define RASPI4_PCIE_INTX_LAST        146
+#define RASPI4_PCIE_EDU_GIC_INTX     144
 #define RASPI4_PCIE_EDU_GIC_MSI      148
+
+#define RASPI4_PCIE_VL805_PCI_BAR    0xf8000000U
+#define RASPI4_PCIE_VL805_CPU_BAR    RASPI4_PCIE_CPU_WINDOW
+#define RASPI4_PCIE_VL805_ID         0x34831106U
+#define RASPI4_PCIE_VL805_CLASS_REV  0x0c033001U
+#define RASPI4_PCIE_VL805_PM_CAP     0x80
+#define RASPI4_PCIE_VL805_MSI_CAP    0x90
+#define RASPI4_PCIE_VL805_PCIE_CAP   0xc4
+#define RASPI4_PCIE_VL805_AER_CAP    0x100
+#define RASPI4_PCIE_VL805_GIC_MSI    148
+
+#define VL805_XHCI_CAPLENGTH          0x20
+#define VL805_XHCI_DOORBELL           0x100
+#define VL805_XHCI_RUNTIME            0x200
+#define VL805_XHCI_PORT1              0x420
+#define VL805_XHCI_USBCMD             (VL805_XHCI_CAPLENGTH + 0x00)
+#define VL805_XHCI_USBSTS             (VL805_XHCI_CAPLENGTH + 0x04)
+#define VL805_XHCI_IMAN0              (VL805_XHCI_RUNTIME + 0x20)
+#define VL805_XHCI_ERSTSZ0            (VL805_XHCI_RUNTIME + 0x28)
+#define VL805_XHCI_ERSTBA0            (VL805_XHCI_RUNTIME + 0x30)
+#define VL805_XHCI_ERDP0              (VL805_XHCI_RUNTIME + 0x38)
+#define VL805_XHCI_USBCMD_RUN         (1U << 0)
+#define VL805_XHCI_USBCMD_INTE        (1U << 2)
+#define VL805_XHCI_USBSTS_HCH         (1U << 0)
+#define VL805_XHCI_IMAN_IE            (1U << 1)
+#define VL805_XHCI_PORTSC_CCS         (1U << 0)
+#define VL805_XHCI_PORTSC_SPEED_MASK  (0xfU << 10)
+#define VL805_XHCI_PORTSC_SPEED_HIGH  (3U << 10)
+#define VL805_XHCI_PORTSC_CSC         (1U << 17)
+#define VL805_XHCI_TRB_CYCLE          (1U << 0)
+#define VL805_XHCI_TRB_TYPE_SHIFT     10
+#define VL805_XHCI_TRB_PORT_STATUS    34U
+#define VL805_XHCI_CC_SUCCESS         1U
+#define VL805_XHCI_ERST_CPU           0x20000ULL
+#define VL805_XHCI_EVENT_RING_CPU     0x21000ULL
+#define VL805_XHCI_EVENT_RING_TRBS    16U
 
 #define EDU_IRQ_STATUS               0x24
 #define EDU_IRQ_RAISE                0x60
@@ -278,54 +316,80 @@ static void pcie_assert_qmp_root(uint8_t primary, uint8_t secondary,
     g_assert_not_reached();
 }
 
-static void pcie_select_edu(void)
+static void pcie_select_endpoint(unsigned int slot)
 {
-    writel(RASPI4_PCIE_EXT_CFG_INDEX, pcie_cfg_index(1, 0, 0));
+    writel(RASPI4_PCIE_EXT_CFG_INDEX, pcie_cfg_index(1, slot, 0));
 }
 
-static uint8_t pcie_edu_cfg_readb(unsigned int offset)
+static uint8_t pcie_endpoint_cfg_readb(unsigned int slot, unsigned int offset)
 {
-    pcie_select_edu();
+    pcie_select_endpoint(slot);
     return readb(RASPI4_PCIE_EXT_CFG_DATA + offset);
 }
 
-static uint16_t pcie_edu_cfg_readw(unsigned int offset)
+static uint16_t pcie_endpoint_cfg_readw(unsigned int slot,
+                                        unsigned int offset)
 {
-    pcie_select_edu();
+    pcie_select_endpoint(slot);
     return readw(RASPI4_PCIE_EXT_CFG_DATA + offset);
 }
 
-static uint32_t pcie_edu_cfg_readl(unsigned int offset)
+static uint32_t pcie_endpoint_cfg_readl(unsigned int slot,
+                                        unsigned int offset)
 {
-    pcie_select_edu();
+    pcie_select_endpoint(slot);
     return readl(RASPI4_PCIE_EXT_CFG_DATA + offset);
 }
 
-static void pcie_edu_cfg_writew(unsigned int offset, uint16_t value)
+static void pcie_endpoint_cfg_writew(unsigned int slot, unsigned int offset,
+                                     uint16_t value)
 {
-    pcie_select_edu();
+    pcie_select_endpoint(slot);
     writew(RASPI4_PCIE_EXT_CFG_DATA + offset, value);
 }
 
-static void pcie_edu_cfg_writel(unsigned int offset, uint32_t value)
+static void pcie_endpoint_cfg_writel(unsigned int slot, unsigned int offset,
+                                     uint32_t value)
 {
-    pcie_select_edu();
+    pcie_select_endpoint(slot);
     writel(RASPI4_PCIE_EXT_CFG_DATA + offset, value);
 }
 
-static uint8_t pcie_edu_find_capability(uint8_t cap_id)
+static uint8_t pcie_endpoint_find_capability(unsigned int slot, uint8_t cap_id)
 {
-    uint8_t offset = pcie_edu_cfg_readb(PCI_CAPABILITY_LIST) & ~3U;
+    uint8_t offset = pcie_endpoint_cfg_readb(slot, PCI_CAPABILITY_LIST) & ~3U;
     unsigned int ttl = 48;
 
     while (offset >= 0x40 && ttl--) {
-        if (pcie_edu_cfg_readb(offset + PCI_CAP_LIST_ID) == cap_id) {
+        if (pcie_endpoint_cfg_readb(slot, offset + PCI_CAP_LIST_ID) == cap_id) {
             return offset;
         }
-        offset = pcie_edu_cfg_readb(offset + PCI_CAP_LIST_NEXT) & ~3U;
+        offset = pcie_endpoint_cfg_readb(slot,
+                                         offset + PCI_CAP_LIST_NEXT) & ~3U;
     }
     return 0;
 }
+
+#define pcie_edu_cfg_readb(offset) \
+    pcie_endpoint_cfg_readb(1, (offset))
+#define pcie_edu_cfg_readw(offset) \
+    pcie_endpoint_cfg_readw(1, (offset))
+#define pcie_edu_cfg_readl(offset) \
+    pcie_endpoint_cfg_readl(1, (offset))
+#define pcie_edu_cfg_writew(offset, value) \
+    pcie_endpoint_cfg_writew(1, (offset), (value))
+#define pcie_edu_cfg_writel(offset, value) \
+    pcie_endpoint_cfg_writel(1, (offset), (value))
+#define pcie_vl805_cfg_readb(offset) \
+    pcie_endpoint_cfg_readb(0, (offset))
+#define pcie_vl805_cfg_readw(offset) \
+    pcie_endpoint_cfg_readw(0, (offset))
+#define pcie_vl805_cfg_readl(offset) \
+    pcie_endpoint_cfg_readl(0, (offset))
+#define pcie_vl805_cfg_writew(offset, value) \
+    pcie_endpoint_cfg_writew(0, (offset), (value))
+#define pcie_vl805_cfg_writel(offset, value) \
+    pcie_endpoint_cfg_writel(0, (offset), (value))
 
 static bool pcie_edu_test_start(void)
 {
@@ -338,7 +402,7 @@ static bool pcie_edu_test_start(void)
 
     qtest_system_reset(global_qtest);
     writel(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS, 0x00010100);
-    pcie_select_edu();
+    pcie_select_endpoint(1);
     g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA), ==, UINT32_MAX);
 
     writel(RASPI4_PCIE_SW_INIT, 0);
@@ -366,6 +430,45 @@ static bool pcie_edu_test_start(void)
     g_assert_cmphex(readl(RASPI4_PCIE_EDU_CPU_BAR), ==,
                     RASPI4_PCIE_EDU_MAGIC);
     return true;
+}
+
+static void pcie_vl805_test_start(void)
+{
+    const uint16_t command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
+
+    qtest_system_reset(global_qtest);
+    writel(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS, 0x00010100);
+    pcie_select_endpoint(0);
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA), ==, UINT32_MAX);
+
+    writel(RASPI4_PCIE_SW_INIT, 0);
+    pcie_assert_link(true);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_VENDOR_ID), ==,
+                    RASPI4_PCIE_VL805_ID);
+
+    pcie_vl805_cfg_writel(PCI_BASE_ADDRESS_0, UINT32_MAX);
+    pcie_vl805_cfg_writel(PCI_BASE_ADDRESS_1, UINT32_MAX);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_BASE_ADDRESS_0) &
+                    PCI_BASE_ADDRESS_MEM_MASK, ==, 0xfffff000);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_BASE_ADDRESS_1), ==,
+                    UINT32_MAX);
+    pcie_vl805_cfg_writel(PCI_BASE_ADDRESS_0,
+                          RASPI4_PCIE_VL805_PCI_BAR);
+    pcie_vl805_cfg_writel(PCI_BASE_ADDRESS_1, 0);
+
+    /* Forward the endpoint's 4 KiB BAR through the root port. */
+    writel(RASPI4_PCIE_BASE + PCI_MEMORY_BASE, 0xf800f800);
+    writew(RASPI4_PCIE_BASE + PCI_COMMAND, command);
+    pcie_vl805_cfg_writew(PCI_COMMAND, command);
+
+    /* Linux v7.2 DT: CPU 0x600000000 -> PCI 0xf8000000, 64 MiB. */
+    writel(RASPI4_PCIE_OUT_LO, RASPI4_PCIE_VL805_PCI_BAR);
+    writel(RASPI4_PCIE_OUT_HI, 0);
+    writel(RASPI4_PCIE_BASE_LIMIT, 0x03f00000);
+    writel(RASPI4_PCIE_BASE_HI, 6);
+    writel(RASPI4_PCIE_LIMIT_HI, 6);
+
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR), ==, 0x01000020);
 }
 
 static void pcie_edu_dma(uint64_t src, uint64_t dst, size_t size,
@@ -528,9 +631,11 @@ static void test_pcie_edu_intx(void)
     writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_RAISE, 1);
     g_assert_cmphex(readl(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_STATUS), ==, 1);
     g_assert_true(get_irq(RASPI4_PCIE_EDU_GIC_INTX));
-    for (unsigned int irq = RASPI4_PCIE_EDU_GIC_INTX + 1;
-         irq < RASPI4_PCIE_EDU_GIC_MSI; irq++) {
-        g_assert_false(get_irq(irq));
+    for (unsigned int irq = RASPI4_PCIE_INTX_FIRST;
+         irq <= RASPI4_PCIE_INTX_LAST; irq++) {
+        if (irq != RASPI4_PCIE_EDU_GIC_INTX) {
+            g_assert_false(get_irq(irq));
+        }
     }
     g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
 
@@ -619,7 +724,7 @@ static void test_pcie_edu_msi(void)
     writel(0xfffffffc, 0x6540 | vector);
     g_assert_cmphex(readl(RASPI4_PCIE_MSI_STATUS), ==, 0);
 
-    msi_cap = pcie_edu_find_capability(PCI_CAP_ID_MSI);
+    msi_cap = pcie_endpoint_find_capability(1, PCI_CAP_ID_MSI);
     g_assert_cmphex(msi_cap, !=, 0);
     flags = pcie_edu_cfg_readw(msi_cap + PCI_MSI_FLAGS);
     g_assert_true(flags & PCI_MSI_FLAGS_64BIT);
@@ -650,6 +755,242 @@ static void test_pcie_edu_msi(void)
     g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
 
     writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_ACK, 1);
+    qtest_system_reset(global_qtest);
+}
+
+static void test_pcie_vl805_config_and_mmio(void)
+{
+    uint16_t msi_flags;
+
+    pcie_vl805_test_start();
+
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_VENDOR_ID), ==,
+                    RASPI4_PCIE_VL805_ID);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_CLASS_REVISION), ==,
+                    RASPI4_PCIE_VL805_CLASS_REV);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_SUBSYSTEM_VENDOR_ID), ==,
+                    RASPI4_PCIE_VL805_ID);
+    g_assert_cmphex(pcie_vl805_cfg_readb(PCI_HEADER_TYPE) &
+                    PCI_HEADER_TYPE_MASK, ==, PCI_HEADER_TYPE_NORMAL);
+    g_assert_cmphex(pcie_vl805_cfg_readb(PCI_INTERRUPT_PIN), ==, 1);
+    g_assert_true(pcie_vl805_cfg_readw(PCI_STATUS) & PCI_STATUS_CAP_LIST);
+
+    g_assert_cmphex(pcie_vl805_cfg_readb(PCI_CAPABILITY_LIST), ==,
+                    RASPI4_PCIE_VL805_PM_CAP);
+    g_assert_cmphex(pcie_vl805_cfg_readb(RASPI4_PCIE_VL805_PM_CAP +
+                                        PCI_CAP_LIST_ID), ==, PCI_CAP_ID_PM);
+    g_assert_cmphex(pcie_vl805_cfg_readb(RASPI4_PCIE_VL805_PM_CAP +
+                                        PCI_CAP_LIST_NEXT), ==,
+                    RASPI4_PCIE_VL805_MSI_CAP);
+    g_assert_cmphex(pcie_vl805_cfg_readw(RASPI4_PCIE_VL805_PM_CAP +
+                                        PCI_PM_PMC), ==, 0x89c3);
+
+    g_assert_cmphex(pcie_vl805_cfg_readb(RASPI4_PCIE_VL805_MSI_CAP +
+                                        PCI_CAP_LIST_ID), ==,
+                    PCI_CAP_ID_MSI);
+    g_assert_cmphex(pcie_vl805_cfg_readb(RASPI4_PCIE_VL805_MSI_CAP +
+                                        PCI_CAP_LIST_NEXT), ==,
+                    RASPI4_PCIE_VL805_PCIE_CAP);
+    msi_flags = pcie_vl805_cfg_readw(RASPI4_PCIE_VL805_MSI_CAP +
+                                     PCI_MSI_FLAGS);
+    g_assert_cmphex(msi_flags & (PCI_MSI_FLAGS_ENABLE |
+                                PCI_MSI_FLAGS_QMASK |
+                                PCI_MSI_FLAGS_QSIZE |
+                                PCI_MSI_FLAGS_64BIT |
+                                PCI_MSI_FLAGS_MASKBIT), ==,
+                    (2U << 1) | PCI_MSI_FLAGS_64BIT);
+    g_assert_cmphex(pcie_endpoint_find_capability(0, PCI_CAP_ID_MSIX), ==, 0);
+
+    g_assert_cmphex(pcie_vl805_cfg_readb(RASPI4_PCIE_VL805_PCIE_CAP +
+                                        PCI_CAP_LIST_ID), ==,
+                    PCI_CAP_ID_EXP);
+    g_assert_cmphex(pcie_vl805_cfg_readb(RASPI4_PCIE_VL805_PCIE_CAP +
+                                        PCI_CAP_LIST_NEXT), ==, 0);
+    g_assert_cmphex(pcie_vl805_cfg_readw(RASPI4_PCIE_VL805_PCIE_CAP +
+                                        PCI_EXP_FLAGS) &
+                    PCI_EXP_FLAGS_VERS, ==, 2);
+    g_assert_cmphex(pcie_vl805_cfg_readl(RASPI4_PCIE_VL805_PCIE_CAP +
+                                        PCI_EXP_DEVCAP), ==, 0x00008001);
+    g_assert_cmphex(pcie_vl805_cfg_readl(RASPI4_PCIE_VL805_PCIE_CAP +
+                                        PCI_EXP_LNKCAP), ==, 0x00065c12);
+    g_assert_cmphex(pcie_vl805_cfg_readl(RASPI4_PCIE_VL805_PCIE_CAP +
+                                        PCI_EXP_DEVCAP2), ==, 0x00000012);
+    g_assert_cmphex(pcie_vl805_cfg_readw(RASPI4_PCIE_VL805_PCIE_CAP +
+                                        PCI_EXP_LNKCTL2), ==, 0x0022);
+    g_assert_cmphex(pcie_vl805_cfg_readw(RASPI4_PCIE_VL805_PCIE_CAP +
+                                        PCI_EXP_LNKSTA2), ==, 0x0001);
+
+    g_assert_cmphex(PCI_EXT_CAP_ID(pcie_vl805_cfg_readl(
+                        RASPI4_PCIE_VL805_AER_CAP)), ==, PCI_EXT_CAP_ID_ERR);
+    g_assert_cmphex(PCI_EXT_CAP_VER(pcie_vl805_cfg_readl(
+                        RASPI4_PCIE_VL805_AER_CAP)), ==, 2);
+    g_assert_cmphex(pcie_vl805_cfg_readl(RASPI4_PCIE_VL805_AER_CAP +
+                                        PCI_ERR_UNCOR_SEVER), ==, 0x00062031);
+    g_assert_cmphex(pcie_vl805_cfg_readl(RASPI4_PCIE_VL805_AER_CAP +
+                                        PCI_ERR_COR_MASK), ==, 0x00002000);
+
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_BASE_ADDRESS_0), ==,
+                    RASPI4_PCIE_VL805_PCI_BAR |
+                    PCI_BASE_ADDRESS_MEM_TYPE_64);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_BASE_ADDRESS_1), ==, 0);
+
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0x00), ==,
+                    0x01000020);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0x04), ==,
+                    0x05000420);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0x08), ==,
+                    0xfc000031);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0x0c), ==,
+                    0x00e70004);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0x10), ==,
+                    0x002841eb);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0x14), ==,
+                    VL805_XHCI_DOORBELL);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0x18), ==,
+                    VL805_XHCI_RUNTIME);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0x1c), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0xa0), ==,
+                    0x00000401);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0xb0), ==,
+                    0x02000802);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0xb8), ==,
+                    0x10060101);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0xc0), ==,
+                    0x01e00023);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0xd0), ==,
+                    0x03008c02);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0xd8), ==,
+                    0x10000402);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0xe0), ==,
+                    0x00050134);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0x300), ==,
+                    0x0001000a);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + 0x328), ==,
+                    0x000000a0);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBCMD),
+                    ==, 0);
+    g_assert_true(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBSTS) &
+                  VL805_XHCI_USBSTS_HCH);
+
+    qtest_system_reset(global_qtest);
+}
+
+static void test_pcie_vl805_event_dma_msi(void)
+{
+    const uint64_t erst_pci = PCIE_DMA_BASE + VL805_XHCI_ERST_CPU;
+    const uint64_t event_pci = PCIE_DMA_BASE + VL805_XHCI_EVENT_RING_CPU;
+    const uint32_t vector_bit = 1U;
+    uint16_t flags;
+    uint16_t command;
+    uint32_t portsc;
+
+    pcie_vl805_test_start();
+
+    /* PCI 0x400000000..0x40fffffff aliases the first 256 MiB of RAM. */
+    writel(RASPI4_PCIE_MISC_CTRL,
+           readl(RASPI4_PCIE_MISC_CTRL) |
+           PCIE_MISC_CTRL_SCB_ACCESS_EN);
+    writel(RASPI4_PCIE_RC_BAR2_HI, 4);
+    writel(RASPI4_PCIE_RC_BAR2_LO, PCIE_DMA_SIZE_ENCODING_256M);
+
+    writeq(VL805_XHCI_ERST_CPU, event_pci);
+    writel(VL805_XHCI_ERST_CPU + 8, VL805_XHCI_EVENT_RING_TRBS);
+    writel(VL805_XHCI_ERST_CPU + 12, 0);
+    qtest_memset(global_qtest, VL805_XHCI_EVENT_RING_CPU, 0,
+                 VL805_XHCI_EVENT_RING_TRBS * 16);
+
+    writel(RASPI4_PCIE_MSI_DATA, 0xffe06540);
+    writel(RASPI4_PCIE_MSI_BAR_HI, 0);
+    writel(RASPI4_PCIE_MSI_BAR_LO, 0xfffffffd);
+    writel(RASPI4_PCIE_MSI_MASK_CLEAR, vector_bit);
+
+    flags = pcie_vl805_cfg_readw(RASPI4_PCIE_VL805_MSI_CAP +
+                                 PCI_MSI_FLAGS);
+    pcie_vl805_cfg_writel(RASPI4_PCIE_VL805_MSI_CAP + PCI_MSI_ADDRESS_LO,
+                          0xfffffffc);
+    pcie_vl805_cfg_writel(RASPI4_PCIE_VL805_MSI_CAP + PCI_MSI_ADDRESS_HI, 0);
+    pcie_vl805_cfg_writew(RASPI4_PCIE_VL805_MSI_CAP + PCI_MSI_DATA_64,
+                          0x6540);
+    pcie_vl805_cfg_writew(RASPI4_PCIE_VL805_MSI_CAP + PCI_MSI_FLAGS,
+                          flags | PCI_MSI_FLAGS_ENABLE);
+    command = pcie_vl805_cfg_readw(PCI_COMMAND);
+    pcie_vl805_cfg_writew(PCI_COMMAND,
+                          command | PCI_COMMAND_INTX_DISABLE);
+
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERSTSZ0, 1);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERSTBA0,
+           (uint32_t)erst_pci);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERSTBA0 + 4,
+           erst_pci >> 32);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERDP0,
+           (uint32_t)event_pci);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERDP0 + 4,
+           event_pci >> 32);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_IMAN0,
+           VL805_XHCI_IMAN_IE);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBCMD,
+           VL805_XHCI_USBCMD_RUN | VL805_XHCI_USBCMD_INTE);
+    g_assert_false(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBSTS) &
+                   VL805_XHCI_USBSTS_HCH);
+
+    qtest_qmp_device_add(global_qtest, "usb-kbd", "vl805-test-kbd",
+                         "{'bus': 'vl805.0'}");
+
+    g_assert_cmphex(readq(VL805_XHCI_EVENT_RING_CPU), ==, 1U << 24);
+    g_assert_cmphex(readl(VL805_XHCI_EVENT_RING_CPU + 8), ==,
+                    VL805_XHCI_CC_SUCCESS << 24);
+    g_assert_cmphex(readl(VL805_XHCI_EVENT_RING_CPU + 12), ==,
+                    (VL805_XHCI_TRB_PORT_STATUS <<
+                     VL805_XHCI_TRB_TYPE_SHIFT) |
+                    VL805_XHCI_TRB_CYCLE);
+    g_assert_cmphex(readl(RASPI4_PCIE_MSI_STATUS), ==, vector_bit);
+    g_assert_true(get_irq(RASPI4_PCIE_VL805_GIC_MSI));
+
+    portsc = readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_PORT1);
+    g_assert_true(portsc & VL805_XHCI_PORTSC_CCS);
+    g_assert_true(portsc & VL805_XHCI_PORTSC_CSC);
+    g_assert_cmphex(portsc & VL805_XHCI_PORTSC_SPEED_MASK, ==,
+                    VL805_XHCI_PORTSC_SPEED_HIGH);
+
+    writel(RASPI4_PCIE_MSI_CLEAR, vector_bit);
+    g_assert_cmphex(readl(RASPI4_PCIE_MSI_STATUS), ==, 0);
+    g_assert_false(get_irq(RASPI4_PCIE_VL805_GIC_MSI));
+
+    qtest_system_reset(global_qtest);
+    qtest_qmp_device_del(global_qtest, "vl805-test-kbd");
+}
+
+static void test_pcie_vl805_perst(void)
+{
+    const uint16_t command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
+
+    pcie_vl805_test_start();
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBCMD,
+           VL805_XHCI_USBCMD_RUN);
+    g_assert_false(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBSTS) &
+                   VL805_XHCI_USBSTS_HCH);
+
+    writel(RASPI4_PCIE_SW_INIT, PCIE_SW_INIT_PERST);
+    pcie_assert_link(false);
+    pcie_select_endpoint(0);
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA), ==, UINT32_MAX);
+
+    writel(RASPI4_PCIE_SW_INIT, 0);
+    pcie_assert_link(true);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_VENDOR_ID), ==,
+                    RASPI4_PCIE_VL805_ID);
+    g_assert_cmphex(pcie_vl805_cfg_readw(PCI_COMMAND), ==, 0);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_BASE_ADDRESS_0), ==,
+                    PCI_BASE_ADDRESS_MEM_TYPE_64);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_BASE_ADDRESS_1), ==, 0);
+
+    pcie_vl805_cfg_writel(PCI_BASE_ADDRESS_0,
+                          RASPI4_PCIE_VL805_PCI_BAR);
+    pcie_vl805_cfg_writel(PCI_BASE_ADDRESS_1, 0);
+    pcie_vl805_cfg_writew(PCI_COMMAND, command);
+    g_assert_true(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBSTS) &
+                  VL805_XHCI_USBSTS_HCH);
+
     qtest_system_reset(global_qtest);
 }
 
@@ -1115,6 +1456,12 @@ int main(int argc, char **argv)
     qtest_add_func("/raspi4b/pcie/edu/inbound_dma",
                    test_pcie_edu_inbound_dma);
     qtest_add_func("/raspi4b/pcie/edu/msi", test_pcie_edu_msi);
+    qtest_add_func("/raspi4b/pcie/vl805/config_and_mmio",
+                   test_pcie_vl805_config_and_mmio);
+    qtest_add_func("/raspi4b/pcie/vl805/event_dma_msi",
+                   test_pcie_vl805_event_dma_msi);
+    qtest_add_func("/raspi4b/pcie/vl805/perst",
+                   test_pcie_vl805_perst);
     qtest_add_func("/raspi4b/pcie/system_reset", test_pcie_system_reset);
     qtest_add_func("/raspi4b/genet/registers_and_mdio",
                    test_genet_registers_and_mdio);
@@ -1125,7 +1472,7 @@ int main(int argc, char **argv)
     pcie_has_edu = qtest_has_device("edu");
     if (pcie_has_edu) {
         g_string_append(cmd_line,
-                        " -device edu,id=edu0,bus=pcie.1,addr=0,"
+                        " -device edu,id=edu0,bus=pcie.1,addr=1,"
                         "dma_mask=0xffffffffffffffff");
     }
 

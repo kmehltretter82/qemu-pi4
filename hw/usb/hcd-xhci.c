@@ -53,6 +53,16 @@
 #define OFF_RUNTIME     0x1000
 #define OFF_DOORBELL    0x2000
 
+#define VL805_LEN_CAP          0x20
+#define VL805_LEN_REGS         0x1000
+#define VL805_LEN_OPER         0x40
+#define VL805_OFF_RUNTIME      0x200
+#define VL805_OFF_DOORBELL     0x100
+#define VL805_OFF_EXTCAP       0xa0
+#define VL805_LEN_EXTCAP       0x50
+#define VL805_OFF_DEBUGCAP     0x300
+#define VL805_LEN_DEBUGCAP     0x40
+
 #if (OFF_OPER + LEN_OPER) > OFF_RUNTIME
 #error Increase OFF_RUNTIME
 #endif
@@ -539,10 +549,12 @@ static XHCIPort *xhci_lookup_port(XHCIState *xhci, struct USBPort *uport)
     case USB_SPEED_LOW:
     case USB_SPEED_FULL:
     case USB_SPEED_HIGH:
-        index = uport->index + xhci->numports_3;
+        index = xhci->register_model == XHCI_REGISTER_MODEL_VL805 ?
+                uport->index : uport->index + xhci->numports_3;
         break;
     case USB_SPEED_SUPER:
-        index = uport->index;
+        index = xhci->register_model == XHCI_REGISTER_MODEL_VL805 ?
+                uport->index + xhci->numports_2 : uport->index;
         break;
     default:
         return NULL;
@@ -2747,34 +2759,40 @@ static void xhci_reset(DeviceState *dev)
 static uint64_t xhci_cap_read(void *ptr, hwaddr reg, unsigned size)
 {
     XHCIState *xhci = ptr;
+    bool vl805 = xhci->register_model == XHCI_REGISTER_MODEL_VL805;
     uint32_t ret;
 
     switch (reg) {
     case 0x00: /* HCIVERSION, CAPLENGTH */
-        ret = 0x01000000 | LEN_CAP;
+        ret = 0x01000000 | (vl805 ? VL805_LEN_CAP : LEN_CAP);
         break;
     case 0x04: /* HCSPARAMS 1 */
         ret = ((xhci->numports_2+xhci->numports_3)<<24)
             | (xhci->numintrs<<8) | xhci->numslots;
         break;
     case 0x08: /* HCSPARAMS 2 */
-        ret = 0x0000000f;
+        ret = vl805 ? 0xfc000031 : 0x0000000f;
         break;
     case 0x0c: /* HCSPARAMS 3 */
-        ret = 0x00000000;
+        ret = vl805 ? 0x00e70004 : 0x00000000;
         break;
     case 0x10: /* HCCPARAMS */
-        if (sizeof(dma_addr_t) == 4) {
+        if (vl805) {
+            ret = 0x002841eb;
+        } else if (sizeof(dma_addr_t) == 4) {
             ret = 0x00080000 | (xhci->max_pstreams_mask << 12);
         } else {
             ret = 0x00080001 | (xhci->max_pstreams_mask << 12);
         }
         break;
     case 0x14: /* DBOFF */
-        ret = OFF_DOORBELL;
+        ret = vl805 ? VL805_OFF_DOORBELL : OFF_DOORBELL;
         break;
     case 0x18: /* RTSOFF */
-        ret = OFF_RUNTIME;
+        ret = vl805 ? VL805_OFF_RUNTIME : OFF_RUNTIME;
+        break;
+    case 0x1c: /* HCCPARAMS 2 */
+        ret = 0;
         break;
 
     /* extended capabilities */
@@ -3207,6 +3225,69 @@ static void xhci_cap_write(void *opaque, hwaddr addr, uint64_t val,
     /* nothing */
 }
 
+static uint64_t xhci_vl805_extcap_read(void *opaque, hwaddr reg,
+                                        unsigned size)
+{
+    uint32_t value;
+
+    switch (reg) {
+    case 0x00: /* USB legacy support */
+        value = 0x00000401;
+        break;
+    case 0x04: /* USB legacy control and status */
+        value = 0x40000000;
+        break;
+    case 0x10: /* USB 2.0 Supported Protocol capability */
+        value = 0x02000802;
+        break;
+    case 0x14:
+        value = 0x20425355; /* "USB " */
+        break;
+    case 0x18: /* one USB 2 port, starting at xHCI port one */
+        value = 0x10060101;
+        break;
+    case 0x20: /* unlinked VL805 vendor capability */
+        value = 0x01e00023;
+        break;
+    case 0x30: /* USB 3.0 Supported Protocol capability */
+        value = 0x03008c02;
+        break;
+    case 0x34:
+        value = 0x20425355; /* "USB " */
+        break;
+    case 0x38: /* four USB 3 ports, starting at xHCI port two */
+        value = 0x10000402;
+        break;
+    case 0x40: /* unlinked VL805 vendor capability */
+        value = 0x00050134;
+        break;
+    default:
+        value = 0;
+        break;
+    }
+
+    return value;
+}
+
+static uint64_t xhci_vl805_debugcap_read(void *opaque, hwaddr reg,
+                                          unsigned size)
+{
+    switch (reg) {
+    case 0x00:
+        return 0x0001000a; /* Debug Capability, revision one */
+    case 0x28:
+        return 0x000000a0;
+    default:
+        return 0;
+    }
+}
+
+static void xhci_vl805_extcap_write(void *opaque, hwaddr reg,
+                                     uint64_t val, unsigned size)
+{
+    /* The implemented VL805 extended capabilities are read-only. */
+}
+
 static const MemoryRegionOps xhci_cap_ops = {
     .read = xhci_cap_read,
     .write = xhci_cap_write,
@@ -3214,6 +3295,22 @@ static const MemoryRegionOps xhci_cap_ops = {
     .valid.max_access_size = 4,
     .impl.min_access_size = 4,
     .impl.max_access_size = 4,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static const MemoryRegionOps xhci_vl805_extcap_ops = {
+    .read = xhci_vl805_extcap_read,
+    .write = xhci_vl805_extcap_write,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static const MemoryRegionOps xhci_vl805_debugcap_ops = {
+    .read = xhci_vl805_debugcap_read,
+    .write = xhci_vl805_extcap_write,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
@@ -3361,6 +3458,7 @@ static USBBusOps xhci_bus_ops = {
 static void usb_xhci_init(XHCIState *xhci)
 {
     XHCIPort *port;
+    bool vl805 = xhci->register_model == XHCI_REGISTER_MODEL_VL805;
     unsigned int i, usbports, speedmask;
 
     xhci->usbsts = USBSTS_HCH;
@@ -3374,13 +3472,16 @@ static void usb_xhci_init(XHCIState *xhci)
     usbports = MAX(xhci->numports_2, xhci->numports_3);
     xhci->numports = xhci->numports_2 + xhci->numports_3;
 
-    usb_bus_new(&xhci->bus, sizeof(xhci->bus), &xhci_bus_ops, xhci->hostOpaque);
+    usb_bus_new_named(&xhci->bus, sizeof(xhci->bus), &xhci_bus_ops,
+                      xhci->hostOpaque, xhci->bus_name);
 
     for (i = 0; i < usbports; i++) {
         speedmask = 0;
         if (i < xhci->numports_2) {
-            port = &xhci->ports[i + xhci->numports_3];
-            port->portnr = i + 1 + xhci->numports_3;
+            unsigned int index = vl805 ? i : i + xhci->numports_3;
+
+            port = &xhci->ports[index];
+            port->portnr = vl805 ? i + 1 : i + 1 + xhci->numports_3;
             port->uport = &xhci->uports[i];
             port->speedmask =
                 USB_SPEED_MASK_LOW  |
@@ -3391,8 +3492,10 @@ static void usb_xhci_init(XHCIState *xhci)
             speedmask |= port->speedmask;
         }
         if (i < xhci->numports_3) {
-            port = &xhci->ports[i];
-            port->portnr = i + 1;
+            unsigned int index = vl805 ? i + xhci->numports_2 : i;
+
+            port = &xhci->ports[index];
+            port->portnr = vl805 ? i + 1 + xhci->numports_2 : i + 1;
             port->uport = &xhci->uports[i];
             port->speedmask = USB_SPEED_MASK_SUPER;
             assert(i < XHCI_MAXPORTS);
@@ -3406,9 +3509,20 @@ static void usb_xhci_init(XHCIState *xhci)
 
 static void usb_xhci_realize(DeviceState *dev, Error **errp)
 {
+    bool vl805;
+    hwaddr oper_offset;
+    hwaddr runtime_offset;
+    hwaddr doorbell_offset;
+    uint64_t register_size;
+    uint64_t cap_size;
+    uint64_t oper_size;
+    uint64_t runtime_size;
+    uint64_t doorbell_size;
     int i;
 
     XHCIState *xhci = XHCI(dev);
+
+    vl805 = xhci->register_model == XHCI_REGISTER_MODEL_VL805;
 
     if (xhci->numintrs > XHCI_MAXINTRS) {
         xhci->numintrs = XHCI_MAXINTRS;
@@ -3434,24 +3548,48 @@ static void usb_xhci_realize(DeviceState *dev, Error **errp)
     usb_xhci_init(xhci);
     xhci->mfwrap_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, xhci_mfwrap_timer, xhci);
 
-    memory_region_init(&xhci->mem, OBJECT(dev), "xhci", XHCI_LEN_REGS);
+    oper_offset = vl805 ? VL805_LEN_CAP : OFF_OPER;
+    runtime_offset = vl805 ? VL805_OFF_RUNTIME : OFF_RUNTIME;
+    doorbell_offset = vl805 ? VL805_OFF_DOORBELL : OFF_DOORBELL;
+    register_size = vl805 ? VL805_LEN_REGS : XHCI_LEN_REGS;
+    cap_size = vl805 ? VL805_LEN_CAP : LEN_CAP;
+    oper_size = vl805 ? VL805_LEN_OPER : 0x400;
+    runtime_size = vl805 ? (xhci->numintrs + 1) * 0x20 : LEN_RUNTIME;
+    doorbell_size = vl805 ? (xhci->numslots + 1) * 4 : LEN_DOORBELL;
+
+    memory_region_init(&xhci->mem, OBJECT(dev), "xhci", register_size);
     memory_region_init_io(&xhci->mem_cap, OBJECT(dev), &xhci_cap_ops, xhci,
-                          "capabilities", LEN_CAP);
+                          "capabilities", cap_size);
     memory_region_init_io(&xhci->mem_oper, OBJECT(dev), &xhci_oper_ops, xhci,
-                          "operational", 0x400);
+                          "operational", oper_size);
     memory_region_init_io(&xhci->mem_runtime, OBJECT(dev), &xhci_runtime_ops,
-                           xhci, "runtime", LEN_RUNTIME);
+                           xhci, "runtime", runtime_size);
     memory_region_init_io(&xhci->mem_doorbell, OBJECT(dev), &xhci_doorbell_ops,
-                           xhci, "doorbell", LEN_DOORBELL);
+                           xhci, "doorbell", doorbell_size);
 
     memory_region_add_subregion(&xhci->mem, 0,            &xhci->mem_cap);
-    memory_region_add_subregion(&xhci->mem, OFF_OPER,     &xhci->mem_oper);
-    memory_region_add_subregion(&xhci->mem, OFF_RUNTIME,  &xhci->mem_runtime);
-    memory_region_add_subregion(&xhci->mem, OFF_DOORBELL, &xhci->mem_doorbell);
+    memory_region_add_subregion(&xhci->mem, oper_offset, &xhci->mem_oper);
+    memory_region_add_subregion(&xhci->mem, runtime_offset,
+                                &xhci->mem_runtime);
+    memory_region_add_subregion(&xhci->mem, doorbell_offset,
+                                &xhci->mem_doorbell);
+
+    if (vl805) {
+        memory_region_init_io(&xhci->mem_extcap, OBJECT(dev),
+                              &xhci_vl805_extcap_ops, xhci,
+                              "vl805-xhci-extcaps", VL805_LEN_EXTCAP);
+        memory_region_init_io(&xhci->mem_debugcap, OBJECT(dev),
+                              &xhci_vl805_debugcap_ops, xhci,
+                              "vl805-xhci-debugcap", VL805_LEN_DEBUGCAP);
+        memory_region_add_subregion(&xhci->mem, VL805_OFF_EXTCAP,
+                                    &xhci->mem_extcap);
+        memory_region_add_subregion(&xhci->mem, VL805_OFF_DEBUGCAP,
+                                    &xhci->mem_debugcap);
+    }
 
     for (i = 0; i < xhci->numports; i++) {
         XHCIPort *port = &xhci->ports[i];
-        uint32_t offset = OFF_OPER + 0x400 + 0x10 * i;
+        uint32_t offset = oper_offset + 0x400 + 0x10 * i;
         port->xhci = xhci;
         memory_region_init_io(&port->mem, OBJECT(dev), &xhci_port_ops, port,
                               port->name, 0x10);
@@ -3479,6 +3617,11 @@ static void usb_xhci_unrealize(DeviceState *dev)
     memory_region_del_subregion(&xhci->mem, &xhci->mem_oper);
     memory_region_del_subregion(&xhci->mem, &xhci->mem_runtime);
     memory_region_del_subregion(&xhci->mem, &xhci->mem_doorbell);
+
+    if (xhci->register_model == XHCI_REGISTER_MODEL_VL805) {
+        memory_region_del_subregion(&xhci->mem, &xhci->mem_extcap);
+        memory_region_del_subregion(&xhci->mem, &xhci->mem_debugcap);
+    }
 
     for (i = 0; i < xhci->numports; i++) {
         XHCIPort *port = &xhci->ports[i];

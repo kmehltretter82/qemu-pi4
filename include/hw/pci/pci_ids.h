@@ -217,6 +217,7 @@
 #define PCI_DEVICE_ID_VIA_82C686B_PM     0x3057
 #define PCI_DEVICE_ID_VIA_AC97           0x3058
 #define PCI_DEVICE_ID_VIA_MC97           0x3068
+#define PCI_DEVICE_ID_VIA_VL805          0x3483
 #define PCI_DEVICE_ID_VIA_8231_ISA       0x8231
 #define PCI_DEVICE_ID_VIA_8231_PM        0x8235
 

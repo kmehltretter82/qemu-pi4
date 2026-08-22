@@ -35,6 +35,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(XHCIState, XHCI)
 typedef struct XHCIStreamContext XHCIStreamContext;
 typedef struct XHCIEPContext XHCIEPContext;
 
+typedef enum XHCIRegisterModel {
+    XHCI_REGISTER_MODEL_GENERIC,
+    XHCI_REGISTER_MODEL_VL805,
+} XHCIRegisterModel;
+
 enum xhci_flags {
     XHCI_FLAG_ENABLE_STREAMS = 1,
 };
@@ -183,6 +188,8 @@ typedef struct XHCIState {
     MemoryRegion mem_oper;
     MemoryRegion mem_runtime;
     MemoryRegion mem_doorbell;
+    MemoryRegion mem_extcap;
+    MemoryRegion mem_debugcap;
 
     /* properties */
     uint32_t numports_2;
@@ -191,6 +198,8 @@ typedef struct XHCIState {
     uint32_t numslots;
     uint32_t flags;
     uint32_t max_pstreams_mask;
+    XHCIRegisterModel register_model;
+    const char *bus_name;
     void (*intr_update)(XHCIState *s, int n, bool enable);
     bool (*intr_raise)(XHCIState *s, int n, bool level);
     /*

@@ -22,6 +22,9 @@
 #include "hw/arm/boot.h"
 #include "qom/object.h"
 #include "hw/arm/bcm2838.h"
+#include "hw/pci/pci.h"
+#include "hw/pci/pci_bridge.h"
+#include "hw/usb/xhci.h"
 #include <libfdt.h>
 
 #define TYPE_RASPI4B_MACHINE MACHINE_TYPE_NAME("raspi4b")
@@ -115,6 +118,11 @@ static void raspi4_machine_init(MachineState *machine)
     object_initialize_child(OBJECT(machine), "soc", soc, TYPE_BCM2838);
 
     raspi4_common_machine_init(machine, soc);
+
+    /* Pi 4 Model B and Pi 400 have a fixed VL805 at downstream BDF 00.0. */
+    pci_create_simple(pci_bridge_get_sec_bus(
+                          PCI_BRIDGE(&soc->peripherals.pcie.root_port)),
+                      PCI_DEVFN(0, 0), TYPE_VL805_XHCI);
 }
 
 static void raspi4b_machine_class_init(ObjectClass *oc, const void *data)

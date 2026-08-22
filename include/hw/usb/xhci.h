@@ -4,6 +4,7 @@
 #define TYPE_XHCI "base-xhci"
 #define TYPE_NEC_XHCI "nec-usb-xhci"
 #define TYPE_QEMU_XHCI "qemu-xhci"
+#define TYPE_VL805_XHCI "vl805-xhci"
 #define TYPE_XHCI_SYSBUS "sysbus-xhci"
 
 #define XHCI_MAXPORTS_2 15
