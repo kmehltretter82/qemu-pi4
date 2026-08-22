@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/fs.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -30,6 +31,10 @@
 #define VL805_DRIVER_PATH "/sys/bus/pci/devices/" VL805_BDF "/driver"
 #define VL805_UNBIND_PATH "/sys/bus/pci/drivers/xhci_hcd/unbind"
 #define VL805_BIND_PATH "/sys/bus/pci/drivers/xhci_hcd/bind"
+#define USB_STORAGE_VENDOR "46f4"
+#define USB_STORAGE_PRODUCT "0001"
+#define USB_STORAGE_OFFSET (1024 * 1024)
+#define USB_STORAGE_TRANSFER_SIZE (256 * 1024)
 #define SYSFS_WAIT_ATTEMPTS 100
 #define SYSFS_WAIT_US 100000
 
@@ -355,11 +360,181 @@ static int wait_for_path(const char *path, int present)
     return -1;
 }
 
-static int rebind_vl805(void)
+static int cmdline_has_word(const char *word)
+{
+    char cmdline[4096];
+    const char *position;
+    size_t length = strlen(word);
+
+    if (read_value("/proc/cmdline", cmdline, sizeof(cmdline))) {
+        return 0;
+    }
+    position = cmdline;
+    while ((position = strstr(position, word))) {
+        if ((position == cmdline ||
+             isspace((unsigned char)position[-1])) &&
+            (!position[length] ||
+             isspace((unsigned char)position[length]))) {
+            return 1;
+        }
+        position += length;
+    }
+    return 0;
+}
+
+static int vl805_usb_block_path(char *device_path, size_t path_size)
+{
+    struct dirent *entry;
+    DIR *directory = opendir("/sys/class/block");
+
+    if (!directory) {
+        return 0;
+    }
+    while ((entry = readdir(directory))) {
+        char path[PATH_MAX];
+        char resolved[PATH_MAX];
+
+        if (strncmp(entry->d_name, "sd", 2)) {
+            continue;
+        }
+        snprintf(path, sizeof(path), "/sys/class/block/%s/partition",
+                 entry->d_name);
+        if (!access(path, F_OK)) {
+            continue;
+        }
+        snprintf(path, sizeof(path), "/sys/class/block/%s", entry->d_name);
+        if (!realpath(path, resolved) ||
+            !strstr(resolved, "/" VL805_BDF "/usb")) {
+            continue;
+        }
+        if (device_path) {
+            int count = snprintf(device_path, path_size, "/dev/%s",
+                                 entry->d_name);
+
+            if (count < 0 || (size_t)count >= path_size ||
+                access(device_path, F_OK)) {
+                continue;
+            }
+        }
+        closedir(directory);
+        return 1;
+    }
+    closedir(directory);
+    return 0;
+}
+
+static int wait_for_vl805_usb_block(int present, char *device_path,
+                                    size_t path_size)
+{
+    int attempt;
+
+    for (attempt = 0; attempt < SYSFS_WAIT_ATTEMPTS; attempt++) {
+        if (vl805_usb_block_path(device_path, path_size) == present) {
+            return 0;
+        }
+        usleep(SYSFS_WAIT_US);
+    }
+    return -1;
+}
+
+static int storage_transfer(int fd, void *buffer, size_t length,
+                            off_t offset, int write_data)
+{
+    unsigned char *position = buffer;
+
+    while (length) {
+        ssize_t count;
+
+        if (write_data) {
+            count = pwrite(fd, position, length, offset);
+        } else {
+            count = pread(fd, position, length, offset);
+        }
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            if (!count) {
+                errno = EIO;
+            }
+            return -1;
+        }
+        position += count;
+        length -= count;
+        offset += count;
+    }
+    return 0;
+}
+
+static void fill_storage_pattern(unsigned char *buffer, size_t length,
+                                 unsigned int sequence)
+{
+    size_t index;
+
+    for (index = 0; index < length; index++) {
+        buffer[index] = (index * 37U) ^ (index >> 7) ^
+                        (sequence * 0x5bU);
+    }
+}
+
+static int verify_usb_storage(const char *device_path,
+                              unsigned int sequence, int write_first)
+{
+    unsigned char *expected = malloc(USB_STORAGE_TRANSFER_SIZE);
+    unsigned char *actual = malloc(USB_STORAGE_TRANSFER_SIZE);
+    int result = -1;
+    int fd = -1;
+
+    if (!expected || !actual) {
+        errno = ENOMEM;
+        goto out;
+    }
+    fill_storage_pattern(expected, USB_STORAGE_TRANSFER_SIZE, sequence);
+    memset(actual, 0, USB_STORAGE_TRANSFER_SIZE);
+
+    fd = open(device_path, O_RDWR | O_SYNC);
+    if (fd < 0) {
+        goto out;
+    }
+    if (write_first &&
+        (storage_transfer(fd, expected, USB_STORAGE_TRANSFER_SIZE,
+                          USB_STORAGE_OFFSET, 1) || fsync(fd))) {
+        goto out;
+    }
+
+    /* Force the comparison to traverse USB instead of the guest block cache. */
+    if (ioctl(fd, BLKFLSBUF, 0) ||
+        storage_transfer(fd, actual, USB_STORAGE_TRANSFER_SIZE,
+                         USB_STORAGE_OFFSET, 0)) {
+        goto out;
+    }
+    if (memcmp(expected, actual, USB_STORAGE_TRANSFER_SIZE)) {
+        errno = EILSEQ;
+        goto out;
+    }
+    result = 0;
+
+out:
+    if (result) {
+        fprintf(stderr, "pi4-lab: USB storage transfer on %s failed: %s\n",
+                device_path, strerror(errno));
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+    free(actual);
+    free(expected);
+    return result;
+}
+
+static int rebind_vl805(int storage_expected)
 {
     if (write_value(VL805_UNBIND_PATH, VL805_BDF) ||
         wait_for_path(VL805_DRIVER_PATH, 0) ||
-        wait_for_usb_device("2109", "3431", 0)) {
+        wait_for_usb_device("2109", "3431", 0) ||
+        (storage_expected &&
+         (wait_for_usb_device(USB_STORAGE_VENDOR, USB_STORAGE_PRODUCT, 0) ||
+          wait_for_vl805_usb_block(0, NULL, 0)))) {
         return -1;
     }
     if (write_value(VL805_BIND_PATH, VL805_BDF) ||
@@ -455,10 +630,13 @@ static void dump_ipv4_address(const char *name)
 
 int main(void)
 {
+    char storage_device[PATH_MAX] = { 0 };
     struct utsname uts;
     unsigned long interrupts_before_rebind;
     int failures = 0;
     int pi400;
+    int storage_ready = 0;
+    int storage_test;
     int vl805_ready;
 
     mkdir("/dev", 0755);
@@ -479,6 +657,7 @@ int main(void)
     dump_file("/proc/iomem");
 
     pi400 = model_is_pi400();
+    storage_test = cmdline_has_word("pi4lab.usb_storage=1");
     report_check("BCM2711 PCIe root port 14e4:2711",
                  wait_for_pci_identity(PCI_ROOT_BDF, "0x14e4", "0x2711"),
                  &failures);
@@ -490,6 +669,21 @@ int main(void)
                  wait_for_usb_root_hub("0003", "5000", "4"), &failures);
     report_check("VIA 2109:3431 high-speed hub",
                  wait_for_usb_device("2109", "3431", 1), &failures);
+    if (storage_test) {
+        int usb_ready = !wait_for_usb_device(USB_STORAGE_VENDOR,
+                                             USB_STORAGE_PRODUCT, 1);
+        int block_ready = !wait_for_vl805_usb_block(1, storage_device,
+                                                    sizeof(storage_device));
+
+        report_check("QEMU 46f4:0001 USB mass storage", !usb_ready,
+                     &failures);
+        report_check("VL805 USB storage block device", !block_ready,
+                     &failures);
+        storage_ready = usb_ready && block_ready;
+        report_check("USB storage write/read integrity",
+                     !storage_ready ||
+                     verify_usb_storage(storage_device, 0, 1), &failures);
+    }
     if (pi400) {
         report_check("Pi 400 keyboard 04d9:0007",
                      wait_for_usb_device("04d9", "0007", 1), &failures);
@@ -503,7 +697,7 @@ int main(void)
     printf("PI4-LAB: xHCI MSI count before rebind: %lu\n",
            interrupts_before_rebind);
     if (vl805_ready) {
-        int rebind_failed = rebind_vl805();
+        int rebind_failed = rebind_vl805(storage_test);
 
         report_check("VL805 xHCI unbind/rebind", rebind_failed, &failures);
         if (!rebind_failed) {
@@ -515,6 +709,26 @@ int main(void)
                          &failures);
             report_check("VIA hub re-enumerated after rebind",
                          wait_for_usb_device("2109", "3431", 1), &failures);
+            if (storage_test) {
+                int usb_ready = !wait_for_usb_device(USB_STORAGE_VENDOR,
+                                                     USB_STORAGE_PRODUCT, 1);
+                int block_ready = !wait_for_vl805_usb_block(
+                    1, storage_device, sizeof(storage_device));
+
+                report_check("USB storage re-enumerated after rebind",
+                             !usb_ready, &failures);
+                report_check("USB block device restored after rebind",
+                             !block_ready, &failures);
+                storage_ready = usb_ready && block_ready;
+                report_check("USB storage retained data across rebind",
+                             !storage_ready ||
+                             verify_usb_storage(storage_device, 0, 0),
+                             &failures);
+                report_check("USB storage write/read after rebind",
+                             !storage_ready ||
+                             verify_usb_storage(storage_device, 1, 1),
+                             &failures);
+            }
             if (pi400) {
                 report_check("Pi 400 keyboard re-enumerated after rebind",
                              wait_for_usb_device("04d9", "0007", 1),

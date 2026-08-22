@@ -185,13 +185,15 @@ make -C "$source_dir" O="$build_dir" -j"$jobs" \
     broadcom/bcm2711-rpi-400.dtb
 
 init_binary=$build_dir/pi4-lab-init
-"${cross_compile}gcc" -static -Os -s -fno-ident -Wl,--build-id=none \
+"${cross_compile}gcc" -static -Os -s -fno-ident \
+    -Wall -Wextra -Werror -Wl,--build-id=none \
     -o "$init_binary" "$script_dir/init.c"
 python3 "$script_dir/mkinitramfs.py" --mtime "$LINUX_SOURCE_DATE_EPOCH" \
     "$init_binary" "$artifacts_dir/initramfs.cpio.gz"
 
 hardware_init_binary=$build_dir/pi4-lab-hardware-init
-"${cross_compile}gcc" -static -Os -s -fno-ident -Wl,--build-id=none \
+"${cross_compile}gcc" -static -Os -s -fno-ident \
+    -Wall -Wextra -Werror -Wl,--build-id=none \
     -o "$hardware_init_binary" "$script_dir/hardware-init.c"
 python3 "$script_dir/mkinitramfs.py" --mtime "$LINUX_SOURCE_DATE_EPOCH" \
     "$hardware_init_binary" "$artifacts_dir/initramfs-hardware.cpio.gz"

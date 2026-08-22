@@ -17,8 +17,9 @@ usage()
 Usage: $0 [--qemu PATH] [--artifacts DIR] [--machine MODEL] [--append TEXT]
 
 Boot the Linux artifacts produced by build-linux.sh on raspi4b or raspi400.
-The test initramfs prints hardware state, exercises GENET using DHCP, reports
-a success marker, and powers the guest off.  QEMU_SYSTEM_AARCH64 and
+The test initramfs prints hardware state, verifies data transfers to a
+disposable USB mass-storage device, exercises GENET using DHCP, reports a
+success marker, and powers the guest off.  QEMU_SYSTEM_AARCH64 and
 PI4_LINUX_ARTIFACTS_DIR provide the same settings through the environment.
 EOF
 }
@@ -81,17 +82,32 @@ for artifact in Image "$dtb_name" initramfs.cpio.gz; do
     }
 done
 
+usb_storage_image=$(mktemp \
+    "${TMPDIR:-/tmp}/qemu-pi4-usb-storage.XXXXXX")
+cleanup()
+{
+    rm -f -- "$usb_storage_image"
+}
+trap cleanup EXIT
+
+# Leave an 8 MiB sparse raw image.  The guest writes only this disposable file.
+dd if=/dev/zero of="$usb_storage_image" bs=1 count=1 \
+    seek=$((8 * 1024 * 1024 - 1)) 2>/dev/null
+
 kernel_append='earlycon=pl011,mmio32,0xfe201000'
 kernel_append+=' console=ttyAMA0,115200'
 kernel_append+=' rdinit=/init panic=-1 clk_ignore_unused ip=dhcp'
+kernel_append+=' pi4lab.usb_storage=1'
 [[ -z $extra_append ]] || kernel_append+=" $extra_append"
 
-exec "$qemu_binary" \
+"$qemu_binary" \
     -machine "$machine" \
     -kernel "$artifacts_dir/Image" \
     -dtb "$artifacts_dir/$dtb_name" \
     -initrd "$artifacts_dir/initramfs.cpio.gz" \
     -append "$kernel_append" \
+    -drive "if=none,id=pi4-usb-storage,file=$usb_storage_image,format=raw" \
+    -device usb-storage,drive=pi4-usb-storage,bus=vl805.0,port=1.1 \
     -nic user,model=genet \
     -nographic \
     -no-reboot
