@@ -11,6 +11,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "hw/misc/bcm2835_powermgt.h"
 #include "migration/vmstate.h"
 #include "system/runstate.h"
@@ -23,6 +24,53 @@
 #define R_RSTS 0x20
 #define V_RSTS_POWEROFF 0x555 /* Linux uses partition 63 to indicate halt. */
 #define R_WDOG 0x24
+#define V_WDOG_TIMEOUT_MASK 0x000fffff
+#define WDOG_TICKS_PER_SECOND 65536
+
+static int64_t bcm2835_powermgt_wdog_ticks_to_ns(uint32_t ticks)
+{
+    return muldiv64(ticks, NANOSECONDS_PER_SECOND, WDOG_TICKS_PER_SECOND);
+}
+
+static uint32_t bcm2835_powermgt_wdog_timeleft(BCM2835PowerMgtState *s)
+{
+    int64_t now;
+    int64_t expiry;
+    int64_t remaining;
+
+    if (!timer_pending(&s->wdog_timer)) {
+        return 0;
+    }
+
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    expiry = timer_expire_time_ns(&s->wdog_timer);
+    if (expiry <= now) {
+        return 0;
+    }
+
+    remaining = expiry - now;
+    return DIV_ROUND_UP((uint64_t)remaining * WDOG_TICKS_PER_SECOND,
+                        NANOSECONDS_PER_SECOND);
+}
+
+static void bcm2835_powermgt_wdog_arm(BCM2835PowerMgtState *s)
+{
+    timer_mod_ns(&s->wdog_timer,
+                 qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                 bcm2835_powermgt_wdog_ticks_to_ns(s->wdog));
+}
+
+static void bcm2835_powermgt_wdog_expired(void *opaque)
+{
+    BCM2835PowerMgtState *s = BCM2835_POWERMGT(opaque);
+
+    s->wdog = 0;
+    if ((s->rsts & 0xfff) == V_RSTS_POWEROFF) {
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+    } else {
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+    }
+}
 
 static uint64_t bcm2835_powermgt_read(void *opaque, hwaddr offset,
                                       unsigned size)
@@ -38,7 +86,7 @@ static uint64_t bcm2835_powermgt_read(void *opaque, hwaddr offset,
         res = s->rsts;
         break;
     case R_WDOG:
-        res = s->wdog;
+        res = bcm2835_powermgt_wdog_timeleft(s);
         break;
 
     default:
@@ -71,11 +119,9 @@ static void bcm2835_powermgt_write(void *opaque, hwaddr offset,
     case R_RSTC:
         s->rstc = value;
         if (value & V_RSTC_RESET) {
-            if ((s->rsts & 0xfff) == V_RSTS_POWEROFF) {
-                qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
-            } else {
-                qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
-            }
+            bcm2835_powermgt_wdog_arm(s);
+        } else {
+            timer_del(&s->wdog_timer);
         }
         break;
     case R_RSTS:
@@ -84,9 +130,10 @@ static void bcm2835_powermgt_write(void *opaque, hwaddr offset,
         s->rsts = value;
         break;
     case R_WDOG:
-        qemu_log_mask(LOG_UNIMP,
-                      "bcm2835_powermgt_write: WDOG\n");
-        s->wdog = value;
+        s->wdog = value & V_WDOG_TIMEOUT_MASK;
+        if (timer_pending(&s->wdog_timer)) {
+            bcm2835_powermgt_wdog_arm(s);
+        }
         break;
 
     default:
@@ -107,12 +154,13 @@ static const MemoryRegionOps bcm2835_powermgt_ops = {
 
 static const VMStateDescription vmstate_bcm2835_powermgt = {
     .name = TYPE_BCM2835_POWERMGT,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(rstc, BCM2835PowerMgtState),
         VMSTATE_UINT32(rsts, BCM2835PowerMgtState),
         VMSTATE_UINT32(wdog, BCM2835PowerMgtState),
+        VMSTATE_TIMER_V(wdog_timer, BCM2835PowerMgtState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -124,6 +172,8 @@ static void bcm2835_powermgt_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &bcm2835_powermgt_ops, s,
                           TYPE_BCM2835_POWERMGT, 0x200);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
+    timer_init_ns(&s->wdog_timer, QEMU_CLOCK_VIRTUAL,
+                  bcm2835_powermgt_wdog_expired, s);
 }
 
 static void bcm2835_powermgt_reset(DeviceState *dev)
@@ -131,6 +181,7 @@ static void bcm2835_powermgt_reset(DeviceState *dev)
     BCM2835PowerMgtState *s = BCM2835_POWERMGT(dev);
 
     /* https://elinux.org/BCM2835_registers#PM */
+    timer_del(&s->wdog_timer);
     s->rstc = 0x00000102;
     s->rsts = 0x00001000;
     s->wdog = 0x00000000;

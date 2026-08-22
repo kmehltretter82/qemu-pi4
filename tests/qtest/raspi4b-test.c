@@ -13,6 +13,7 @@
 #include "qemu/bswap.h"
 #include "qemu/iov.h"
 #include "qemu/sockets.h"
+#include "qemu/timer.h"
 #include "qobject/qdict.h"
 #include "qobject/qlist.h"
 
@@ -20,6 +21,16 @@
 #define RASPI4_MBOX_READ       (RASPI4_MBOX_BASE + 0x80)
 #define RASPI4_MBOX_WRITE      (RASPI4_MBOX_BASE + 0xa0)
 #define RASPI4_PROPERTY_BUFFER 0x1000
+
+#define RASPI4_PM_BASE          0xfe100000
+#define RASPI4_PM_RSTC          (RASPI4_PM_BASE + 0x1c)
+#define RASPI4_PM_RSTS          (RASPI4_PM_BASE + 0x20)
+#define RASPI4_PM_WDOG          (RASPI4_PM_BASE + 0x24)
+#define RASPI4_PM_PASSWORD      0x5a000000
+#define RASPI4_PM_RSTC_STOP     0x00000102
+#define RASPI4_PM_RSTC_FULL     0x00000020
+#define RASPI4_PM_RSTS_DEFAULT  0x00001000
+#define RASPI4_PM_WDOG_HZ       65536
 
 #define RASPI4_ASB_BASE         0xfe00a000
 #define RASPI4_RPIVID_ASB_BASE  0xfec11000
@@ -696,6 +707,70 @@ static void test_cpu_configuration(void)
     qobject_unref(response);
 }
 
+static void assert_no_reset_event(void)
+{
+    QDict *response;
+
+    response = qtest_qmp(global_qtest, "{ 'execute': 'query-status' }");
+    g_assert(qdict_haskey(response, "return"));
+    qobject_unref(response);
+    g_assert_null(qtest_qmp_event_ref(global_qtest, "RESET"));
+}
+
+static void test_powermgt_watchdog(void)
+{
+    const uint32_t timeout = 3 * RASPI4_PM_WDOG_HZ;
+    const uint32_t marker = 0x4321;
+
+    qtest_system_reset(global_qtest);
+    g_assert_cmphex(readl(RASPI4_PM_RSTC), ==, RASPI4_PM_RSTC_STOP);
+    g_assert_cmphex(readl(RASPI4_PM_RSTS), ==, RASPI4_PM_RSTS_DEFAULT);
+    g_assert_cmphex(readl(RASPI4_PM_WDOG), ==, 0);
+
+    /* PM_WDOG only takes effect once reset mode has armed the watchdog. */
+    writel(RASPI4_PM_RSTS, RASPI4_PM_PASSWORD | marker);
+    writel(RASPI4_PM_WDOG, RASPI4_PM_PASSWORD | timeout);
+    qtest_clock_step(global_qtest, 4 * NANOSECONDS_PER_SECOND);
+    assert_no_reset_event();
+    g_assert_cmphex(readl(RASPI4_PM_RSTS), ==, marker);
+
+    writel(RASPI4_PM_RSTS,
+           RASPI4_PM_PASSWORD | RASPI4_PM_RSTS_DEFAULT);
+    writel(RASPI4_PM_RSTC, RASPI4_PM_PASSWORD | RASPI4_PM_RSTC_FULL);
+    g_assert_cmphex(readl(RASPI4_PM_WDOG), ==, timeout);
+    qtest_clock_step(global_qtest, NANOSECONDS_PER_SECOND);
+    g_assert_cmphex(readl(RASPI4_PM_WDOG), ==,
+                    timeout - RASPI4_PM_WDOG_HZ);
+
+    /* A PM_WDOG write while armed is the driver's ping operation. */
+    writel(RASPI4_PM_WDOG, RASPI4_PM_PASSWORD | timeout);
+    qtest_clock_step(global_qtest, 2 * NANOSECONDS_PER_SECOND);
+    g_assert_cmphex(readl(RASPI4_PM_WDOG), ==, RASPI4_PM_WDOG_HZ);
+
+    /* Clearing the reset mode stops the watchdog. */
+    writel(RASPI4_PM_RSTC, RASPI4_PM_PASSWORD | RASPI4_PM_RSTC_STOP);
+    writel(RASPI4_PM_RSTS, RASPI4_PM_PASSWORD | marker);
+    qtest_clock_step(global_qtest, 2 * NANOSECONDS_PER_SECOND);
+    assert_no_reset_event();
+    g_assert_cmphex(readl(RASPI4_PM_RSTS), ==, marker);
+    g_assert_cmphex(readl(RASPI4_PM_WDOG), ==, 0);
+
+    /* Expiry requests a normal guest reset, rather than resetting on arm. */
+    writel(RASPI4_PM_RSTS,
+           RASPI4_PM_PASSWORD | RASPI4_PM_RSTS_DEFAULT);
+    writel(RASPI4_PM_WDOG,
+           RASPI4_PM_PASSWORD | RASPI4_PM_WDOG_HZ);
+    writel(RASPI4_PM_RSTC, RASPI4_PM_PASSWORD | RASPI4_PM_RSTC_FULL);
+    qtest_clock_step(global_qtest, NANOSECONDS_PER_SECOND - 1);
+    g_assert_cmphex(readl(RASPI4_PM_WDOG), ==, 1);
+    assert_no_reset_event();
+    qtest_clock_step(global_qtest, 1);
+    qtest_qmp_eventwait(global_qtest, "RESET");
+    g_assert_cmphex(readl(RASPI4_PM_RSTC), ==, RASPI4_PM_RSTC_STOP);
+    g_assert_cmphex(readl(RASPI4_PM_RSTS), ==, RASPI4_PM_RSTS_DEFAULT);
+    g_assert_cmphex(readl(RASPI4_PM_WDOG), ==, 0);
+}
+
 static void test_asb_bridge_ids(void)
 {
     g_assert_cmphex(readl(RASPI4_ASB_BASE), ==, 0);
@@ -1019,6 +1094,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/raspi4b/asb/bridge_ids", test_asb_bridge_ids);
     qtest_add_func("/raspi4b/cpu/configuration", test_cpu_configuration);
+    qtest_add_func("/raspi4b/powermgt/watchdog", test_powermgt_watchdog);
     qtest_add_func("/raspi4b/interrupts/system_timer",
                    test_system_timer_interrupts);
     qtest_add_func("/raspi4b/interrupts/spi0", test_spi0_interrupt);
