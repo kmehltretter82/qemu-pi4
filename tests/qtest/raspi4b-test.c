@@ -24,6 +24,19 @@
 #define ASB_AXI_BRDG_ID         0x20
 #define BCM2835_BRDG_ID         0x62726467
 
+#define RASPI4_SYSTIMER_BASE      0xfe003000
+#define RASPI4_SYSTIMER_CS        (RASPI4_SYSTIMER_BASE + 0x00)
+#define RASPI4_SYSTIMER_CLO       (RASPI4_SYSTIMER_BASE + 0x04)
+#define RASPI4_SYSTIMER_COMPARE_0 (RASPI4_SYSTIMER_BASE + 0x0c)
+#define RASPI4_SYSTIMER_GIC_IRQ_0 64
+
+#define RASPI4_SPI0_BASE          0xfe204000
+#define RASPI4_SPI0_CS            RASPI4_SPI0_BASE
+#define RASPI4_SPI0_GIC_IRQ       118
+#define SPI0_CS_DONE              (1U << 16)
+#define SPI0_CS_INTD              (1U << 9)
+#define SPI0_CS_TA                (1U << 7)
+
 #define RASPI4_GENET_BASE             0xfd580000
 #define RASPI4_GENET_REV              (RASPI4_GENET_BASE + 0x0000)
 #define RASPI4_GENET_INTRL2_0         (RASPI4_GENET_BASE + 0x0200)
@@ -114,6 +127,32 @@ static void test_asb_bridge_ids(void)
     g_assert_cmphex(readl(RASPI4_RPIVID_ASB_BASE), ==, 0);
     g_assert_cmphex(readl(RASPI4_RPIVID_ASB_BASE + ASB_AXI_BRDG_ID), ==,
                     BCM2835_BRDG_ID);
+}
+
+static void test_system_timer_interrupts(void)
+{
+    for (unsigned int i = 0; i < 4; i++) {
+        uint32_t now = readl(RASPI4_SYSTIMER_CLO);
+
+        writel(RASPI4_SYSTIMER_COMPARE_0 + i * 4, now + 100);
+        qtest_clock_step(global_qtest, 200 * 1000);
+
+        g_assert_true(readl(RASPI4_SYSTIMER_CS) & (1U << i));
+        g_assert_true(get_irq(RASPI4_SYSTIMER_GIC_IRQ_0 + i));
+
+        writel(RASPI4_SYSTIMER_CS, 1U << i);
+        g_assert_false(get_irq(RASPI4_SYSTIMER_GIC_IRQ_0 + i));
+    }
+}
+
+static void test_spi0_interrupt(void)
+{
+    writel(RASPI4_SPI0_CS, SPI0_CS_INTD | SPI0_CS_TA);
+    g_assert_true(readl(RASPI4_SPI0_CS) & SPI0_CS_DONE);
+    g_assert_true(get_irq(RASPI4_SPI0_GIC_IRQ));
+
+    writel(RASPI4_SPI0_CS, 0);
+    g_assert_false(get_irq(RASPI4_SPI0_GIC_IRQ));
 }
 
 static void test_sd_card_on_emmc2(void)
@@ -386,6 +425,9 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/raspi4b/asb/bridge_ids", test_asb_bridge_ids);
     qtest_add_func("/raspi4b/cpu/configuration", test_cpu_configuration);
+    qtest_add_func("/raspi4b/interrupts/system_timer",
+                   test_system_timer_interrupts);
+    qtest_add_func("/raspi4b/interrupts/spi0", test_spi0_interrupt);
     qtest_add_func("/raspi4b/sd/card_on_emmc2", test_sd_card_on_emmc2);
     qtest_add_func("/raspi4b/firmware_gpio", test_firmware_gpio);
     qtest_add_func("/raspi4b/firmware_dma_channels",
