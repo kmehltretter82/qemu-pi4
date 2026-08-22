@@ -446,6 +446,22 @@ static uint16_t gic_get_current_pending_irq(GICState *s, int cpu,
     return pending_irq;
 }
 
+static uint16_t gic_get_current_pending_hppir(GICState *s, int cpu,
+                                              MemTxAttrs attrs)
+{
+    uint16_t pending_irq = gic_get_current_pending_irq(s, cpu, attrs);
+
+    if (gic_is_vcpu(cpu) && pending_irq < GIC_NR_SGIS) {
+        uint32_t *lr_entry = gic_get_lr_entry(s, pending_irq, cpu);
+
+        if (!GICH_LR_HW(*lr_entry)) {
+            pending_irq |= GICH_LR_CPUID(*lr_entry) << 10;
+        }
+    }
+
+    return pending_irq;
+}
+
 static int gic_get_group_priority(GICState *s, int cpu, int irq)
 {
     /* Return the group priority of the specified interrupt
@@ -1648,7 +1664,7 @@ static MemTxResult gic_cpu_read(GICState *s, int cpu, int offset,
         *data = gic_get_running_priority(s, cpu, attrs);
         break;
     case 0x18: /* Highest Pending Interrupt */
-        *data = gic_get_current_pending_irq(s, cpu, attrs);
+        *data = gic_get_current_pending_hppir(s, cpu, attrs);
         break;
     case 0x1c: /* Aliased Binary Point */
         /* GIC v2, no security: ABPR
