@@ -27,24 +27,33 @@ because Compute Module 4 exposes PCIe for external devices instead.
 Current fork status
 -------------------
 
-The first host-controller slice is implemented.  It provides the BCM2711
-controller aperture, a Broadcom ``14e4:2711`` root port with PCI revision
-``0x20`` and a Gen2 x1 capability, root and indirect configuration access,
-reset/link scaffolding, minimal synchronous MDIO/SSC behavior, four
+The first two host-controller slices are implemented.  They provide the
+BCM2711 controller aperture, a Broadcom ``14e4:2711`` root port with PCI
+revision ``0x20`` and a Gen2 x1 capability, root and indirect configuration
+access, reset/link scaffolding, minimal synchronous MDIO/SSC behavior, four
 guest-programmed outbound windows, INTx routing, all six GIC outputs, and
 migration state.
 
-Qtests cover root identity and configuration, a QMP topology cross-check,
-reset/link/MDIO transitions, absent downstream BDFs, both observed outbound
-window layouts, removal of a reprogrammed window, and system reset.
+Downstream bus masters now use a private PCI DMA address space.  BCM2711 BAR2
+maps only the guest-programmed inbound portion of SDRAM; CPU peripheral MMIO
+is never exposed as an accidental DMA fallback.  The mapping follows SCB
+access enable, the hardware's nonlinear size encoding, the programmed PCI
+base, and bridge reset.  The 32-vector MSI block implements the Linux-used
+doorbell, status, mask and clear path on GIC SPI 148.
+
+Qtests use QEMU's small ``edu`` PCI endpoint to cover endpoint configuration,
+BAR probing and outbound forwarding, INTx, bidirectional DMA through a high
+PCI address, rejection outside the inbound window, reset gating, and MSI
+masking and clearing.  The earlier root, MDIO, absent-BDF, outbound-window and
+system-reset coverage remains.
 
 This is deliberately not guest-visible PCIe support yet.  The PCIe
-device-tree node remains hidden while private inbound DMA, MSI and controller
-event behavior, the VL805 endpoint, firmware-requested reset, and the Pi 400
-hub and keyboard topology are missing.  Link-up currently follows the two
-reset bits rather than endpoint link training, and the MDIO model completes
-operations immediately.  Endpoint, INTx and migration tests and a Linux boot
-with PCIe enabled also remain to be added.
+device-tree node remains hidden while controller-event behavior, the VL805
+endpoint, firmware-requested reset, and the Pi 400 hub and keyboard topology
+are missing.  Link-up currently follows the two reset bits rather than
+endpoint link training, and the MDIO model completes operations immediately.
+An active-mapping migration qtest and a Linux boot with PCIe enabled also
+remain to be added.
 
 BCM2711 host requirements
 -------------------------
@@ -116,7 +125,8 @@ Implementation stages
 1. Implement the BCM2711 host, real root port, indirect configuration,
    reset/link/MDIO behavior and dynamic outbound windows. Prove root-port
    configuration and safe absent-device access.  This slice is implemented.
-2. Add the private inbound DMA mapping and complete MSI delivery.
+2. Add the private inbound DMA mapping and complete MSI delivery.  This slice
+   is implemented and covered with a DMA-capable test endpoint.
 3. Add the VL805 xHCI personality, populate it from the Pi board model, and
    prove endpoint enumeration.
 4. Implement the firmware ``NOTIFY_XHCI_RESET`` request as an observable

@@ -44,8 +44,9 @@ Implemented devices
  * VideoCore firmware property interface, including firmware-controlled GPIOs
  * Peripheral SPI controller (SPI)
  * Broadcom Serial Controller (I2C)
- * BCM2711 PCIe host and root-port scaffolding; the guest PCIe node remains
-   hidden until DMA, MSI, and the VL805 path are implemented
+ * BCM2711 PCIe host and root port, including dynamic outbound and inbound
+   DMA windows, INTx, and MSI; the guest PCIe node remains hidden until the
+   VL805 path is implemented
 
 Missing devices
 ---------------
@@ -55,8 +56,8 @@ Missing devices
  * BCM2711 HDMI/display pipeline and HDMI DDC I2C controllers
  * BCM2711 always-on L2 interrupt controller used by HDMI
  * Pulse Width Modulation (PWM)
- * BCM2711 PCIe private DMA and MSI behavior, and the Pi 4-family VIA VL805
-   USB 3 controller
+ * Pi 4-family VIA VL805 USB 3 controller and remaining BCM2711 PCIe
+   controller-event behavior
  * Raspberry Pi 400 integrated keyboard, which is attached through the VL805
  * RNG200 random number generator
  * BCM2711 thermal sensor

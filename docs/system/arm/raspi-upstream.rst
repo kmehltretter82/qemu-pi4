@@ -288,18 +288,21 @@ QP4-UP-020: BCM2711 PCIe host and root-port model
 
 :Classification: enhancement candidate
 :Fork commit: ``1bf939f2b26d4d2f5300a191d5d3e27f7060a88d``
+:Fork follow-up: ``4c0d24ef7728a4050357ebf980d9b3b94be1cd50``
 :Observed issue: Upstream QEMU has no BCM2711 PCIe host model, so the
   Raspberry Pi 4 machine must hide the PCIe device-tree node and cannot expose
   the board's VL805 USB path.
-:Fork change: Add the first host-controller slice: the controller aperture, a
-  BCM2711 root port, root and indirect configuration access, reset/link and
-  minimal MDIO behavior, programmable outbound windows, INTx routing, GIC
-  outputs, and migration state.  Private DMA, MSI, VL805 and guest DT exposure
-  remain intentionally out of scope for this slice.
+:Fork change: Add the controller aperture, a BCM2711 root port, root and
+  indirect configuration access, reset/link and minimal MDIO behavior,
+  programmable outbound windows, INTx routing, GIC outputs, and migration
+  state.  The follow-up adds a private RAM-only DMA address space, BAR2 inbound
+  mapping, and the 32-vector MSI status/mask/doorbell path.  VL805 and guest DT
+  exposure remain intentionally out of scope.
 :Before sending: Confirm controller revision and reset semantics with raw Pi
-  400 MMIO, add downstream-device, INTx and migration tests, split model, SoC
-  wiring and qtests as appropriate, and address machine-version compatibility
-  before adding a PCI root bus to an existing machine type.
+  400 MMIO, add an active-mapping migration test, split model, SoC wiring and
+  qtests as appropriate, and address machine-version compatibility before
+  adding a PCI root bus to an existing machine type.  Downstream-device, INTx,
+  private-DMA and MSI qtests now provide the functional controller evidence.
 
 Hardware-derived Pi 400 memory-map correction
 ----------------------------------------------
