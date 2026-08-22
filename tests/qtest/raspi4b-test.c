@@ -143,6 +143,17 @@ static void test_system_timer_interrupts(void)
         writel(RASPI4_SYSTIMER_CS, 1U << i);
         g_assert_false(get_irq(RASPI4_SYSTIMER_GIC_IRQ_0 + i));
     }
+
+    writel(RASPI4_SYSTIMER_COMPARE_0,
+           readl(RASPI4_SYSTIMER_CLO) + 100);
+    qtest_clock_step(global_qtest, 200 * 1000);
+    g_assert_true(get_irq(RASPI4_SYSTIMER_GIC_IRQ_0));
+
+    qtest_system_reset(global_qtest);
+    g_assert_false(get_irq(RASPI4_SYSTIMER_GIC_IRQ_0));
+    g_assert_cmphex(readl(RASPI4_SYSTIMER_CS), ==, 0);
+    qtest_clock_step(global_qtest, 200 * 1000);
+    g_assert_false(get_irq(RASPI4_SYSTIMER_GIC_IRQ_0));
 }
 
 static void test_spi0_interrupt(void)
@@ -151,6 +162,12 @@ static void test_spi0_interrupt(void)
     g_assert_true(readl(RASPI4_SPI0_CS) & SPI0_CS_DONE);
     g_assert_true(get_irq(RASPI4_SPI0_GIC_IRQ));
 
+    qtest_system_reset(global_qtest);
+    g_assert_false(readl(RASPI4_SPI0_CS) & SPI0_CS_DONE);
+    g_assert_false(get_irq(RASPI4_SPI0_GIC_IRQ));
+
+    writel(RASPI4_SPI0_CS, SPI0_CS_INTD | SPI0_CS_TA);
+    g_assert_true(get_irq(RASPI4_SPI0_GIC_IRQ));
     writel(RASPI4_SPI0_CS, 0);
     g_assert_false(get_irq(RASPI4_SPI0_GIC_IRQ));
 }

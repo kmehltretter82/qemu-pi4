@@ -122,6 +122,10 @@ static void bcm2835_systmr_reset(DeviceState *dev)
 {
     BCM2835SystemTimerState *s = BCM2835_SYSTIMER(dev);
 
+    for (size_t i = 0; i < ARRAY_SIZE(s->tmr); i++) {
+        timer_del(&s->tmr[i].timer);
+        qemu_set_irq(s->tmr[i].irq, 0);
+    }
     memset(&s->reg, 0, sizeof(s->reg));
 }
 

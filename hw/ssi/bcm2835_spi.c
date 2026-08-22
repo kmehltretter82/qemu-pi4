@@ -237,6 +237,7 @@ static void bcm2835_spi_reset(DeviceState *dev)
 {
     BCM2835SPIState *s = BCM2835_SPI(dev);
 
+    qemu_set_irq(s->irq, 0);
     fifo8_reset(&s->tx_fifo);
     fifo8_reset(&s->rx_fifo);
 
