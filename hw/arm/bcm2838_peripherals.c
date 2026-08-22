@@ -14,8 +14,10 @@
 #include "net/net.h"
 #include "system/address-spaces.h"
 
-#define CLOCK_ISP_OFFSET        0xc11000
-#define CLOCK_ISP_SIZE          0x100
+#define RPIVID_ASB_OFFSET       0xc11000
+#define ASB_SIZE                0x24
+#define ASB_AXI_BRDG_ID         0x20
+#define BCM2835_BRDG_ID         0x62726467
 
 /* Lower peripheral base address on the VC (GPU) system bus */
 #define BCM2838_VC_PERI_LOW_BASE 0x7c000000
@@ -24,6 +26,24 @@
 
 /* Capabilities for SD controller: no DMA, high-speed, default clocks etc. */
 #define BCM2835_SDHC_CAPAREG 0x52134b4
+
+static uint64_t bcm2838_asb_read(void *opaque, hwaddr offset, unsigned size)
+{
+    return offset == ASB_AXI_BRDG_ID ? BCM2835_BRDG_ID : 0;
+}
+
+static void bcm2838_asb_write(void *opaque, hwaddr offset, uint64_t value,
+                              unsigned size)
+{
+}
+
+static const MemoryRegionOps bcm2838_asb_ops = {
+    .read = bcm2838_asb_read,
+    .write = bcm2838_asb_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+};
 
 static void bcm2838_peripherals_init(Object *obj)
 {
@@ -35,6 +55,11 @@ static void bcm2838_peripherals_init(Object *obj)
     memory_region_init(&s->peri_low_mr, obj, "bcm2838-peripherals",
                        bc->peri_low_size);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->peri_low_mr);
+
+    memory_region_init_io(&s->asb_mr, obj, &bcm2838_asb_ops, s,
+                          "bcm2838-asb", ASB_SIZE);
+    memory_region_init_io(&s->rpivid_asb_mr, obj, &bcm2838_asb_ops, s,
+                          "bcm2838-rpivid-asb", ASB_SIZE);
 
     /* Extended Mass Media Controller 2 */
     object_initialize_child(obj, "emmc2", &s->emmc2, TYPE_SYSBUS_SDHCI);
@@ -189,8 +214,8 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(&s_base->peri_mr, BCM2838_MPHI_OFFSET,
                                 &s->mphi_mr_alias);
 
-    create_unimp(s_base, &s->clkisp, "bcm2835-clkisp", CLOCK_ISP_OFFSET,
-                 CLOCK_ISP_SIZE);
+    memory_region_add_subregion(&s_base->peri_mr, RPIVID_ASB_OFFSET,
+                                &s->rpivid_asb_mr);
 
     /* GPIO */
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->gpio), errp)) {
@@ -215,8 +240,7 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     object_property_add_alias(OBJECT(s), "sd-bus", OBJECT(&s->emmc2),
                               "sd-bus");
 
-    /* BCM2838 RPiVid ASB must be mapped to prevent kernel crash */
-    create_unimp(s_base, &s->asb, "bcm2838-asb", BRDG_OFFSET, 0x24);
+    memory_region_add_subregion(&s_base->peri_mr, BRDG_OFFSET, &s->asb_mr);
 }
 
 static void bcm2838_peripherals_class_init(ObjectClass *oc, const void *data)

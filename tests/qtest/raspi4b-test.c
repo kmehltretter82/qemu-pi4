@@ -19,6 +19,11 @@
 #define RASPI4_MBOX_WRITE      (RASPI4_MBOX_BASE + 0xa0)
 #define RASPI4_PROPERTY_BUFFER 0x1000
 
+#define RASPI4_ASB_BASE         0xfe00a000
+#define RASPI4_RPIVID_ASB_BASE  0xfec11000
+#define ASB_AXI_BRDG_ID         0x20
+#define BCM2835_BRDG_ID         0x62726467
+
 #define RASPI4_GENET_BASE             0xfd580000
 #define RASPI4_GENET_REV              (RASPI4_GENET_BASE + 0x0000)
 #define RASPI4_GENET_INTRL2_0         (RASPI4_GENET_BASE + 0x0200)
@@ -99,6 +104,16 @@ static void test_cpu_configuration(void)
     g_assert(qdict_haskey(response, "return"));
     g_assert_cmpint(qdict_get_int(response, "return"), ==, 54000000);
     qobject_unref(response);
+}
+
+static void test_asb_bridge_ids(void)
+{
+    g_assert_cmphex(readl(RASPI4_ASB_BASE), ==, 0);
+    g_assert_cmphex(readl(RASPI4_ASB_BASE + ASB_AXI_BRDG_ID), ==,
+                    BCM2835_BRDG_ID);
+    g_assert_cmphex(readl(RASPI4_RPIVID_ASB_BASE), ==, 0);
+    g_assert_cmphex(readl(RASPI4_RPIVID_ASB_BASE + ASB_AXI_BRDG_ID), ==,
+                    BCM2835_BRDG_ID);
 }
 
 static void test_sd_card_on_emmc2(void)
@@ -369,6 +384,7 @@ int main(int argc, char **argv)
 #endif
 
     g_test_init(&argc, &argv, NULL);
+    qtest_add_func("/raspi4b/asb/bridge_ids", test_asb_bridge_ids);
     qtest_add_func("/raspi4b/cpu/configuration", test_cpu_configuration);
     qtest_add_func("/raspi4b/sd/card_on_emmc2", test_sd_card_on_emmc2);
     qtest_add_func("/raspi4b/firmware_gpio", test_firmware_gpio);
