@@ -17,6 +17,8 @@
 #define TYPE_BCM2835_PROPERTY "bcm2835-property"
 OBJECT_DECLARE_SIMPLE_TYPE(BCM2835PropertyState, BCM2835_PROPERTY)
 
+#define BCM2835_PROPERTY_GPIO_COUNT 8
+
 struct BCM2835PropertyState {
     /*< private >*/
     SysBusDevice busdev;
@@ -34,6 +36,12 @@ struct BCM2835PropertyState {
     uint32_t addr;
     char *command_line;
     bool pending;
+
+    uint32_t gpio_direction[BCM2835_PROPERTY_GPIO_COUNT];
+    uint32_t gpio_polarity[BCM2835_PROPERTY_GPIO_COUNT];
+    uint32_t gpio_term_en[BCM2835_PROPERTY_GPIO_COUNT];
+    uint32_t gpio_term_pull_up[BCM2835_PROPERTY_GPIO_COUNT];
+    uint32_t gpio_state[BCM2835_PROPERTY_GPIO_COUNT];
 };
 
 #endif

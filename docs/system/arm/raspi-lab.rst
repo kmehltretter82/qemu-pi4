@@ -60,6 +60,12 @@ After creating a focused qemu-pi4 build, run::
 The initramfs prints basic kernel hardware state and the marker
 ``PI4-LAB: upstream Linux boot successful``, then requests poweroff.
 
+The same kernel and unmodified upstream Pi 4 DTB can also mount a normal
+Linux root filesystem from the emulated external SD card.  Attach the image
+with ``-drive file=IMAGE,if=sd,format=raw`` and use ``root=/dev/mmcblk0`` for
+an unpartitioned filesystem or ``root=/dev/mmcblk0pN`` for partition ``N``.
+See :doc:`raspi` for a complete command line and safe snapshot mode.
+
 Boot on a Pi 400
 ----------------
 

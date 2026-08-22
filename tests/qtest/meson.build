@@ -230,6 +230,11 @@ qtests_aspeed64 = \
    'ast2700-sgpio-test',
    'ast2700-smc-test']
 
+qtests_raspi4 = \
+  ['bcm2835-dma-test',
+   'bcm2835-i2c-test',
+   'raspi4b-test']
+
 qtests_stm32l4x5 = \
   ['stm32l4x5_exti-test',
    'stm32l4x5_syscfg-test',
@@ -266,7 +271,7 @@ qtests_aarch64 = \
     ['tpm-tis-device-test', 'tpm-tis-device-swtpm-test'] : []) +                                         \
   (config_all_devices.has_key('CONFIG_XLNX_ZYNQMP_ARM') ? ['xlnx-can-test', 'fuzz-xlnx-dp-test'] : []) + \
   (config_all_devices.has_key('CONFIG_XLNX_VERSAL') ? ['xlnx-canfd-test', 'xlnx-versal-trng-test'] : []) + \
-  (config_all_devices.has_key('CONFIG_RASPI4') ? ['bcm2835-dma-test', 'bcm2835-i2c-test'] : []) +  \
+  (config_all_devices.has_key('CONFIG_RASPI4') ? qtests_raspi4 : []) +  \
   (config_all_accel.has_key('CONFIG_TCG') and                                            \
    config_all_devices.has_key('CONFIG_TPM_TIS_I2C') ? ['tpm-tis-i2c-test', 'tpm-tis-i2c-swtpm-test'] : []) + \
   (config_all_devices.has_key('CONFIG_ASPEED_SOC') ? qtests_aspeed64 : []) + \

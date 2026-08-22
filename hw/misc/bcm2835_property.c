@@ -20,8 +20,20 @@
 #include "hw/arm/raspi4_platform.h"
 
 #define VCHI_BUSADDR_SIZE       sizeof(uint32_t)
+#define RPI_EXP_GPIO_BASE       128
 
 /* https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface */
+
+static bool bcm2835_property_gpio_index(uint32_t gpio, unsigned int *index)
+{
+    if (gpio < RPI_EXP_GPIO_BASE ||
+        gpio >= RPI_EXP_GPIO_BASE + BCM2835_PROPERTY_GPIO_COUNT) {
+        return false;
+    }
+
+    *index = gpio - RPI_EXP_GPIO_BASE;
+    return true;
+}
 
 static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
 {
@@ -319,6 +331,83 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             resplen = 4;
             break;
 
+        /* Firmware-controlled GPIO expander */
+
+        case RPI_FWREQ_GET_GPIO_CONFIG:
+        {
+            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            unsigned int index;
+
+            if (bufsize < 20) {
+                break;
+            }
+            resplen = 20;
+            if (!bcm2835_property_gpio_index(gpio, &index)) {
+                break;
+            }
+            stl_le_phys(&s->dma_as, value + 12, 0);
+            stl_le_phys(&s->dma_as, value + 16, s->gpio_direction[index]);
+            stl_le_phys(&s->dma_as, value + 20, s->gpio_polarity[index]);
+            stl_le_phys(&s->dma_as, value + 24, s->gpio_term_en[index]);
+            stl_le_phys(&s->dma_as, value + 28, s->gpio_term_pull_up[index]);
+            break;
+        }
+
+        case RPI_FWREQ_SET_GPIO_CONFIG:
+        {
+            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            unsigned int index;
+
+            if (bufsize < 24) {
+                break;
+            }
+            resplen = 24;
+            if (!bcm2835_property_gpio_index(gpio, &index)) {
+                break;
+            }
+            s->gpio_direction[index] = ldl_le_phys(&s->dma_as, value + 16);
+            s->gpio_polarity[index] = ldl_le_phys(&s->dma_as, value + 20);
+            s->gpio_term_en[index] = ldl_le_phys(&s->dma_as, value + 24);
+            s->gpio_term_pull_up[index] = ldl_le_phys(&s->dma_as, value + 28);
+            s->gpio_state[index] = ldl_le_phys(&s->dma_as, value + 32);
+            stl_le_phys(&s->dma_as, value + 12, 0);
+            break;
+        }
+
+        case RPI_FWREQ_GET_GPIO_STATE:
+        {
+            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            unsigned int index;
+
+            if (bufsize < 8) {
+                break;
+            }
+            resplen = 8;
+            if (!bcm2835_property_gpio_index(gpio, &index)) {
+                break;
+            }
+            stl_le_phys(&s->dma_as, value + 12, 0);
+            stl_le_phys(&s->dma_as, value + 16, s->gpio_state[index]);
+            break;
+        }
+
+        case RPI_FWREQ_SET_GPIO_STATE:
+        {
+            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            unsigned int index;
+
+            if (bufsize < 8) {
+                break;
+            }
+            resplen = 8;
+            if (!bcm2835_property_gpio_index(gpio, &index)) {
+                break;
+            }
+            s->gpio_state[index] = ldl_le_phys(&s->dma_as, value + 16);
+            stl_le_phys(&s->dma_as, value + 12, 0);
+            break;
+        }
+
         case RPI_FWREQ_VCHIQ_INIT:
             stl_le_phys(&s->dma_as,
                         value + offsetof(rpi_firmware_prop_request_t, payload),
@@ -496,12 +585,22 @@ static const MemoryRegionOps bcm2835_property_ops = {
 
 static const VMStateDescription vmstate_bcm2835_property = {
     .name = TYPE_BCM2835_PROPERTY,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_MACADDR(macaddr, BCM2835PropertyState),
         VMSTATE_UINT32(addr, BCM2835PropertyState),
         VMSTATE_BOOL(pending, BCM2835PropertyState),
+        VMSTATE_UINT32_ARRAY_V(gpio_direction, BCM2835PropertyState,
+                               BCM2835_PROPERTY_GPIO_COUNT, 2),
+        VMSTATE_UINT32_ARRAY_V(gpio_polarity, BCM2835PropertyState,
+                               BCM2835_PROPERTY_GPIO_COUNT, 2),
+        VMSTATE_UINT32_ARRAY_V(gpio_term_en, BCM2835PropertyState,
+                               BCM2835_PROPERTY_GPIO_COUNT, 2),
+        VMSTATE_UINT32_ARRAY_V(gpio_term_pull_up, BCM2835PropertyState,
+                               BCM2835_PROPERTY_GPIO_COUNT, 2),
+        VMSTATE_UINT32_ARRAY_V(gpio_state, BCM2835PropertyState,
+                               BCM2835_PROPERTY_GPIO_COUNT, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -528,6 +627,11 @@ static void bcm2835_property_reset(DeviceState *dev)
     BCM2835PropertyState *s = BCM2835_PROPERTY(dev);
 
     s->pending = false;
+    memset(s->gpio_direction, 0, sizeof(s->gpio_direction));
+    memset(s->gpio_polarity, 0, sizeof(s->gpio_polarity));
+    memset(s->gpio_term_en, 0, sizeof(s->gpio_term_en));
+    memset(s->gpio_term_pull_up, 0, sizeof(s->gpio_term_pull_up));
+    memset(s->gpio_state, 0, sizeof(s->gpio_state));
 }
 
 static void bcm2835_property_realize(DeviceState *dev, Error **errp)
