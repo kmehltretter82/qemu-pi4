@@ -9,6 +9,9 @@ The Raspberry Pi 400 uses the same BCM2711 generation but is not yet exposed
 as a distinct machine. Raspberry Pi 5 is not supported: its BCM2712 SoC and
 RP1 I/O controller require separate models.
 
+Potential correctness fixes and enhancements suitable for later submission
+to QEMU are kept in the evidence-based :doc:`raspi-upstream` tracker.
+
 Implemented devices
 -------------------
 
@@ -22,6 +25,8 @@ Implemented devices
  * Frame Buffer
  * Arasan eMMC2 SD/MMC host controller and external SD card
  * USB2 host controller (DWC2 and MPHI)
+ * Broadcom GENET v5 Gigabit Ethernet controller with an external
+   BCM54213PE-compatible PHY
  * MailBox controller (MBOX)
  * VideoCore firmware property interface, including firmware-controlled GPIOs
  * Peripheral SPI controller (SPI)
@@ -36,7 +41,6 @@ Missing devices
  * BCM2711 always-on L2 interrupt controller used by HDMI
  * Pulse Width Modulation (PWM)
  * PCIe root port
- * GENET Ethernet controller
  * RNG200 random number generator
  * BCM2711 thermal sensor
 
@@ -53,6 +57,7 @@ For example::
       -kernel Image \
       -dtb bcm2711-rpi-4-b.dtb \
       -drive file=raspios.img,if=sd,format=raw,snapshot=on \
+      -nic user,model=genet \
       -append 'earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0,115200 root=/dev/mmcblk0p2 rootwait rw' \
       -nographic
 
@@ -60,3 +65,17 @@ With an unpartitioned filesystem image, use ``root=/dev/mmcblk0`` instead.
 The SD model requires an image whose size is a valid SD card capacity; a
 power-of-two size such as 4 GiB is a convenient choice.  Remove
 ``snapshot=on`` only when guest writes should persist.
+
+Ethernet
+--------
+
+GENET is the ``raspi4b`` machine's on-board network device.  Connect it to
+any normal QEMU network backend; for example, unprivileged user-mode
+networking is selected with::
+
+  -nic user,model=genet
+
+The model implements the BCM2711 GENET v5 register layout, the external MDIO
+PHY, link state, descriptor DMA, interrupts, scatter-gather transmission and
+checksum offload.  Upstream Linux can acquire a DHCP lease through it.  MIB
+counters, wake-on-LAN and hardware receive filtering are not yet modeled.

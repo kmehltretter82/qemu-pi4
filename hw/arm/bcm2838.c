@@ -228,6 +228,14 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
                           qdev_get_gpio_in(gicdev,
                                           GIC_SPI_INTERRUPT_EMMC_EMMC2));
 
+    /* Connect the two GENET interrupt outputs to the GIC. */
+    sysbus_connect_irq(SYS_BUS_DEVICE(&ps->genet), 0,
+                       qdev_get_gpio_in(gicdev,
+                                       GIC_SPI_INTERRUPT_GENET_A));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&ps->genet), 1,
+                       qdev_get_gpio_in(gicdev,
+                                       GIC_SPI_INTERRUPT_GENET_B));
+
     /* Connect USB OTG and MPHI to the interrupt controller */
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->mphi), 0,
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_MPHI));

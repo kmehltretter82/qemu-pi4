@@ -85,6 +85,9 @@ config ALLWINNER_EMAC
 config ALLWINNER_SUN8I_EMAC
     bool
 
+config BCM2838_GENET
+    bool
+
 config IMX_FEC
     bool
     select LAN9118_PHY

@@ -69,6 +69,8 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define AUX_OFFSET              0x215000 /* AUX: UART1/SPI1/SPI2 */
 #define EMMC1_OFFSET            0x300000
 #define EMMC2_OFFSET            0x340000
+#define GENET_OFFSET            0x1580000
+#define GENET_SIZE              0x10000
 #define SMI_OFFSET              0x600000
 #define BSC1_OFFSET             0x804000 /* BSC1 I2C/TWI */
 #define BSC2_OFFSET             0x805000 /* BSC2 I2C/TWI */

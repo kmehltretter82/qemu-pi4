@@ -57,8 +57,10 @@ After creating a focused qemu-pi4 build, run::
       --qemu build/qemu-system-aarch64 \
       --artifacts build-pi4-linux/artifacts
 
-The initramfs prints basic kernel hardware state and the marker
-``PI4-LAB: upstream Linux boot successful``, then requests poweroff.
+The runner connects the emulated GENET controller to QEMU user-mode
+networking and requests a DHCP lease.  The initramfs prints basic kernel
+hardware state, carrier, the assigned IPv4 address, network counters and the
+marker ``PI4-LAB: upstream Linux boot successful``, then requests poweroff.
 
 The same kernel and unmodified upstream Pi 4 DTB can also mount a normal
 Linux root filesystem from the emulated external SD card.  Attach the image

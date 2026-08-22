@@ -16,9 +16,9 @@ usage()
 Usage: $0 [--qemu PATH] [--artifacts DIR] [--append TEXT]
 
 Boot the Linux artifacts produced by build-linux.sh on the raspi4b machine.
-The test initramfs prints hardware state, reports a success marker, and powers
-the guest off.  QEMU_SYSTEM_AARCH64 and PI4_LINUX_ARTIFACTS_DIR provide the
-same settings through the environment.
+The test initramfs prints hardware state, exercises GENET using DHCP, reports
+a success marker, and powers the guest off.  QEMU_SYSTEM_AARCH64 and
+PI4_LINUX_ARTIFACTS_DIR provide the same settings through the environment.
 EOF
 }
 
@@ -64,7 +64,7 @@ done
 
 kernel_append='earlycon=pl011,mmio32,0xfe201000'
 kernel_append+=' console=ttyAMA0,115200'
-kernel_append+=' rdinit=/init panic=-1 clk_ignore_unused'
+kernel_append+=' rdinit=/init panic=-1 clk_ignore_unused ip=dhcp'
 [[ -z $extra_append ]] || kernel_append+=" $extra_append"
 
 exec "$qemu_binary" \
@@ -73,5 +73,6 @@ exec "$qemu_binary" \
     -dtb "$artifacts_dir/bcm2711-rpi-4-b.dtb" \
     -initrd "$artifacts_dir/initramfs.cpio.gz" \
     -append "$kernel_append" \
+    -nic user,model=genet \
     -nographic \
     -no-reboot

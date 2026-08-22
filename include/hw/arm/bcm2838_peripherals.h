@@ -12,6 +12,7 @@
 #include "hw/arm/bcm2835_peripherals.h"
 #include "hw/sd/sdhci.h"
 #include "hw/gpio/bcm2838_gpio.h"
+#include "hw/net/bcm2838_genet.h"
 
 /* SPI */
 #define GIC_SPI_INTERRUPT_MBOX         33
@@ -66,6 +67,7 @@ struct BCM2838PeripheralState {
 
     SDHCIState emmc2;
     BCM2838GpioState gpio;
+    BCM2838GenetState genet;
 
     OrIRQState mmc_irq_orgate;
     OrIRQState dma_7_8_irq_orgate;

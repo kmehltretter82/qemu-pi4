@@ -19,6 +19,9 @@ Model B and is the foundation for a future Raspberry Pi 400 machine. A
 distinct Pi 400 model and improved Pi 4 peripheral coverage are project goals;
 they are not claimed as complete yet.
 
+The model includes the BCM2711 GENET v5 Ethernet controller and external PHY.
+The pinned upstream Linux lab validates link, DHCP, transmit and receive DMA.
+
 The BCM2711 V3D 4.2 graphics accelerator is not implemented.  The current
 display support is a firmware-configured framebuffer, so Raspberry Pi DRM/Mesa
 3D acceleration is unavailable.

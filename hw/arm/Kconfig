@@ -368,6 +368,7 @@ config RASPI4
     select USB_DWC2
     select BCM2835_SPI
     select BCM2835_I2C
+    select BCM2838_GENET
     select OR_IRQ
     select SPLIT_IRQ
     select UNIMP

@@ -11,6 +11,8 @@
 #include "qemu/module.h"
 #include "hw/arm/raspi4_platform.h"
 #include "hw/arm/bcm2838_peripherals.h"
+#include "net/net.h"
+#include "system/address-spaces.h"
 
 #define CLOCK_ISP_OFFSET        0xc11000
 #define CLOCK_ISP_SIZE          0x100
@@ -37,6 +39,9 @@ static void bcm2838_peripherals_init(Object *obj)
 
     /* GPIO */
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_BCM2838_GPIO);
+
+    /* GENET v5 Ethernet controller */
+    object_initialize_child(obj, "genet", &s->genet, TYPE_BCM2838_GENET);
 
     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhci",
                                    OBJECT(&s_base->sdhci.sdbus));
@@ -189,6 +194,17 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(
         &s_base->peri_mr, GPIO_OFFSET,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpio), 0));
+
+    /* GENET is in the BCM2711 lower-peripheral window. */
+    qemu_configure_nic_device(DEVICE(&s->genet), true, "genet");
+    object_property_set_link(OBJECT(&s->genet), "dma-memory",
+                             OBJECT(get_system_memory()), &error_abort);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->genet), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s->peri_low_mr, GENET_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->genet), 0));
 
     /* The Pi 4 external SD card is connected to EMMC2. */
     object_property_add_alias(OBJECT(s), "sd-bus", OBJECT(&s->emmc2),

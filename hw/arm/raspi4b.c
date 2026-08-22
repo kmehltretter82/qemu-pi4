@@ -60,6 +60,10 @@ static void raspi_add_memory_node(void *fdt, hwaddr mem_base, hwaddr mem_len)
 
 static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
 {
+    Raspi4BaseMachineState *s_base =
+        container_of(info, Raspi4BaseMachineState, binfo);
+    Raspi4bMachineState *s = RASPI4B_MACHINE(s_base);
+    char **node_paths;
     uint64_t ram_size;
 
     /* Temporarily disable following devices until they are implemented */
@@ -67,7 +71,6 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
         "brcm,bcm2711-pcie",
         "brcm,bcm2711-rng200",
         "brcm,bcm2711-thermal",
-        "brcm,bcm2711-genet-v5",
         "brcm,bcm2711-l2-intc",
         "brcm,bcm2711-hdmi-i2c",
         "brcm,2711-v3d",
@@ -85,6 +88,14 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
             warn_report("bcm2711 dtb: %s has been disabled!", dev_str);
         }
     }
+
+    node_paths = qemu_fdt_node_path(fdt, NULL, "brcm,bcm2711-genet-v5",
+                                    &error_fatal);
+    for (int i = 0; node_paths && node_paths[i]; i++) {
+        qemu_fdt_setprop(fdt, node_paths[i], "local-mac-address",
+                         s->soc.peripherals.genet.conf.macaddr.a, 6);
+    }
+    g_strfreev(node_paths);
 
     ram_size = raspi4_board_ram_size(info->board_id);
 
