@@ -46,6 +46,24 @@ class InitramfsTests(unittest.TestCase):
             self.assertIn(b"TRAILER!!!\0", archive)
 
 
+class HardwareBootTests(unittest.TestCase):
+    def test_tryboot_template_uses_return_initramfs(self):
+        tryboot = (PI4_SCRIPTS / "tryboot.txt").read_text(encoding="utf-8")
+        cmdline = (PI4_SCRIPTS / "cmdline-hardware.txt").read_text(
+            encoding="utf-8")
+
+        self.assertIn("kernel=Image-qemu-pi4\n", tryboot)
+        self.assertIn(
+            "device_tree=bcm2711-rpi-400-qemu-pi4.dtb\n", tryboot)
+        self.assertIn(
+            "initramfs initramfs-qemu-pi4-hardware.cpio.gz followkernel\n",
+            tryboot)
+        self.assertIn("cmdline=cmdline-qemu-pi4-hardware.txt\n", tryboot)
+        self.assertEqual(len(cmdline.splitlines()), 1)
+        self.assertIn("rdinit=/init", cmdline)
+        self.assertIn("panic=10", cmdline)
+
+
 class CaptureTests(unittest.TestCase):
     def test_capture_from_fixture_root(self):
         with tempfile.TemporaryDirectory() as temporary:

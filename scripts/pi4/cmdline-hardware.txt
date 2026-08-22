@@ -1,0 +1,1 @@
+earlycon=pl011,mmio32,0xfe201000 console=serial0,115200 rdinit=/init panic=10 clk_ignore_unused

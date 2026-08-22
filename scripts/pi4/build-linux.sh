@@ -85,10 +85,13 @@ if [[ -z $cross_compile && $(uname -m) != aarch64 ]]; then
     cross_compile=aarch64-linux-gnu-
 fi
 
-for command in curl make python3 tar; do
+for command in make python3 tar; do
     command -v "$command" >/dev/null ||
         die "required command not found: $command"
 done
+if ((allow_download)); then
+    command -v curl >/dev/null || die "required command not found: curl"
+fi
 command -v "${cross_compile}gcc" >/dev/null ||
     die "compiler not found: ${cross_compile}gcc (use --cross-compile)"
 
@@ -187,6 +190,12 @@ init_binary=$build_dir/pi4-lab-init
 python3 "$script_dir/mkinitramfs.py" --mtime "$LINUX_SOURCE_DATE_EPOCH" \
     "$init_binary" "$artifacts_dir/initramfs.cpio.gz"
 
+hardware_init_binary=$build_dir/pi4-lab-hardware-init
+"${cross_compile}gcc" -static -Os -s -fno-ident -Wl,--build-id=none \
+    -o "$hardware_init_binary" "$script_dir/hardware-init.c"
+python3 "$script_dir/mkinitramfs.py" --mtime "$LINUX_SOURCE_DATE_EPOCH" \
+    "$hardware_init_binary" "$artifacts_dir/initramfs-hardware.cpio.gz"
+
 install -m 0644 "$build_dir/arch/arm64/boot/Image" \
     "$artifacts_dir/Image"
 install -m 0644 \
@@ -196,6 +205,9 @@ install -m 0644 \
     "$build_dir/arch/arm64/boot/dts/broadcom/bcm2711-rpi-400.dtb" \
     "$artifacts_dir/bcm2711-rpi-400.dtb"
 install -m 0644 "$build_dir/.config" "$artifacts_dir/linux.config"
+install -m 0644 "$script_dir/cmdline-hardware.txt" \
+    "$artifacts_dir/cmdline-hardware.txt"
+install -m 0644 "$script_dir/tryboot.txt" "$artifacts_dir/tryboot.txt"
 
 manifest=$artifacts_dir/manifest.txt
 {
@@ -204,7 +216,8 @@ manifest=$artifacts_dir/manifest.txt
     printf 'linux_source_url=%s\n' "$LINUX_SOURCE_URL"
     printf 'linux_source_sha256=%s\n' "$LINUX_SOURCE_SHA256"
     for artifact in Image bcm2711-rpi-4-b.dtb bcm2711-rpi-400.dtb \
-                    initramfs.cpio.gz linux.config; do
+                    initramfs.cpio.gz initramfs-hardware.cpio.gz \
+                    cmdline-hardware.txt tryboot.txt linux.config; do
         printf '%s_sha256=%s\n' "$artifact" \
             "$(sha256_file "$artifacts_dir/$artifact")"
     done

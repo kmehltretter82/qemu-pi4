@@ -1,0 +1,10 @@
+# One-shot qemu-pi4 physical Pi 400 validation.
+# SPDX-License-Identifier: GPL-2.0-or-later
+[all]
+arm_64bit=1
+enable_uart=1
+disable_overscan=1
+kernel=Image-qemu-pi4
+device_tree=bcm2711-rpi-400-qemu-pi4.dtb
+initramfs initramfs-qemu-pi4-hardware.cpio.gz followkernel
+cmdline=cmdline-qemu-pi4-hardware.txt

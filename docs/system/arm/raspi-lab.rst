@@ -37,8 +37,9 @@ require an already populated cache.  The default locations are:
   Kernel build tree.
 
 ``build-pi4-linux/artifacts``
-  ``Image``, both DTBs, the initramfs, final kernel configuration, hashes and
-  build provenance.
+  ``Image``, both DTBs, QEMU and physical-test initramfs images, one-shot
+  Pi 400 boot templates, final kernel configuration, hashes and build
+  provenance.
 
 The source and configuration are pinned, while ``build-provenance.txt``
 records the compiler used.  Reuse the same compiler when bit-for-bit artifact
@@ -71,33 +72,40 @@ See :doc:`raspi` for a complete command line and safe snapshot mode.
 Boot on a Pi 400
 ----------------
 
-Use a disposable or backed-up boot medium.  This project deliberately does
-not automate writing a boot partition.  Copy the following artifacts to an
-existing Raspberry Pi firmware boot partition, using unique filenames:
+Use a disposable or backed-up boot medium and keep physical reset access.
+This project deliberately does not automate writing a boot partition.  Copy
+the following files from ``build-pi4-linux/artifacts`` to an existing
+Raspberry Pi firmware boot partition under these unique names:
 
-* ``Image``
-* ``bcm2711-rpi-400.dtb``
-* ``initramfs.cpio.gz``
+* ``Image`` as ``Image-qemu-pi4``
+* ``bcm2711-rpi-400.dtb`` as
+  ``bcm2711-rpi-400-qemu-pi4.dtb``
+* ``initramfs-hardware.cpio.gz`` as
+  ``initramfs-qemu-pi4-hardware.cpio.gz``
+* ``cmdline-hardware.txt`` as ``cmdline-qemu-pi4-hardware.txt``
 
-Select them in ``config.txt``::
+Back up any existing ``tryboot.txt``, then install the generated
+``tryboot.txt`` beside ``config.txt``.  Verify every copied file and run
+``sync``.  Start the one-shot boot with the tryboot selector passed as one
+quoted argument::
 
-  arm_64bit=1
-  enable_uart=1
-  kernel=Image-qemu-pi4
-  device_tree=bcm2711-rpi-400-qemu-pi4.dtb
-  initramfs initramfs-qemu-pi4.cpio.gz followkernel
+  sudo reboot '0 tryboot'
 
-Keep ``cmdline.txt`` on one line and append the smoke-test arguments::
+The firmware clears the one-shot flag before launching the test.  A subsequent
+reset therefore returns to the normal ``config.txt`` boot.  The test kernel
+uses ``panic=10`` for the same reason, while a hard kernel hang still requires
+a physical reset or power cycle.  A 3.3 V serial console at 115200 baud is the
+definitive diagnostic channel for failures before ``/init``.
 
-  console=serial0,115200 rdinit=/init panic=-1 clk_ignore_unused
+The physical-test initramfs writes its report to
+``qemu-pi4-hardware-result.txt`` on the FAT boot partition, syncs and unmounts
+it, and then reboots into the normal OS.  ``clk_ignore_unused`` keeps the
+diagnostic serial-console clock enabled through late kernel initialization.
 
-``clk_ignore_unused`` keeps the diagnostic serial console clock enabled through
-late kernel initialization.
-
-The Pi firmware files themselves are not distributed by this project.  The
-minimal test initramfs powers the machine off after printing its report.
-QEMU uses the Pi 4 Model B DTB until a separate ``raspi400`` machine exists;
-the kernel ``Image`` and initramfs remain identical on both systems.
+The Pi firmware files themselves are not distributed by this project.  QEMU
+uses the Pi 4 Model B DTB until a separate ``raspi400`` machine exists; the
+kernel ``Image`` remains identical on both systems, while the two initramfs
+images differ only in their test/return behavior.
 
 Capture and compare a full Linux system
 ---------------------------------------
