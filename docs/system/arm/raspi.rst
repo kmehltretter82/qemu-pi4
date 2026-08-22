@@ -24,6 +24,10 @@ Potential correctness fixes and enhancements suitable for later submission
 to QEMU are kept in the evidence-based :doc:`raspi-upstream` tracker.
 The fidelity requirements and staged acceptance tests for the missing Pi 400
 USB path are recorded in :doc:`raspi-pcie`.
+The separate :doc:`raspi-gicv2-lab` project will exercise the GICv2
+virtualization interface across this fork, Linux KVM, and real Pi 4-family
+hardware.  Its first real Pi 400 boot is intentionally deferred until its
+minimal EL2 and EL1 paths pass the QEMU safety gate.
 
 Implemented devices
 -------------------

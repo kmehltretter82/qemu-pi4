@@ -99,6 +99,9 @@ Board-specific documentation
    arm/raspi
    arm/raspi-lab
    arm/raspi-pcie
+   arm/raspi-gicv2-lab
+   arm/raspi-upstream
+   arm/raspi-upstream-criteria
    arm/collie
    arm/sx1
    arm/stellaris

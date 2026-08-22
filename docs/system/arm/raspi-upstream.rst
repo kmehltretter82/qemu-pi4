@@ -7,6 +7,10 @@ is an upstream bug.  Before submission, each candidate must be rebased onto
 current QEMU, reduced to an independent patch, and given a focused reproducer
 or regression test.
 
+Every classification and proposed report must first pass the local
+:doc:`raspi-upstream-criteria`.  In particular, a real-hardware difference or
+source FIXME is not by itself proof of an upstream bug.
+
 The original comparison point is QEMU 11.1.0, commit
 ``84f07211cc5b4fc6a371559bf8a5de4fb068e648`` (tagged
 ``qemu-pi4-base-v11.1.0`` in this repository).
@@ -303,6 +307,88 @@ QP4-UP-020: BCM2711 PCIe host and root-port model
   qtests as appropriate, and address machine-version compatibility before
   adding a PCI root bus to an existing machine type.  Downstream-device, INTx,
   private-DMA and MSI qtests now provide the functional controller evidence.
+
+QP4-UP-021: virtual SGI source is missing from GICV_HPPIR
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate; E1 on the fork, current-master binary
+  confirmation pending
+:Fork commit: ``8460833e53a91458fd3ba63ff19fb6c4932e8bb4``
+:Upstream source checked: ``ae4f3443209ab154b48b706a146e5f557ab147cb``
+:Contract: For a software-originated virtual SGI, GICv2 requires the CPUID
+  source field in ``GICH_LRn[12:10]`` to be returned in both GICV_HPPIR and
+  GICV_IAR.
+:Observed issue: With pending LR0 encoding ``0x12000405`` for SGI 5 from
+  CPUID 1, the pre-fix fork returned GICV_HPPIR ``0x0005`` instead of
+  ``0x0405``.  It returned the source correctly from GICV_IAR.  The frozen H4f
+  lab trace records the forbidden result, and the focused fork change passed
+  100 fresh processes with two distinct source tags.  See the H4f manifest in
+  the separate ``gicv2-lab`` repository at
+  ``results/2026-08-22-h4f-qemu-pi4/manifest.md``.
+:Before sending: Reproduce with an unmodified current-master binary, search
+  current issues and qemu-devel, and have the user manually validate a
+  standalone reproducer.  The Codex-assisted fork change and lab must not be
+  proposed as an upstream patch or regression test.
+
+QP4-UP-022: first unimplemented GICH List Register is not RAZ/WI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate; E1 on the fork, current-master binary
+  confirmation pending
+:Fork source checked: ``8460833e53a91458fd3ba63ff19fb6c4932e8bb4``
+:Upstream source checked: ``ae4f3443209ab154b48b706a146e5f557ab147cb``
+:Contract: GICv2 specification IHI 0048B.b section 5.3.8 says that
+  ``GICH_VTR.ListRegs`` defines the implemented count and every higher-numbered
+  List Register is RAZ/WI.
+:Observed issue: qemu-pi4 reports ``GICH_VTR=0x90000003``, meaning LR0-LR3 are
+  implemented.  A qtest-accelerated MMIO check read LR4 as zero, wrote
+  ``0x1200003d`` to LR4 at GICH offset ``0x110``, and read the same nonzero
+  value back before clearing it.  A disposable EL2 image independently
+  produced the same result.  The current source accepts index
+  ``lr_idx == s->num_lrs`` because both GICH LR bounds checks use ``>`` rather
+  than ``>=``.  The virtual-delivery loops correctly stop at ``< num_lrs``,
+  so the extra stored LR is not delivered, but the too-permissive register
+  behavior can hide an off-by-one error in hypervisor software.
+:Before sending: Build an unmodified current-master binary, rerun and manually
+  validate the minimal qtest transaction, search for duplicates, and add a
+  focused human-authored regression test proving that LR4 is read-as-zero and
+  write-ignored when VTR advertises four LRs.  The disposable AI-assisted lab
+  check is research evidence only and must not be submitted as an upstream
+  test or patch.
+
+Rejected and research-only findings
+------------------------------------
+
+Same-PE ordinary store between ``LDXR`` and ``STXR``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: not a bug
+:Upstream issue: `QEMU #4218
+  <https://gitlab.com/qemu-project/qemu/-/work_items/4218>`__
+:Observed difference: A same-PE ordinary store to the exclusive target lets
+  the following ``STXR`` succeed on the tested Cortex-A72, but QEMU's
+  value-based implementation makes it fail indefinitely.
+:Reason rejected: Arm ARM DDI 0487M.c B2.12.1 makes the ordinary store's
+  effect on the local monitor IMPLEMENTATION DEFINED.  B2.12.5 does not
+  guarantee forward progress with that intervening explicit memory effect.
+  The result is a Cortex-A72/QEMU implementation fingerprint, not an
+  architectural violation.  Do not resubmit it or infer validity from an
+  adjacent QEMU FIXME.
+
+Other-PE exclusive-monitor ABA behavior
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: known limitation; research only
+:Contract candidate: For Shareable Normal memory, another observer's
+  completed write to the marked physical block clears the global exclusive
+  mark.  A synchronized other-PE A-to-B-to-A sequence followed by an observed
+  successful ``STXR`` is therefore a possible one-sided conformance test.
+:Why not a new report yet: QEMU already documents that its compare-exchange
+  implementation is susceptible to ABA and says typical guests have not used
+  problematic patterns.  First build and manually validate a race-free
+  harness on current master, then search for a concrete kernel, fuzzer,
+  conformance-suite, or production-software consequence, or bring a viable
+  monitor model and focused test.  Follow :doc:`raspi-upstream-criteria`.
 
 Hardware-derived Pi 400 memory-map correction
 ----------------------------------------------
