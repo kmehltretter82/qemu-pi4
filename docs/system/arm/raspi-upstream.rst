@@ -163,39 +163,76 @@ QP4-UP-011: BCM2711 CPU feature and timer defaults do not match Pi 4 silicon
 
 :Classification: bug candidate
 :Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Fork commit: ``2c0a3a3579e6614656c277738f999a4eea933fee``
 :Observed issue: The default CPU advertises crypto extensions absent on Pi 4
   A72s, and the generic timer default is 62.5 MHz instead of 54 MHz.
-:Before sending: Compare ID registers and CNTFRQ on a Pi 400, then split the
-  CPU-feature and timer corrections.
+:Fork change: Clear the three AArch64 crypto ID fields only for BCM2711 CPUs
+  and set their architectural timer to 54 MHz.  The qtest checks ``cntfrq``;
+  two Linux guests confirm the timer log and absence of crypto features.
+:Before sending: Split the CPU-feature and timer corrections and address
+  machine-version compatibility explicitly.
 
-QP4-UP-012: BCM2711 clock, DMA, OTP, eMMC2, and ASB data are stale
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+QP4-UP-012: BCM2711 clock, OTP, and eMMC2 data are stale
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :Classification: bug candidate
 :Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
 :Observed issue: Hardware comparison found old assumptions for the 54 MHz
-  oscillator, DMA mask, OTP rows, eMMC2 capabilities, and ASB identification.
+  oscillator, OTP rows, and eMMC2 capabilities.
 :Before sending: Split into independently tested patches and attach Pi 400
   register dumps with documented BCM2711 definitions.
 
 QP4-UP-013: legacy Pi interrupt outputs are not routed to BCM2711 GIC SPIs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:Classification: enhancement candidate
+:Classification: bug candidate
 :Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Fork commit: ``48857360b4550cf101b9332a27862517a10260b1``
 :Observed issue: System-timer and SPI0 outputs remain connected only to the
   legacy interrupt controller while Pi 4 Linux uses GIC SPI lines.
-:Before sending: Prove each route with a real Pi 400 trace and minimal test.
+:Fork change: Route the four timer outputs to GIC SPIs 64 through 67 and SPI0
+  to SPI 118.  Qtests raise and acknowledge every line.
+:Before sending: Split timer and SPI routing if requested and add reset tests
+  for already-asserted outputs.
 
 QP4-UP-014: BCM2711 GENET v5 Ethernet model
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :Classification: enhancement candidate
-:Fork change: The working tree adds GENET v5 with MDIO PHY, descriptor DMA,
+:Fork commit: ``f0031db878bf2ac32f17b4d3552cf1a064b25c5f``
+:Fork change: Add GENET v5 with MDIO PHY, descriptor DMA,
   checksum handling, interrupts, and user-mode networking; Linux 7.2 reaches
   DHCP with error-free RX/TX counters.
-:Before sending: Commit and split device/test patches, add migration and
-  multi-ring coverage, and compare against a Pi 400.
+:Before sending: Split device/test patches, add migration and multi-ring
+  coverage, and compare against a Pi 400.
+
+QP4-UP-015: Pi 4 firmware property interface reports a legacy DMA mask
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Fork commit: ``79c5578a5c440d9c62caebb5deb2975e075a5ea5``
+:Observed issue: ``GET_DMA_CHANNELS`` is hard-coded to legacy channels 2
+  through 5, while the BCM2711 device tree and Pi 400 firmware report
+  ``0x07f5``.
+:Fork change: Make the mask a device property with the legacy default and set
+  it to ``0x07f5`` for BCM2711.  A mailbox qtest checks the response.
+:Before sending: Attach the real firmware-property response and retain the
+  legacy default for older machine types.
+
+QP4-UP-016: BCM2711 ASB bridge stubs prevent power-domain registration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Fork commit: ``0a6db1188300298e35ad3a91f254f8fa32382a15``
+:Observed issue: Both ASB windows read as zero, but Linux requires the hardware
+  bridge ID ``0x62726467`` at offset ``0x20`` before registering BCM2835 power
+  domains.
+:Fork change: Replace the stubs with minimal ASB regions returning the real
+  ID.  Qtests cover both windows, and Linux 7.2 registers the power domains.
+:Before sending: Include the Pi 400 register dump and keep control-register
+  behavior explicitly documented as unimplemented.
 
 Known feature gaps, not bug candidates
 --------------------------------------
@@ -204,8 +241,7 @@ The absence of PCIe/VL805 USB 3, V3D 4.2, RNG200, thermal, and HDMI models is
 tracked as implementation scope in :doc:`raspi`.  These are substantial
 upstream enhancement opportunities, but should not be described as
 correctness bugs merely because the models do not exist.  The fork's GENET v5
-model belongs in the same enhancement category; it will receive a candidate
-entry here once its implementing commit is recorded.
+model belongs in the same enhancement category and is tracked as QP4-UP-014.
 
 Fork-only changes
 -----------------
