@@ -283,6 +283,24 @@ QP4-UP-019: distinct Raspberry Pi 400 machine
   wants the 32-bit-host omission to be user-visible in documentation, and keep
   the Pi 400 DTB boot test with the machine patch.
 
+QP4-UP-020: BCM2711 PCIe host and root-port model
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: enhancement candidate
+:Fork commit: ``1bf939f2b26d4d2f5300a191d5d3e27f7060a88d``
+:Observed issue: Upstream QEMU has no BCM2711 PCIe host model, so the
+  Raspberry Pi 4 machine must hide the PCIe device-tree node and cannot expose
+  the board's VL805 USB path.
+:Fork change: Add the first host-controller slice: the controller aperture, a
+  BCM2711 root port, root and indirect configuration access, reset/link and
+  minimal MDIO behavior, programmable outbound windows, INTx routing, GIC
+  outputs, and migration state.  Private DMA, MSI, VL805 and guest DT exposure
+  remain intentionally out of scope for this slice.
+:Before sending: Confirm controller revision and reset semantics with raw Pi
+  400 MMIO, add downstream-device, INTx and migration tests, split model, SoC
+  wiring and qtests as appropriate, and address machine-version compatibility
+  before adding a PCI root bus to an existing machine type.
+
 Hardware-derived Pi 400 memory-map correction
 ----------------------------------------------
 
@@ -306,6 +324,10 @@ tracked as implementation scope in :doc:`raspi`.  These are substantial
 upstream enhancement opportunities, but should not be described as
 correctness bugs merely because the models do not exist.  The fork's GENET v5
 model belongs in the same enhancement category and is tracked as QP4-UP-014.
+
+The defects found while reviewing the unmerged July 2026 PCIe series are kept
+in :doc:`raspi-pcie` and intentionally have no ``QP4-UP`` bug IDs.  They are
+patch-review findings, not defects in QEMU master or a released QEMU model.
 
 Fork-only changes
 -----------------

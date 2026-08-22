@@ -1,5 +1,5 @@
-Raspberry Pi 4 PCIe and VL805 implementation plan
-=================================================
+Raspberry Pi 4 PCIe and VL805 implementation status and plan
+============================================================
 
 The Pi 4 family's external USB ports are not attached to BCM2711's internal
 xHCI block. They are reached through the BCM2711 PCIe root complex and a VIA
@@ -24,6 +24,28 @@ The host controller belongs to the BCM2711 SoC. The fixed VL805 population is
 a property of Pi 4 Model B and Pi 400 boards; it must not be built into the SoC
 because Compute Module 4 exposes PCIe for external devices instead.
 
+Current fork status
+-------------------
+
+The first host-controller slice is implemented.  It provides the BCM2711
+controller aperture, a Broadcom ``14e4:2711`` root port with PCI revision
+``0x20`` and a Gen2 x1 capability, root and indirect configuration access,
+reset/link scaffolding, minimal synchronous MDIO/SSC behavior, four
+guest-programmed outbound windows, INTx routing, all six GIC outputs, and
+migration state.
+
+Qtests cover root identity and configuration, a QMP topology cross-check,
+reset/link/MDIO transitions, absent downstream BDFs, both observed outbound
+window layouts, removal of a reprogrammed window, and system reset.
+
+This is deliberately not guest-visible PCIe support yet.  The PCIe
+device-tree node remains hidden while private inbound DMA, MSI and controller
+event behavior, the VL805 endpoint, firmware-requested reset, and the Pi 400
+hub and keyboard topology are missing.  Link-up currently follows the two
+reset bits rather than endpoint link training, and the MDIO model completes
+operations immediately.  Endpoint, INTx and migration tests and a Linux boot
+with PCIe enabled also remain to be added.
+
 BCM2711 host requirements
 -------------------------
 
@@ -32,8 +54,9 @@ the guest-visible front end must implement BCM2711 registers used by Linux's
 ``brcmstb`` driver. The minimum credible model includes:
 
 * the controller window at CPU address ``0xfd500000``;
-* root configuration and indirect downstream configuration at offsets
-  ``0x8000`` and ``0x9000``;
+* root configuration at offsets ``0x0000`` through ``0x0fff``, indirect
+  downstream configuration data at ``0x8000`` through ``0x8fff``, and its
+  selector at ``0x9000``;
 * PERST/reset at ``0x9210`` and link status at ``0x4068``;
 * revision and the observable MDIO/SSC completion behavior;
 * dynamically programmed outbound windows rather than a fixed translation;
@@ -47,10 +70,31 @@ The private DMA address space is required. Routing PCI DMA directly to QEMU's
 system memory would incorrectly expose CPU peripheral ranges and would collide
 with the MSI target near the top of the 32-bit PCI address space.
 
-The active upstream Linux DT uses a 64 MiB outbound window from PCI
-``0xf8000000`` to CPU ``0x600000000``. Older downstream trees use a 1 GiB
-window beginning at PCI ``0xc0000000``. The model must honor the values the
-guest programs instead of choosing one DT generation at build time.
+The pristine Linux v7.2 DT uses a 64 MiB outbound window from PCI
+``0xf8000000`` to CPU ``0x600000000`` and a 3 GiB identity DMA range.  The DT
+expanded by the firmware on the captured Pi 400 instead uses a 1 GiB window
+from PCI ``0xc0000000`` to CPU ``0x600000000`` and maps the 4 GiB PCI DMA
+range beginning at ``0x400000000`` to CPU address zero.  The model must honor
+the values the guest programs instead of choosing one layout at build time.
+
+Pi 400 hardware evidence
+------------------------
+
+A read-only capture on 2026-08-22 confirms the controller aperture at
+``0xfd500000`` with size ``0x9310`` and this PCI topology:
+
+* root port ``00:00.0 [14e4:2711]``, class ``0604``, revision ``0x20``;
+* VL805 ``01:00.0 [1106:3483]``, class ``0c0330``, revision ``0x01``;
+* a 5 GT/s x1 link with spread-spectrum clocking;
+* a 4 KiB 64-bit VL805 BAR mapped at CPU address ``0x600000000``; and
+* xHCI using MSI vector zero.
+
+The device tree assigns INTx A through D to SPIs 143 through 146, the
+controller event to SPI 147, and MSI to SPI 148.  USB enumeration confirms
+the ``2109:3431`` hub and ``04d9:0007`` Pi 400 keyboard.  Controller revision
+``0x0320`` at offset ``0x406c`` is currently inferred from the observed PCI
+revision and Linux behavior; it has not yet been confirmed by a raw MMIO
+capture.
 
 VL805 requirements
 ------------------
@@ -70,10 +114,11 @@ Implementation stages
 ---------------------
 
 1. Implement the BCM2711 host, real root port, indirect configuration,
-   reset/link/MDIO behavior and dynamic outbound windows. Prove root-port and
-   VL805 configuration enumeration.
+   reset/link/MDIO behavior and dynamic outbound windows. Prove root-port
+   configuration and safe absent-device access.  This slice is implemented.
 2. Add the private inbound DMA mapping and complete MSI delivery.
-3. Add the VL805 xHCI personality and populate it from the Pi board model.
+3. Add the VL805 xHCI personality, populate it from the Pi board model, and
+   prove endpoint enumeration.
 4. Implement the firmware ``NOTIFY_XHCI_RESET`` request as an observable
    endpoint reset without attempting to emulate proprietary VL805 firmware.
 5. Add the Pi 400 hub and integrated-keyboard topology.
@@ -104,7 +149,9 @@ They are references, not code to import wholesale into this fork.
 
 Review notes for those unmerged patches include unsigned offset underflow that
 hides root configuration, an uninitialized internal configuration region,
-root writes that bypass bridge-window updates, missing CPU/PCI outbound
-translation, all-ones controller reset values, no MSI, and a fixed legacy
-window. These are patch-series defects rather than bugs in a released QEMU
-model and must remain classified separately in the upstream tracker.
+root writes that bypass ``pci_bridge_write_config()`` and bridge-window
+updates, missing CPU/PCI outbound translation, decimal revision ``20``
+producing ``0x14`` instead of the observed ``0x20``, all-ones controller reset
+values, no private DMA, MSI or migration, and a fixed legacy window.  These
+are patch-series defects rather than bugs in a released QEMU model and must
+remain classified separately in the upstream tracker.
