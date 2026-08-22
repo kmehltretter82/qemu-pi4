@@ -19,6 +19,7 @@
 #define RASPI400_BOARD_REVISION 0xc03130
 #define RASPI400_RAM_SIZE       (4ULL * GiB)
 #define RASPI400_UPPER_RAM_LAST 0xfbfffffc
+#define RASPI400_VL805_PCI_ADDR (1U << 20)
 
 static void property_request(uint32_t tag, uint32_t value)
 {
@@ -48,6 +49,16 @@ static void test_board_revision(void)
     property_request(RPI_FWREQ_GET_BOARD_REVISION, 0);
     g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==,
                     RASPI400_BOARD_REVISION);
+}
+
+static void test_notify_xhci_reset(void)
+{
+    property_request(RPI_FWREQ_NOTIFY_XHCI_RESET,
+                     RASPI400_VL805_PCI_ADDR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 0);
+
+    property_request(RPI_FWREQ_NOTIFY_XHCI_RESET, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, UINT32_MAX);
 }
 
 static void test_default_ram_size(void)
@@ -83,6 +94,8 @@ int main(int argc, char **argv)
 #endif
     qtest_add_func("/raspi400/firmware/board_revision",
                    test_board_revision);
+    qtest_add_func("/raspi400/firmware/notify_xhci_reset",
+                   test_notify_xhci_reset);
     qtest_add_func("/raspi400/memory/default_size", test_default_ram_size);
     qtest_add_func("/raspi400/memory/upper_mapping",
                    test_upper_ram_mapping);

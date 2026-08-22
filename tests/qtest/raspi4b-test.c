@@ -165,6 +165,7 @@
 #define VL805_XHCI_PORT1              0x420
 #define VL805_XHCI_USBCMD             (VL805_XHCI_CAPLENGTH + 0x00)
 #define VL805_XHCI_USBSTS             (VL805_XHCI_CAPLENGTH + 0x04)
+#define VL805_XHCI_CONFIG             (VL805_XHCI_CAPLENGTH + 0x38)
 #define VL805_XHCI_IMAN0              (VL805_XHCI_RUNTIME + 0x20)
 #define VL805_XHCI_ERSTSZ0            (VL805_XHCI_RUNTIME + 0x28)
 #define VL805_XHCI_ERSTBA0            (VL805_XHCI_RUNTIME + 0x30)
@@ -1259,6 +1260,50 @@ static void test_firmware_dma_channels(void)
     g_assert_cmphex(property_payload(0), ==, 0x07f5);
 }
 
+static void test_firmware_notify_xhci_reset(void)
+{
+    const uint32_t invalid_bdf[] = { 0 };
+    const uint32_t vl805_bdf[] = { pcie_cfg_index(1, 0, 0) };
+    const uint16_t command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
+
+    pcie_vl805_test_start();
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_CONFIG, 1);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBCMD,
+           VL805_XHCI_USBCMD_RUN | VL805_XHCI_USBCMD_INTE);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBCMD),
+                    ==, VL805_XHCI_USBCMD_RUN | VL805_XHCI_USBCMD_INTE);
+    g_assert_false(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBSTS) &
+                   VL805_XHCI_USBSTS_HCH);
+
+    property_request(RPI_FWREQ_NOTIFY_XHCI_RESET, invalid_bdf,
+                     G_N_ELEMENTS(invalid_bdf), sizeof(invalid_bdf));
+    g_assert_cmphex(property_payload(0), ==, UINT32_MAX);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_CONFIG),
+                    ==, 1);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBCMD),
+                    ==, VL805_XHCI_USBCMD_RUN | VL805_XHCI_USBCMD_INTE);
+    g_assert_false(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBSTS) &
+                   VL805_XHCI_USBSTS_HCH);
+
+    property_request(RPI_FWREQ_NOTIFY_XHCI_RESET, vl805_bdf,
+                     G_N_ELEMENTS(vl805_bdf), sizeof(vl805_bdf));
+    g_assert_cmphex(property_payload(0), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_CONFIG),
+                    ==, 1);
+    g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBCMD),
+                    ==, 0);
+    g_assert_true(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBSTS) &
+                  VL805_XHCI_USBSTS_HCH);
+
+    g_assert_cmphex(pcie_vl805_cfg_readw(PCI_COMMAND), ==, command);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_BASE_ADDRESS_0), ==,
+                    RASPI4_PCIE_VL805_PCI_BAR |
+                    PCI_BASE_ADDRESS_MEM_TYPE_64);
+    g_assert_cmphex(pcie_vl805_cfg_readl(PCI_BASE_ADDRESS_1), ==, 0);
+
+    qtest_system_reset(global_qtest);
+}
+
 static uint32_t genet_mdio_read(unsigned int phy, unsigned int reg)
 {
     uint32_t command = GENET_MDIO_BUSY | GENET_MDIO_READ |
@@ -1443,6 +1488,8 @@ int main(int argc, char **argv)
     qtest_add_func("/raspi4b/firmware_gpio", test_firmware_gpio);
     qtest_add_func("/raspi4b/firmware_dma_channels",
                    test_firmware_dma_channels);
+    qtest_add_func("/raspi4b/firmware/notify_xhci_reset",
+                   test_firmware_notify_xhci_reset);
     qtest_add_func("/raspi4b/pcie/root_config", test_pcie_root_config);
     qtest_add_func("/raspi4b/pcie/reset_link_and_mdio",
                    test_pcie_reset_link_and_mdio);

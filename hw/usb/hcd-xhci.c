@@ -867,6 +867,17 @@ static void xhci_stop(XHCIState *xhci)
     xhci->crcr_low &= ~CRCR_CRR;
 }
 
+void xhci_halt(XHCIState *xhci)
+{
+    if (xhci->usbcmd & USBCMD_RS) {
+        xhci_stop(xhci);
+    }
+
+    xhci->usbcmd = 0;
+    xhci_mfwrap_update(xhci);
+    xhci_intr_update(xhci, 0);
+}
+
 static XHCIStreamContext *xhci_alloc_stream_contexts(unsigned count,
                                                      dma_addr_t base)
 {

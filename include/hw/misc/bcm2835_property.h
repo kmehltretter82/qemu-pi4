@@ -18,6 +18,7 @@
 OBJECT_DECLARE_SIMPLE_TYPE(BCM2835PropertyState, BCM2835_PROPERTY)
 
 #define BCM2835_PROPERTY_GPIO_COUNT 8
+#define BCM2835_PROPERTY_XHCI_NOTIFY "xhci-notify"
 
 struct BCM2835PropertyState {
     /*< private >*/
@@ -28,12 +29,14 @@ struct BCM2835PropertyState {
     AddressSpace dma_as;
     MemoryRegion iomem;
     qemu_irq mbox_irq;
+    qemu_irq xhci_notify;
     BCM2835FBState *fbdev;
     BCM2835OTPState *otp;
 
     MACAddr macaddr;
     uint32_t board_rev;
     uint32_t dma_channels;
+    bool has_vl805;
     uint32_t addr;
     char *command_line;
     bool pending;

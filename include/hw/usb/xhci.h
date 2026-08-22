@@ -6,6 +6,7 @@
 #define TYPE_QEMU_XHCI "qemu-xhci"
 #define TYPE_VL805_XHCI "vl805-xhci"
 #define TYPE_XHCI_SYSBUS "sysbus-xhci"
+#define VL805_XHCI_FIRMWARE_NOTIFY "firmware-notify"
 
 #define XHCI_MAXPORTS_2 15
 #define XHCI_MAXPORTS_3 15

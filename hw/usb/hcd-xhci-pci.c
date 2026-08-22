@@ -461,6 +461,15 @@ static void vl805_xhci_class_init(ObjectClass *klass, const void *data)
     dc->vmsd = &vmstate_vl805_xhci;
 }
 
+static void vl805_xhci_firmware_notify(void *opaque, int n, int level)
+{
+    XHCIPciState *s = XHCI_PCI(opaque);
+
+    if (level) {
+        xhci_halt(&s->xhci);
+    }
+}
+
 static void vl805_xhci_instance_init(Object *obj)
 {
     XHCIPciState *s = XHCI_PCI(obj);
@@ -474,6 +483,8 @@ static void vl805_xhci_instance_init(Object *obj)
     xhci->numports_3 = 4;
     xhci->register_model = XHCI_REGISTER_MODEL_VL805;
     xhci->bus_name = "vl805.0";
+    qdev_init_gpio_in_named(DEVICE(obj), vl805_xhci_firmware_notify,
+                            VL805_XHCI_FIRMWARE_NOTIFY, 1);
 }
 
 static const TypeInfo vl805_xhci_info = {

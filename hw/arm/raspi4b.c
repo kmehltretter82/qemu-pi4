@@ -111,18 +111,28 @@ static void raspi4_machine_init(MachineState *machine)
     Raspi4BaseMachineState *s_base = RASPI4_BASE_MACHINE(machine);
     Raspi4BaseMachineClass *mc = RASPI4_BASE_MACHINE_GET_CLASS(machine);
     BCM2838State *soc = &s_base->soc;
+    PCIBus *pcie_bus;
+    PCIDevice *vl805;
 
     s_base->binfo.modify_dtb = raspi4_modify_dtb;
     s_base->binfo.board_id = mc->board_rev;
 
     object_initialize_child(OBJECT(machine), "soc", soc, TYPE_BCM2838);
 
+    object_property_set_bool(
+        OBJECT(&soc->peripherals.parent_obj.property), "has-vl805", true,
+        &error_abort);
+
     raspi4_common_machine_init(machine, soc);
 
     /* Pi 4 Model B and Pi 400 have a fixed VL805 at downstream BDF 00.0. */
-    pci_create_simple(pci_bridge_get_sec_bus(
-                          PCI_BRIDGE(&soc->peripherals.pcie.root_port)),
-                      PCI_DEVFN(0, 0), TYPE_VL805_XHCI);
+    pcie_bus = pci_bridge_get_sec_bus(
+        PCI_BRIDGE(&soc->peripherals.pcie.root_port));
+    vl805 = pci_create_simple(pcie_bus, PCI_DEVFN(0, 0), TYPE_VL805_XHCI);
+    qdev_connect_gpio_out_named(
+        DEVICE(&soc->peripherals.parent_obj.property),
+        BCM2835_PROPERTY_XHCI_NOTIFY, 0,
+        qdev_get_gpio_in_named(DEVICE(vl805), VL805_XHCI_FIRMWARE_NOTIFY, 0));
 }
 
 static void raspi4b_machine_class_init(ObjectClass *oc, const void *data)

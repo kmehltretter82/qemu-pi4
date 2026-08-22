@@ -237,4 +237,5 @@ typedef struct XHCIState {
 extern const VMStateDescription vmstate_xhci;
 bool xhci_get_flag(XHCIState *xhci, enum xhci_flags bit);
 void xhci_set_flag(XHCIState *xhci, enum xhci_flags bit);
+void xhci_halt(XHCIState *xhci);
 #endif

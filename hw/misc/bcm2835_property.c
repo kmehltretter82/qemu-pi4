@@ -21,6 +21,7 @@
 
 #define VCHI_BUSADDR_SIZE       sizeof(uint32_t)
 #define RPI_EXP_GPIO_BASE       128
+#define RPI4_VL805_PCI_DEV_ADDR (1U << 20)
 
 /* https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface */
 
@@ -310,6 +311,32 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             stl_le_phys(&s->dma_as, value + 12, s->dma_channels);
             resplen = 4;
             break;
+
+        case RPI_FWREQ_NOTIFY_XHCI_RESET:
+        {
+            uint32_t dev_addr;
+
+            if (bufsize < sizeof(dev_addr)) {
+                break;
+            }
+
+            /*
+             * Linux passes the hard-wired VL805 address using the firmware
+             * encoding PCI_BUS << 20 | PCI_SLOT << 15 | PCI_FUNC << 12.
+             * Despite its reset-controller API, this property call notifies
+             * the firmware after PCI reset so it can initialize the VL805;
+             * the call does not itself reset the xHCI register file.
+             */
+            dev_addr = ldl_le_phys(&s->dma_as, value + 12);
+            if (s->has_vl805 && dev_addr == RPI4_VL805_PCI_DEV_ADDR) {
+                stl_le_phys(&s->dma_as, value + 12, 0);
+                qemu_irq_pulse(s->xhci_notify);
+            } else {
+                stl_le_phys(&s->dma_as, value + 12, UINT32_MAX);
+            }
+            resplen = sizeof(dev_addr);
+            break;
+        }
 
         case RPI_FWREQ_GET_COMMAND_LINE:
             /*
@@ -619,6 +646,8 @@ static void bcm2835_property_init(Object *obj)
 
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(s), &s->mbox_irq);
+    qdev_init_gpio_out_named(DEVICE(s), &s->xhci_notify,
+                             BCM2835_PROPERTY_XHCI_NOTIFY, 1);
 }
 
 static void bcm2835_property_reset(DeviceState *dev)
@@ -658,6 +687,7 @@ static const Property bcm2835_property_props[] = {
     DEFINE_PROP_UINT32("board-rev", BCM2835PropertyState, board_rev, 0),
     DEFINE_PROP_UINT32("dma-channels", BCM2835PropertyState, dma_channels,
                        0x003c),
+    DEFINE_PROP_BOOL("has-vl805", BCM2835PropertyState, has_vl805, false),
     DEFINE_PROP_STRING("command-line", BCM2835PropertyState, command_line),
 };
 
