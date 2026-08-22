@@ -58,6 +58,11 @@ After creating a focused qemu-pi4 build, run::
       --qemu build/qemu-system-aarch64 \
       --artifacts build-pi4-linux/artifacts
 
+To boot the same kernel with the Pi 400 machine and its board-specific DTB,
+add::
+
+  --machine raspi400
+
 The runner connects the emulated GENET controller to QEMU user-mode
 networking and requests a DHCP lease.  The initramfs prints basic kernel
 hardware state, carrier, the assigned IPv4 address, network counters and the
@@ -102,10 +107,10 @@ The physical-test initramfs writes its report to
 it, and then reboots into the normal OS.  ``clk_ignore_unused`` keeps the
 diagnostic serial-console clock enabled through late kernel initialization.
 
-The Pi firmware files themselves are not distributed by this project.  QEMU
-uses the Pi 4 Model B DTB until a separate ``raspi400`` machine exists; the
-kernel ``Image`` remains identical on both systems, while the two initramfs
-images differ only in their test/return behavior.
+The Pi firmware files themselves are not distributed by this project. QEMU's
+``raspi400`` machine uses the unmodified upstream Pi 400 DTB; the kernel
+``Image`` remains identical on both systems, while the two initramfs images
+differ only in their test/return behavior.
 
 Capture and compare a full Linux system
 ---------------------------------------

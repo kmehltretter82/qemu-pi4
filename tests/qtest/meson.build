@@ -233,6 +233,7 @@ qtests_aspeed64 = \
 qtests_raspi4 = \
   ['bcm2835-dma-test',
    'bcm2835-i2c-test',
+   'raspi400-test',
    'raspi4b-test']
 
 qtests_stm32l4x5 = \

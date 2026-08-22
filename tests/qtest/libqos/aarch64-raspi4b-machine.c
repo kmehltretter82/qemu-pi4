@@ -80,6 +80,11 @@ static void *qos_create_machine_aarch64_raspi4b(QTestState *qts)
 
 static void raspi4b_register_nodes(void)
 {
+#if HOST_LONG_BITS == 64
+    qos_node_create_machine("aarch64/raspi400",
+                            qos_create_machine_aarch64_raspi4b);
+    qos_node_contains("aarch64/raspi400", "generic-sdhci", NULL);
+#endif
     qos_node_create_machine("aarch64/raspi4b",
                             qos_create_machine_aarch64_raspi4b);
     qos_node_contains("aarch64/raspi4b", "generic-sdhci", NULL);

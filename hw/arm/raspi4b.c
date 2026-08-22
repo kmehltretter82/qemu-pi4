@@ -1,5 +1,5 @@
 /*
- * Raspberry Pi 4B emulation
+ * Raspberry Pi 4 family emulation
  *
  * Copyright (C) 2022 Ovchinnikov Vitalii <vitalii.ovchinnikov@auriga.com>
  *
@@ -25,17 +25,14 @@
 #include <libfdt.h>
 
 #define TYPE_RASPI4B_MACHINE MACHINE_TYPE_NAME("raspi4b")
-OBJECT_DECLARE_SIMPLE_TYPE(Raspi4bMachineState, RASPI4B_MACHINE)
 
-struct Raspi4bMachineState {
-    Raspi4BaseMachineState parent_obj;
-    BCM2838State soc;
-};
+#if HOST_LONG_BITS == 64
+#define TYPE_RASPI400_MACHINE MACHINE_TYPE_NAME("raspi400")
+#endif
 
 /*
- * Add second memory region if board RAM amount exceeds VC base address
- * (see https://datasheets.raspberrypi.com/bcm2711/bcm2711-peripherals.pdf
- * 1.2 Address Map)
+ * Add ARM-visible RAM above the VideoCore window without describing the
+ * BCM2711 low-peripheral alias as memory (BCM2711 datasheet, section 1.2).
  */
 static void raspi_add_memory_node(void *fdt, hwaddr mem_base, hwaddr mem_len)
 {
@@ -62,9 +59,9 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
 {
     Raspi4BaseMachineState *s_base =
         container_of(info, Raspi4BaseMachineState, binfo);
-    Raspi4bMachineState *s = RASPI4B_MACHINE(s_base);
     char **node_paths;
     uint64_t ram_size;
+    uint64_t upper_end;
 
     /* Temporarily disable following devices until they are implemented */
     const char *nodes_to_remove[] = {
@@ -93,23 +90,24 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
                                     &error_fatal);
     for (int i = 0; node_paths && node_paths[i]; i++) {
         qemu_fdt_setprop(fdt, node_paths[i], "local-mac-address",
-                         s->soc.peripherals.genet.conf.macaddr.a, 6);
+                         s_base->soc.peripherals.genet.conf.macaddr.a, 6);
     }
     g_strfreev(node_paths);
 
     ram_size = raspi4_board_ram_size(info->board_id);
+    upper_end = MIN(ram_size, (uint64_t)BCM2838_PERI_LOW_BASE);
 
-    if (info->ram_size > UPPER_RAM_BASE) {
-        raspi_add_memory_node(fdt, UPPER_RAM_BASE, ram_size - UPPER_RAM_BASE);
+    if (upper_end > UPPER_RAM_BASE) {
+        raspi_add_memory_node(fdt, UPPER_RAM_BASE,
+                              upper_end - UPPER_RAM_BASE);
     }
 }
 
-static void raspi4b_machine_init(MachineState *machine)
+static void raspi4_machine_init(MachineState *machine)
 {
-    Raspi4bMachineState *s = RASPI4B_MACHINE(machine);
     Raspi4BaseMachineState *s_base = RASPI4_BASE_MACHINE(machine);
     Raspi4BaseMachineClass *mc = RASPI4_BASE_MACHINE_GET_CLASS(machine);
-    BCM2838State *soc = &s->soc;
+    BCM2838State *soc = &s_base->soc;
 
     s_base->binfo.modify_dtb = raspi4_modify_dtb;
     s_base->binfo.board_id = mc->board_rev;
@@ -131,20 +129,44 @@ static void raspi4b_machine_class_init(ObjectClass *oc, const void *data)
 #endif
     raspi4_common_machine_class_init(mc, rmc->board_rev, "4B");
     mc->auto_create_sdcard = true;
-    mc->init = raspi4b_machine_init;
+    mc->init = raspi4_machine_init;
 }
+
+#if HOST_LONG_BITS == 64
+static void raspi400_machine_class_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    Raspi4BaseMachineClass *rmc = RASPI4_BASE_MACHINE_CLASS(oc);
+
+    rmc->board_rev = 0xc03130; /* Revision 1.0, 4 GiB RAM */
+    raspi4_common_machine_class_init(mc, rmc->board_rev, "400");
+    mc->auto_create_sdcard = true;
+    mc->init = raspi4_machine_init;
+}
+#endif
 
 static const TypeInfo raspi4b_machine_type = {
     .name           = TYPE_RASPI4B_MACHINE,
     .parent         = TYPE_RASPI4_BASE_MACHINE,
-    .instance_size  = sizeof(Raspi4bMachineState),
     .class_init     = raspi4b_machine_class_init,
     .interfaces     = aarch64_machine_interfaces,
 };
 
+#if HOST_LONG_BITS == 64
+static const TypeInfo raspi400_machine_type = {
+    .name           = TYPE_RASPI400_MACHINE,
+    .parent         = TYPE_RASPI4_BASE_MACHINE,
+    .class_init     = raspi400_machine_class_init,
+    .interfaces     = aarch64_machine_interfaces,
+};
+#endif
+
 static void raspi4b_machine_register_type(void)
 {
     type_register_static(&raspi4b_machine_type);
+#if HOST_LONG_BITS == 64
+    type_register_static(&raspi400_machine_type);
+#endif
 }
 
 type_init(raspi4b_machine_register_type)

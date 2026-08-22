@@ -1,13 +1,24 @@
-Raspberry Pi 4 Model B (``raspi4b``)
-====================================
+Raspberry Pi 4 family
+=====================
 
-``qemu-pi4`` provides a focused model of a Raspberry Pi 4 Model B revision
-1.5 with four Cortex-A72 cores and 2 GiB of RAM. The model is available only
-in the AArch64 system emulator.
+``qemu-pi4`` provides two BCM2711 board models in the AArch64 system emulator:
 
-The Raspberry Pi 400 uses the same BCM2711 generation but is not yet exposed
-as a distinct machine. Raspberry Pi 5 is not supported: its BCM2712 SoC and
-RP1 I/O controller require separate models.
+``raspi4b``
+  Raspberry Pi 4 Model B revision 1.5 (board revision ``0xb03115``), with
+  2 GiB of RAM.
+
+``raspi400``
+  Raspberry Pi 400 revision 1.0 (board revision ``0xc03130``), with 4 GiB of
+  RAM. This model requires a 64-bit host.
+
+The Pi 400's ARM-visible memory has a VideoCore carveout below 1 GiB and the
+BCM2711 peripheral window at ``0xfc000000``. With the default 64 MiB VideoCore
+allocation, Linux is therefore presented with 3968 MiB in two ranges rather
+than a single contiguous 4 GiB range. This matches the address layout captured
+from real hardware; there is no invented RAM relocation above 4 GiB.
+
+Raspberry Pi 5 is not supported: its BCM2712 SoC and RP1 I/O controller
+require separate models.
 
 Potential correctness fixes and enhancements suitable for later submission
 to QEMU are kept in the evidence-based :doc:`raspi-upstream` tracker.
@@ -40,7 +51,8 @@ Missing devices
  * BCM2711 HDMI/display pipeline and HDMI DDC I2C controllers
  * BCM2711 always-on L2 interrupt controller used by HDMI
  * Pulse Width Modulation (PWM)
- * PCIe root port
+ * BCM2711 PCIe root port and the Pi 4-family VIA VL805 USB 3 controller
+ * Raspberry Pi 400 integrated keyboard, which is attached through the VL805
  * RNG200 random number generator
  * BCM2711 thermal sensor
 
@@ -66,10 +78,18 @@ The SD model requires an image whose size is a valid SD card capacity; a
 power-of-two size such as 4 GiB is a convenient choice.  Remove
 ``snapshot=on`` only when guest writes should persist.
 
+For a Pi 400 guest, change the machine and device tree together::
+
+  -machine raspi400
+  -dtb bcm2711-rpi-400.dtb
+
+Supplying a Pi 4 Model B DTB to ``raspi400`` (or the reverse) gives the guest
+the wrong board identity and peripherals even though both boards use BCM2711.
+
 Ethernet
 --------
 
-GENET is the ``raspi4b`` machine's on-board network device.  Connect it to
+GENET is both machines' on-board network device. Connect it to
 any normal QEMU network backend; for example, unprivileged user-mode
 networking is selected with::
 

@@ -14,10 +14,10 @@ The project started from QEMU 11.1.0, commit
 ``84f07211cc5b4fc6a371559bf8a5de4fb068e648``. The unchanged starting point is
 marked by the ``qemu-pi4-base-v11.1.0`` tag.
 
-The current machine model is ``raspi4b``. It models a 2 GiB Raspberry Pi 4
-Model B and is the foundation for a future Raspberry Pi 400 machine. A
-distinct Pi 400 model and improved Pi 4 peripheral coverage are project goals;
-they are not claimed as complete yet.
+The ``raspi4b`` machine models a 2 GiB Raspberry Pi 4 Model B revision 1.5.
+The ``raspi400`` machine models a 4 GiB Raspberry Pi 400 revision 1.0 and is
+available on 64-bit hosts.  Both use the BCM2711 SoC model; their board
+revision, fixed RAM size, device tree and resulting machine identity differ.
 
 The model includes the BCM2711 GENET v5 Ethernet controller and external PHY.
 The pinned upstream Linux lab validates link, DHCP, transmit and receive DMA.
@@ -51,17 +51,18 @@ AArch64 boards:
 
 This fork separates Pi 4 support behind ``CONFIG_RASPI4`` and removes the
 legacy Pi 0, Pi 1, Pi 2, and Pi 3 machine and SoC implementations. The focused
-binary exposes only ``none`` and ``raspi4b`` as machine types. Device models
-whose names start with ``bcm2835`` remain where the Pi 4 still uses those
-compatible peripheral blocks.
+binary exposes only ``none``, ``raspi400`` and ``raspi4b`` as machine types on
+a 64-bit host. Device models whose names start with ``bcm2835`` remain where
+the Pi 4 still uses those compatible peripheral blocks.
 
 Pi 4 regression gate
 ====================
 
 The focused regression gate builds the emulator, verifies that its public
-machine list contains only ``none`` and ``raspi4b``, runs the Pi 4 qtests, and
-boots a SHA-256-pinned Raspberry Pi Linux kernel both with and without a
-minimal initramfs.
+machine list contains only ``none``, ``raspi400`` and ``raspi4b``, runs the Pi
+4 qtests, and boots a SHA-256-pinned Raspberry Pi Linux kernel on both board
+models.  The Pi 400 boot checks its machine identity and usable physical RAM
+layout.
 
 Asset download is deliberately separate from test execution.  From a
 configured focused build directory, populate the content-addressed cache once

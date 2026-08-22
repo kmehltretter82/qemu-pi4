@@ -19,6 +19,7 @@
 
 #include "hw/core/boards.h"
 #include "hw/arm/boot.h"
+#include "hw/arm/bcm2838.h"
 
 #define TYPE_RASPI4_BASE_MACHINE MACHINE_TYPE_NAME("raspi4-base")
 OBJECT_DECLARE_TYPE(Raspi4BaseMachineState, Raspi4BaseMachineClass,
@@ -29,6 +30,7 @@ struct Raspi4BaseMachineState {
     MachineState parent_obj;
     /*< public >*/
     struct arm_boot_info binfo;
+    BCM2838State soc;
 };
 
 struct Raspi4BaseMachineClass {
@@ -38,7 +40,6 @@ struct Raspi4BaseMachineClass {
     uint32_t board_rev;
 };
 
-typedef struct BCM2838State BCM2838State;
 void raspi4_common_machine_init(MachineState *machine, BCM2838State *soc);
 
 void raspi4_common_machine_class_init(MachineClass *mc,
