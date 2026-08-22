@@ -270,6 +270,9 @@ struct USBDevice {
 #define TYPE_USB_DEVICE "usb-device"
 OBJECT_DECLARE_TYPE(USBDevice, USBDeviceClass, USB_DEVICE)
 
+#define TYPE_USB_HUB "usb-hub"
+#define TYPE_USB_VIA_3431_HUB "usb-via-3431-hub"
+
 typedef void (*USBDeviceRealize)(USBDevice *dev, Error **errp);
 typedef void (*USBDeviceUnrealize)(USBDevice *dev);
 

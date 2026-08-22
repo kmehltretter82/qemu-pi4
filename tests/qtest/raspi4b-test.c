@@ -173,17 +173,22 @@
 #define VL805_XHCI_USBCMD_RUN         (1U << 0)
 #define VL805_XHCI_USBCMD_INTE        (1U << 2)
 #define VL805_XHCI_USBSTS_HCH         (1U << 0)
+#define VL805_XHCI_USBSTS_HCE         (1U << 12)
 #define VL805_XHCI_IMAN_IE            (1U << 1)
+#define VL805_XHCI_ERDP_EHB           (1U << 3)
 #define VL805_XHCI_PORTSC_CCS         (1U << 0)
+#define VL805_XHCI_PORTSC_PR          (1U << 4)
 #define VL805_XHCI_PORTSC_SPEED_MASK  (0xfU << 10)
 #define VL805_XHCI_PORTSC_SPEED_HIGH  (3U << 10)
 #define VL805_XHCI_PORTSC_CSC         (1U << 17)
+#define VL805_XHCI_PORTSC_PRC         (1U << 21)
 #define VL805_XHCI_TRB_CYCLE          (1U << 0)
 #define VL805_XHCI_TRB_TYPE_SHIFT     10
 #define VL805_XHCI_TRB_PORT_STATUS    34U
 #define VL805_XHCI_CC_SUCCESS         1U
 #define VL805_XHCI_ERST_CPU           0x20000ULL
 #define VL805_XHCI_EVENT_RING_CPU     0x21000ULL
+#define VL805_XHCI_EVENT_RING2_CPU    0x22000ULL
 #define VL805_XHCI_EVENT_RING_TRBS    16U
 
 #define EDU_IRQ_STATUS               0x24
@@ -401,7 +406,6 @@ static bool pcie_edu_test_start(void)
         return false;
     }
 
-    qtest_system_reset(global_qtest);
     writel(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS, 0x00010100);
     pcie_select_endpoint(1);
     g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA), ==, UINT32_MAX);
@@ -437,7 +441,6 @@ static void pcie_vl805_test_start(void)
 {
     const uint16_t command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
 
-    qtest_system_reset(global_qtest);
     writel(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS, 0x00010100);
     pcie_select_endpoint(0);
     g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA), ==, UINT32_MAX);
@@ -472,6 +475,64 @@ static void pcie_vl805_test_start(void)
     g_assert_cmphex(readl(RASPI4_PCIE_VL805_CPU_BAR), ==, 0x01000020);
 }
 
+static void pcie_vl805_enable_dma(void)
+{
+    /* PCI 0x400000000..0x40fffffff aliases the first 256 MiB of RAM. */
+    writel(RASPI4_PCIE_MISC_CTRL,
+           readl(RASPI4_PCIE_MISC_CTRL) |
+           PCIE_MISC_CTRL_SCB_ACCESS_EN);
+    writel(RASPI4_PCIE_RC_BAR2_HI, 4);
+    writel(RASPI4_PCIE_RC_BAR2_LO, PCIE_DMA_SIZE_ENCODING_256M);
+}
+
+static void pcie_assert_vl805_port_event_qtest(QTestState *qts,
+                                               uint64_t addr, bool cycle)
+{
+    uint32_t control = VL805_XHCI_TRB_PORT_STATUS <<
+                       VL805_XHCI_TRB_TYPE_SHIFT;
+
+    if (cycle) {
+        control |= VL805_XHCI_TRB_CYCLE;
+    }
+    g_assert_cmphex(qtest_readq(qts, addr), ==, 1U << 24);
+    g_assert_cmphex(qtest_readl(qts, addr + 8), ==,
+                    VL805_XHCI_CC_SUCCESS << 24);
+    g_assert_cmphex(qtest_readl(qts, addr + 12), ==, control);
+}
+
+static void pcie_assert_vl805_port_event(uint64_t addr, bool cycle)
+{
+    pcie_assert_vl805_port_event_qtest(global_qtest, addr, cycle);
+}
+
+static void pcie_vl805_reset_usb2_port_qtest(QTestState *qts)
+{
+    uint64_t port = RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_PORT1;
+    uint32_t portsc = qtest_readl(qts, port);
+
+    /* Clear the existing change flags before asking for another reset. */
+    qtest_writel(qts, port, portsc);
+    portsc = qtest_readl(qts, port);
+    qtest_writel(qts, port, portsc | VL805_XHCI_PORTSC_PR);
+}
+
+static void pcie_vl805_reset_usb2_port(void)
+{
+    pcie_vl805_reset_usb2_port_qtest(global_qtest);
+}
+
+static void raspi4b_watchdog_reset(void)
+{
+    writel(RASPI4_PM_RSTS,
+           RASPI4_PM_PASSWORD | RASPI4_PM_RSTS_DEFAULT);
+    writel(RASPI4_PM_WDOG,
+           RASPI4_PM_PASSWORD | RASPI4_PM_WDOG_HZ);
+    writel(RASPI4_PM_RSTC,
+           RASPI4_PM_PASSWORD | RASPI4_PM_RSTC_FULL);
+    qtest_clock_step(global_qtest, NANOSECONDS_PER_SECOND);
+    qtest_qmp_eventwait(global_qtest, "RESET");
+}
+
 static void pcie_edu_dma(uint64_t src, uint64_t dst, size_t size,
                          uint32_t command)
 {
@@ -491,7 +552,6 @@ static void test_pcie_root_config(void)
     const uint32_t final_buses = 0x00080700;
     const uint16_t command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
 
-    qtest_system_reset(global_qtest);
     pcie_assert_root_identity();
 
     writel(RASPI4_PCIE_BASE + PCI_VENDOR_ID, 0);
@@ -513,13 +573,10 @@ static void test_pcie_root_config(void)
     g_assert_cmphex(readw(RASPI4_PCIE_BASE + PCI_COMMAND), ==, command);
 
     pcie_assert_qmp_root(0, 7, 8);
-    qtest_system_reset(global_qtest);
 }
 
 static void test_pcie_reset_link_and_mdio(void)
 {
-    qtest_system_reset(global_qtest);
-
     g_assert_cmphex(readl(RASPI4_PCIE_SW_INIT), ==, PCIE_SW_INIT_MASK);
     pcie_assert_link(false);
 
@@ -542,15 +599,12 @@ static void test_pcie_reset_link_and_mdio(void)
                     BCM2711_PCIE_MDIO_DONE | BCM2711_PCIE_MDIO_SSC_PLL);
     writel(RASPI4_PCIE_MDIO_WR_DATA, BCM2711_PCIE_MDIO_DONE | 0x1234);
     g_assert_cmphex(readl(RASPI4_PCIE_MDIO_WR_DATA), ==, 0x1234);
-
-    qtest_system_reset(global_qtest);
 }
 
 static void test_pcie_indirect_absent(void)
 {
     const uint32_t index = pcie_cfg_index(1, 31, 7);
 
-    qtest_system_reset(global_qtest);
     writel(RASPI4_PCIE_EXT_CFG_INDEX, index);
     g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_INDEX), ==, index);
 
@@ -576,13 +630,10 @@ static void test_pcie_indirect_absent(void)
     g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA), ==, 0xffffffff);
     g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA + 0xffc), ==,
                     0xffffffff);
-
-    qtest_system_reset(global_qtest);
 }
 
 static void test_pcie_outbound_windows(void)
 {
-    qtest_system_reset(global_qtest);
     g_assert_cmphex(readl(RASPI4_PCIE_CPU_WINDOW), ==, 0);
 
     /* Linux 7.2 DT: CPU 0x600000000 -> PCI 0xf8000000, 64 MiB. */
@@ -601,8 +652,6 @@ static void test_pcie_outbound_windows(void)
     /* Making base greater than limit removes the old CPU mapping. */
     writel(RASPI4_PCIE_BASE_HI, 0xff);
     g_assert_cmphex(readl(RASPI4_PCIE_CPU_WINDOW), ==, 0);
-
-    qtest_system_reset(global_qtest);
 }
 
 static void test_pcie_edu_config_and_mmio(void)
@@ -619,8 +668,6 @@ static void test_pcie_edu_config_and_mmio(void)
                     RASPI4_PCIE_EDU_PCI_BAR);
     writel(RASPI4_PCIE_EDU_CPU_BAR + 4, value);
     g_assert_cmphex(readl(RASPI4_PCIE_EDU_CPU_BAR + 4), ==, ~value);
-
-    qtest_system_reset(global_qtest);
 }
 
 static void test_pcie_edu_intx(void)
@@ -642,7 +689,6 @@ static void test_pcie_edu_intx(void)
 
     writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_ACK, 1);
     g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_INTX));
-    qtest_system_reset(global_qtest);
 }
 
 static void test_pcie_edu_inbound_dma(void)
@@ -697,8 +743,6 @@ static void test_pcie_edu_inbound_dma(void)
     qtest_clock_step(global_qtest, 101 * 1000 * 1000);
     memread(protected, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual), sentinel, sizeof(sentinel));
-
-    qtest_system_reset(global_qtest);
 }
 
 static void test_pcie_edu_msi(void)
@@ -756,7 +800,6 @@ static void test_pcie_edu_msi(void)
     g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
 
     writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_ACK, 1);
-    qtest_system_reset(global_qtest);
 }
 
 static void test_pcie_vl805_config_and_mmio(void)
@@ -872,8 +915,6 @@ static void test_pcie_vl805_config_and_mmio(void)
                     ==, 0);
     g_assert_true(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBSTS) &
                   VL805_XHCI_USBSTS_HCH);
-
-    qtest_system_reset(global_qtest);
 }
 
 static void test_pcie_vl805_event_dma_msi(void)
@@ -886,13 +927,7 @@ static void test_pcie_vl805_event_dma_msi(void)
     uint32_t portsc;
 
     pcie_vl805_test_start();
-
-    /* PCI 0x400000000..0x40fffffff aliases the first 256 MiB of RAM. */
-    writel(RASPI4_PCIE_MISC_CTRL,
-           readl(RASPI4_PCIE_MISC_CTRL) |
-           PCIE_MISC_CTRL_SCB_ACCESS_EN);
-    writel(RASPI4_PCIE_RC_BAR2_HI, 4);
-    writel(RASPI4_PCIE_RC_BAR2_LO, PCIE_DMA_SIZE_ENCODING_256M);
+    pcie_vl805_enable_dma();
 
     writeq(VL805_XHCI_ERST_CPU, event_pci);
     writel(VL805_XHCI_ERST_CPU + 8, VL805_XHCI_EVENT_RING_TRBS);
@@ -934,31 +969,208 @@ static void test_pcie_vl805_event_dma_msi(void)
     g_assert_false(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBSTS) &
                    VL805_XHCI_USBSTS_HCH);
 
-    qtest_qmp_device_add(global_qtest, "usb-kbd", "vl805-test-kbd",
-                         "{'bus': 'vl805.0'}");
+    portsc = readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_PORT1);
+    g_assert_true(portsc & VL805_XHCI_PORTSC_CCS);
+    g_assert_cmphex(portsc & VL805_XHCI_PORTSC_SPEED_MASK, ==,
+                    VL805_XHCI_PORTSC_SPEED_HIGH);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_PORT1,
+           portsc | VL805_XHCI_PORTSC_PR);
 
-    g_assert_cmphex(readq(VL805_XHCI_EVENT_RING_CPU), ==, 1U << 24);
-    g_assert_cmphex(readl(VL805_XHCI_EVENT_RING_CPU + 8), ==,
-                    VL805_XHCI_CC_SUCCESS << 24);
-    g_assert_cmphex(readl(VL805_XHCI_EVENT_RING_CPU + 12), ==,
-                    (VL805_XHCI_TRB_PORT_STATUS <<
-                     VL805_XHCI_TRB_TYPE_SHIFT) |
-                    VL805_XHCI_TRB_CYCLE);
+    pcie_assert_vl805_port_event(VL805_XHCI_EVENT_RING_CPU, true);
     g_assert_cmphex(readl(RASPI4_PCIE_MSI_STATUS), ==, vector_bit);
     g_assert_true(get_irq(RASPI4_PCIE_VL805_GIC_MSI));
 
     portsc = readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_PORT1);
     g_assert_true(portsc & VL805_XHCI_PORTSC_CCS);
     g_assert_true(portsc & VL805_XHCI_PORTSC_CSC);
+    g_assert_true(portsc & VL805_XHCI_PORTSC_PRC);
     g_assert_cmphex(portsc & VL805_XHCI_PORTSC_SPEED_MASK, ==,
                     VL805_XHCI_PORTSC_SPEED_HIGH);
 
     writel(RASPI4_PCIE_MSI_CLEAR, vector_bit);
     g_assert_cmphex(readl(RASPI4_PCIE_MSI_STATUS), ==, 0);
     g_assert_false(get_irq(RASPI4_PCIE_VL805_GIC_MSI));
+}
 
-    qtest_system_reset(global_qtest);
-    qtest_qmp_device_del(global_qtest, "vl805-test-kbd");
+static void pcie_vl805_setup_multisegment_event_ring(void)
+{
+    const uint64_t erst_pci = PCIE_DMA_BASE + VL805_XHCI_ERST_CPU;
+    const uint64_t event1_pci = PCIE_DMA_BASE +
+                                VL805_XHCI_EVENT_RING_CPU;
+    const uint64_t event2_pci = PCIE_DMA_BASE +
+                                VL805_XHCI_EVENT_RING2_CPU;
+
+    pcie_vl805_test_start();
+    pcie_vl805_enable_dma();
+
+    writeq(VL805_XHCI_ERST_CPU, event1_pci);
+    writel(VL805_XHCI_ERST_CPU + 8, VL805_XHCI_EVENT_RING_TRBS);
+    writel(VL805_XHCI_ERST_CPU + 12, 0);
+    writeq(VL805_XHCI_ERST_CPU + 16, event2_pci);
+    writel(VL805_XHCI_ERST_CPU + 24, VL805_XHCI_EVENT_RING_TRBS);
+    writel(VL805_XHCI_ERST_CPU + 28, 0);
+    qtest_memset(global_qtest, VL805_XHCI_EVENT_RING_CPU, 0,
+                 VL805_XHCI_EVENT_RING_TRBS * 16);
+    qtest_memset(global_qtest, VL805_XHCI_EVENT_RING2_CPU, 0,
+                 VL805_XHCI_EVENT_RING_TRBS * 16);
+
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERSTSZ0, 2);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERSTBA0,
+           (uint32_t)erst_pci);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERSTBA0 + 4,
+           erst_pci >> 32);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERDP0,
+           (uint32_t)event1_pci);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERDP0 + 4,
+           event1_pci >> 32);
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBCMD,
+           VL805_XHCI_USBCMD_RUN);
+
+    g_assert_false(readl(RASPI4_PCIE_VL805_CPU_BAR +
+                         VL805_XHCI_USBSTS) & VL805_XHCI_USBSTS_HCE);
+}
+
+static void test_pcie_vl805_multisegment_event_ring(void)
+{
+    const uint64_t event2_pci = PCIE_DMA_BASE +
+                                VL805_XHCI_EVENT_RING2_CPU;
+    unsigned int i;
+
+    pcie_vl805_setup_multisegment_event_ring();
+
+    /* Fill segment zero and place one event in non-contiguous segment one. */
+    for (i = 0; i < VL805_XHCI_EVENT_RING_TRBS + 1; i++) {
+        pcie_vl805_reset_usb2_port();
+    }
+    pcie_assert_vl805_port_event(VL805_XHCI_EVENT_RING_CPU, true);
+    pcie_assert_vl805_port_event(
+        VL805_XHCI_EVENT_RING_CPU +
+        (VL805_XHCI_EVENT_RING_TRBS - 1) * 16, true);
+    pcie_assert_vl805_port_event(VL805_XHCI_EVENT_RING2_CPU, true);
+    g_assert_cmphex(readq(VL805_XHCI_EVENT_RING2_CPU + 16), ==, 0);
+
+    /* Consumer and producer now agree on segment one, entry one. */
+    writel(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_ERDP0,
+           (uint32_t)(event2_pci + 16) | VL805_XHCI_ERDP_EHB | 1U);
+
+    /* Traverse the rest of segment one and wrap; PCS toggles only here. */
+    for (i = 0; i < VL805_XHCI_EVENT_RING_TRBS; i++) {
+        pcie_vl805_reset_usb2_port();
+    }
+    pcie_assert_vl805_port_event(
+        VL805_XHCI_EVENT_RING2_CPU +
+        (VL805_XHCI_EVENT_RING_TRBS - 1) * 16, true);
+    pcie_assert_vl805_port_event(VL805_XHCI_EVENT_RING_CPU, false);
+    g_assert_false(readl(RASPI4_PCIE_VL805_CPU_BAR +
+                         VL805_XHCI_USBSTS) & VL805_XHCI_USBSTS_HCE);
+}
+
+#ifndef _WIN32
+static void pcie_wait_for_migration(QTestState *qts)
+{
+    int64_t deadline = g_get_monotonic_time() + 30 * G_TIME_SPAN_SECOND;
+
+    while (g_get_monotonic_time() < deadline) {
+        g_autoptr(QDict) response = qtest_qmp(
+            qts, "{ 'execute': 'query-migrate' }");
+        QDict *result = qdict_get_qdict(response, "return");
+        const char *status = qdict_get_str(result, "status");
+
+        if (g_str_equal(status, "completed")) {
+            return;
+        }
+        g_assert_false(g_str_equal(status, "failed"));
+        g_assert_false(g_str_equal(status, "cancelled"));
+        g_usleep(1000);
+    }
+
+    g_error("timed out waiting for Raspberry Pi 4 migration");
+}
+
+static void test_pcie_vl805_multisegment_migration(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autoptr(GString) cmd_line = g_string_new("-machine raspi4b");
+    QTestState *source = global_qtest;
+    QTestState *destination;
+    QDict *result;
+    QDict *status;
+    bool source_was_running;
+    int net_sockets[2];
+    int ret;
+
+    pcie_vl805_setup_multisegment_event_ring();
+
+    /* Leave the producer at segment one, entry one. */
+    for (unsigned int i = 0; i < VL805_XHCI_EVENT_RING_TRBS + 1; i++) {
+        pcie_vl805_reset_usb2_port();
+    }
+    pcie_assert_vl805_port_event(VL805_XHCI_EVENT_RING2_CPU, true);
+    g_assert_cmphex(readq(VL805_XHCI_EVENT_RING2_CPU + 16), ==, 0);
+
+    result = qtest_qmp(source, "{ 'execute': 'query-status' }");
+    g_assert_true(qdict_haskey(result, "return"));
+    status = qdict_get_qdict(result, "return");
+    source_was_running = qdict_get_bool(status, "running");
+    qobject_unref(result);
+    if (source_was_running) {
+        qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    }
+
+    tmpdir = g_dir_make_tmp("raspi4b-migration-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    pcie_wait_for_migration(source);
+
+    if (pcie_has_edu) {
+        g_string_append(cmd_line,
+                        " -device edu,id=edu0,bus=pcie.1,addr=1,"
+                        "dma_mask=0xffffffffffffffff");
+    }
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
+    g_assert_cmpint(ret, !=, -1);
+    g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
+                           net_sockets[1]);
+    g_string_append_printf(cmd_line, " -incoming %s", uri);
+    destination = qtest_init(cmd_line->str);
+    close(net_sockets[1]);
+    pcie_wait_for_migration(destination);
+
+    /* The next event must use the migrated segment and producer index. */
+    g_assert_cmphex(qtest_readq(destination,
+                               VL805_XHCI_EVENT_RING2_CPU + 16), ==, 0);
+    pcie_vl805_reset_usb2_port_qtest(destination);
+    pcie_assert_vl805_port_event_qtest(
+        destination, VL805_XHCI_EVENT_RING2_CPU + 16, true);
+    g_assert_false(qtest_readl(destination,
+                              RASPI4_PCIE_VL805_CPU_BAR +
+                              VL805_XHCI_USBSTS) & VL805_XHCI_USBSTS_HCE);
+
+    qtest_quit(destination);
+    close(net_sockets[0]);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+#endif
+
+static void test_pcie_vl805_usb_topology(void)
+{
+    g_autofree char *usb = qtest_hmp(global_qtest, "info usb");
+    g_autofree char *qtree = qtest_hmp(global_qtest, "info qtree");
+
+    g_assert_nonnull(strstr(usb,
+        "Port 1, Speed 480 Mb/s, Product USB2.0 Hub"));
+    g_assert_null(strstr(usb, "Raspberry Pi Internal Keyboard"));
+    g_assert_nonnull(strstr(qtree, "dev: usb-via-3431-hub"));
+    g_assert_null(strstr(qtree, "dev: usb-pi400-keyboard"));
 }
 
 static void test_pcie_vl805_perst(void)
@@ -991,15 +1203,12 @@ static void test_pcie_vl805_perst(void)
     pcie_vl805_cfg_writew(PCI_COMMAND, command);
     g_assert_true(readl(RASPI4_PCIE_VL805_CPU_BAR + VL805_XHCI_USBSTS) &
                   VL805_XHCI_USBSTS_HCH);
-
-    qtest_system_reset(global_qtest);
 }
 
 static void test_pcie_system_reset(void)
 {
     const uint32_t index = pcie_cfg_index(1, 31, 7);
 
-    qtest_system_reset(global_qtest);
     writel(RASPI4_PCIE_SW_INIT, 0);
     writel(RASPI4_PCIE_EXT_CFG_INDEX, index);
     writel(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS, 0x5a080700);
@@ -1024,7 +1233,7 @@ static void test_pcie_system_reset(void)
     pcie_assert_link(true);
     g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_INDEX), ==, index);
 
-    qtest_system_reset(global_qtest);
+    raspi4b_watchdog_reset();
     pcie_assert_root_identity();
     g_assert_cmphex(readl(RASPI4_PCIE_SW_INIT), ==, PCIE_SW_INIT_MASK);
     pcie_assert_link(false);
@@ -1064,7 +1273,6 @@ static void test_powermgt_watchdog(void)
     const uint32_t timeout = 3 * RASPI4_PM_WDOG_HZ;
     const uint32_t marker = 0x4321;
 
-    qtest_system_reset(global_qtest);
     g_assert_cmphex(readl(RASPI4_PM_RSTC), ==, RASPI4_PM_RSTC_STOP);
     g_assert_cmphex(readl(RASPI4_PM_RSTS), ==, RASPI4_PM_RSTS_DEFAULT);
     g_assert_cmphex(readl(RASPI4_PM_WDOG), ==, 0);
@@ -1143,7 +1351,7 @@ static void test_system_timer_interrupts(void)
     qtest_clock_step(global_qtest, 200 * 1000);
     g_assert_true(get_irq(RASPI4_SYSTIMER_GIC_IRQ_0));
 
-    qtest_system_reset(global_qtest);
+    raspi4b_watchdog_reset();
     g_assert_false(get_irq(RASPI4_SYSTIMER_GIC_IRQ_0));
     g_assert_cmphex(readl(RASPI4_SYSTIMER_CS), ==, 0);
     qtest_clock_step(global_qtest, 200 * 1000);
@@ -1156,7 +1364,7 @@ static void test_spi0_interrupt(void)
     g_assert_true(readl(RASPI4_SPI0_CS) & SPI0_CS_DONE);
     g_assert_true(get_irq(RASPI4_SPI0_GIC_IRQ));
 
-    qtest_system_reset(global_qtest);
+    raspi4b_watchdog_reset();
     g_assert_false(readl(RASPI4_SPI0_CS) & SPI0_CS_DONE);
     g_assert_false(get_irq(RASPI4_SPI0_GIC_IRQ));
 
@@ -1300,8 +1508,6 @@ static void test_firmware_notify_xhci_reset(void)
                     RASPI4_PCIE_VL805_PCI_BAR |
                     PCI_BASE_ADDRESS_MEM_TYPE_64);
     g_assert_cmphex(pcie_vl805_cfg_readl(PCI_BASE_ADDRESS_1), ==, 0);
-
-    qtest_system_reset(global_qtest);
 }
 
 static uint32_t genet_mdio_read(unsigned int phy, unsigned int reg)
@@ -1469,54 +1675,19 @@ static void test_genet_packet_dma(void)
 }
 #endif /* _WIN32 */
 
-int main(int argc, char **argv)
+typedef struct Raspi4TestData {
+    void (*func)(void);
+} Raspi4TestData;
+
+static void raspi4b_test_run(const void *opaque)
 {
-    int ret;
+    const Raspi4TestData *data = opaque;
     g_autoptr(GString) cmd_line = g_string_new("-machine raspi4b");
 #ifndef _WIN32
     int test_sockets[2];
+    int ret;
 #endif
 
-    g_test_init(&argc, &argv, NULL);
-    qtest_add_func("/raspi4b/asb/bridge_ids", test_asb_bridge_ids);
-    qtest_add_func("/raspi4b/cpu/configuration", test_cpu_configuration);
-    qtest_add_func("/raspi4b/powermgt/watchdog", test_powermgt_watchdog);
-    qtest_add_func("/raspi4b/interrupts/system_timer",
-                   test_system_timer_interrupts);
-    qtest_add_func("/raspi4b/interrupts/spi0", test_spi0_interrupt);
-    qtest_add_func("/raspi4b/sd/card_on_emmc2", test_sd_card_on_emmc2);
-    qtest_add_func("/raspi4b/firmware_gpio", test_firmware_gpio);
-    qtest_add_func("/raspi4b/firmware_dma_channels",
-                   test_firmware_dma_channels);
-    qtest_add_func("/raspi4b/firmware/notify_xhci_reset",
-                   test_firmware_notify_xhci_reset);
-    qtest_add_func("/raspi4b/pcie/root_config", test_pcie_root_config);
-    qtest_add_func("/raspi4b/pcie/reset_link_and_mdio",
-                   test_pcie_reset_link_and_mdio);
-    qtest_add_func("/raspi4b/pcie/indirect_absent",
-                   test_pcie_indirect_absent);
-    qtest_add_func("/raspi4b/pcie/outbound_windows",
-                   test_pcie_outbound_windows);
-    qtest_add_func("/raspi4b/pcie/edu/config_and_mmio",
-                   test_pcie_edu_config_and_mmio);
-    qtest_add_func("/raspi4b/pcie/edu/intx", test_pcie_edu_intx);
-    qtest_add_func("/raspi4b/pcie/edu/inbound_dma",
-                   test_pcie_edu_inbound_dma);
-    qtest_add_func("/raspi4b/pcie/edu/msi", test_pcie_edu_msi);
-    qtest_add_func("/raspi4b/pcie/vl805/config_and_mmio",
-                   test_pcie_vl805_config_and_mmio);
-    qtest_add_func("/raspi4b/pcie/vl805/event_dma_msi",
-                   test_pcie_vl805_event_dma_msi);
-    qtest_add_func("/raspi4b/pcie/vl805/perst",
-                   test_pcie_vl805_perst);
-    qtest_add_func("/raspi4b/pcie/system_reset", test_pcie_system_reset);
-    qtest_add_func("/raspi4b/genet/registers_and_mdio",
-                   test_genet_registers_and_mdio);
-#ifndef _WIN32
-    qtest_add_func("/raspi4b/genet/packet_dma", test_genet_packet_dma);
-#endif
-
-    pcie_has_edu = qtest_has_device("edu");
     if (pcie_has_edu) {
         g_string_append(cmd_line,
                         " -device edu,id=edu0,bus=pcie.1,addr=1,"
@@ -1536,11 +1707,71 @@ int main(int argc, char **argv)
 #endif
 
     qtest_irq_intercept_in(global_qtest, "/machine/soc/peripherals");
-    ret = g_test_run();
+    data->func();
     qtest_end();
 #ifndef _WIN32
     close(genet_test_socket);
+    genet_test_socket = -1;
+#endif
+}
+
+static void raspi4b_add_test(const char *path, void (*func)(void))
+{
+    Raspi4TestData *data = g_new(Raspi4TestData, 1);
+
+    data->func = func;
+    qtest_add_data_func_full(path, data, raspi4b_test_run, g_free);
+}
+
+int main(int argc, char **argv)
+{
+    g_test_init(&argc, &argv, NULL);
+    pcie_has_edu = qtest_has_device("edu");
+
+    raspi4b_add_test("/raspi4b/asb/bridge_ids", test_asb_bridge_ids);
+    raspi4b_add_test("/raspi4b/cpu/configuration", test_cpu_configuration);
+    raspi4b_add_test("/raspi4b/powermgt/watchdog", test_powermgt_watchdog);
+    raspi4b_add_test("/raspi4b/interrupts/system_timer",
+                     test_system_timer_interrupts);
+    raspi4b_add_test("/raspi4b/interrupts/spi0", test_spi0_interrupt);
+    raspi4b_add_test("/raspi4b/sd/card_on_emmc2", test_sd_card_on_emmc2);
+    raspi4b_add_test("/raspi4b/firmware_gpio", test_firmware_gpio);
+    raspi4b_add_test("/raspi4b/firmware_dma_channels",
+                     test_firmware_dma_channels);
+    raspi4b_add_test("/raspi4b/firmware/notify_xhci_reset",
+                     test_firmware_notify_xhci_reset);
+    raspi4b_add_test("/raspi4b/pcie/root_config", test_pcie_root_config);
+    raspi4b_add_test("/raspi4b/pcie/reset_link_and_mdio",
+                     test_pcie_reset_link_and_mdio);
+    raspi4b_add_test("/raspi4b/pcie/indirect_absent",
+                     test_pcie_indirect_absent);
+    raspi4b_add_test("/raspi4b/pcie/outbound_windows",
+                     test_pcie_outbound_windows);
+    raspi4b_add_test("/raspi4b/pcie/edu/config_and_mmio",
+                     test_pcie_edu_config_and_mmio);
+    raspi4b_add_test("/raspi4b/pcie/edu/intx", test_pcie_edu_intx);
+    raspi4b_add_test("/raspi4b/pcie/edu/inbound_dma",
+                     test_pcie_edu_inbound_dma);
+    raspi4b_add_test("/raspi4b/pcie/edu/msi", test_pcie_edu_msi);
+    raspi4b_add_test("/raspi4b/pcie/vl805/config_and_mmio",
+                     test_pcie_vl805_config_and_mmio);
+    raspi4b_add_test("/raspi4b/pcie/vl805/event_dma_msi",
+                     test_pcie_vl805_event_dma_msi);
+    raspi4b_add_test("/raspi4b/pcie/vl805/multisegment_event_ring",
+                     test_pcie_vl805_multisegment_event_ring);
+#ifndef _WIN32
+    raspi4b_add_test("/raspi4b/pcie/vl805/multisegment_migration",
+                     test_pcie_vl805_multisegment_migration);
+#endif
+    raspi4b_add_test("/raspi4b/pcie/vl805/usb_topology",
+                     test_pcie_vl805_usb_topology);
+    raspi4b_add_test("/raspi4b/pcie/vl805/perst", test_pcie_vl805_perst);
+    raspi4b_add_test("/raspi4b/pcie/system_reset", test_pcie_system_reset);
+    raspi4b_add_test("/raspi4b/genet/registers_and_mdio",
+                     test_genet_registers_and_mdio);
+#ifndef _WIN32
+    raspi4b_add_test("/raspi4b/genet/packet_dma", test_genet_packet_dma);
 #endif
 
-    return ret;
+    return g_test_run();
 }

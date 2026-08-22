@@ -15,6 +15,7 @@
 #include "hw/arm/raspi4_platform.h"
 #include "hw/display/bcm2835_fb.h"
 #include "hw/core/registerfields.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/error-report.h"
 #include "system/device_tree.h"
 #include "hw/core/boards.h"
@@ -24,6 +25,8 @@
 #include "hw/arm/bcm2838.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bridge.h"
+#include "hw/usb/hid.h"
+#include "hw/usb/usb.h"
 #include "hw/usb/xhci.h"
 #include <libfdt.h>
 
@@ -31,6 +34,7 @@
 
 #if HOST_LONG_BITS == 64
 #define TYPE_RASPI400_MACHINE MACHINE_TYPE_NAME("raspi400")
+#define RASPI400_BOARD_REVISION 0xc03130
 #endif
 
 /*
@@ -68,7 +72,6 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
 
     /* Temporarily disable following devices until they are implemented */
     const char *nodes_to_remove[] = {
-        "brcm,bcm2711-pcie",
         "brcm,bcm2711-rng200",
         "brcm,bcm2711-thermal",
         "brcm,bcm2711-l2-intc",
@@ -113,6 +116,8 @@ static void raspi4_machine_init(MachineState *machine)
     BCM2838State *soc = &s_base->soc;
     PCIBus *pcie_bus;
     PCIDevice *vl805;
+    USBBus *usb_bus;
+    USBDevice *hub;
 
     s_base->binfo.modify_dtb = raspi4_modify_dtb;
     s_base->binfo.board_id = mc->board_rev;
@@ -133,6 +138,21 @@ static void raspi4_machine_init(MachineState *machine)
         DEVICE(&soc->peripherals.parent_obj.property),
         BCM2835_PROPERTY_XHCI_NOTIFY, 0,
         qdev_get_gpio_in_named(DEVICE(vl805), VL805_XHCI_FIRMWARE_NOTIFY, 0));
+
+    usb_bus = USB_BUS(qdev_get_child_bus(DEVICE(vl805), "vl805.0"));
+    hub = USB_DEVICE(qdev_new(TYPE_USB_VIA_3431_HUB));
+    qdev_prop_set_uint32(DEVICE(hub), "ports", 4);
+    qdev_prop_set_string(DEVICE(hub), "port", "1");
+    usb_realize_and_unref(hub, usb_bus, &error_abort);
+
+#if HOST_LONG_BITS == 64
+    if (mc->board_rev == RASPI400_BOARD_REVISION) {
+        USBDevice *keyboard = USB_DEVICE(qdev_new(TYPE_USB_PI400_KEYBOARD));
+
+        qdev_prop_set_string(DEVICE(keyboard), "port", "1.4");
+        usb_realize_and_unref(keyboard, usb_bus, &error_abort);
+    }
+#endif
 }
 
 static void raspi4b_machine_class_init(ObjectClass *oc, const void *data)
@@ -156,7 +176,7 @@ static void raspi400_machine_class_init(ObjectClass *oc, const void *data)
     MachineClass *mc = MACHINE_CLASS(oc);
     Raspi4BaseMachineClass *rmc = RASPI4_BASE_MACHINE_CLASS(oc);
 
-    rmc->board_rev = 0xc03130; /* Revision 1.0, 4 GiB RAM */
+    rmc->board_rev = RASPI400_BOARD_REVISION; /* Revision 1.0, 4 GiB RAM */
     raspi4_common_machine_class_init(mc, rmc->board_rev, "400");
     mc->auto_create_sdcard = true;
     mc->init = raspi4_machine_init;

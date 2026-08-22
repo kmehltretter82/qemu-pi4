@@ -42,6 +42,8 @@ typedef struct USBHubPort {
     uint16_t wPortChange;
 } USBHubPort;
 
+typedef struct USBHubClass USBHubClass;
+
 struct USBHubState {
     USBDevice dev;
     USBEndpoint *intr;
@@ -51,8 +53,16 @@ struct USBHubState {
     USBHubPort ports[MAX_PORTS];
 };
 
-#define TYPE_USB_HUB "usb-hub"
-OBJECT_DECLARE_SIMPLE_TYPE(USBHubState, USB_HUB)
+struct USBHubClass {
+    USBDeviceClass parent_class;
+
+    uint32_t device_speedmask;
+    uint32_t downstream_speedmask;
+    const uint8_t *hub_descriptor;
+    size_t hub_descriptor_size;
+};
+
+OBJECT_DECLARE_TYPE(USBHubState, USBHubClass, USB_HUB)
 
 #define ClearHubFeature         (0x2000 | USB_REQ_CLEAR_FEATURE)
 #define ClearPortFeature        (0x2300 | USB_REQ_CLEAR_FEATURE)
@@ -153,6 +163,59 @@ static const USBDesc desc_hub = {
     .str  = desc_strings,
 };
 
+enum {
+    VIA_STR_PRODUCT = 1,
+};
+
+static const USBDescStrings desc_strings_via_3431 = {
+    [VIA_STR_PRODUCT] = "USB2.0 Hub",
+};
+
+static const USBDescIface desc_iface_via_3431 = {
+    .bInterfaceNumber              = 0,
+    .bNumEndpoints                 = 1,
+    .bInterfaceClass               = USB_CLASS_HUB,
+    .eps = (USBDescEndpoint[]) {
+        {
+            .bEndpointAddress      = USB_DIR_IN | 0x01,
+            .bmAttributes          = USB_ENDPOINT_XFER_INT,
+            .wMaxPacketSize        = 1,
+            .bInterval             = 12,
+        },
+    }
+};
+
+static const USBDescDevice desc_device_via_3431 = {
+    .bcdUSB                        = 0x0210,
+    .bDeviceClass                  = USB_CLASS_HUB,
+    .bDeviceProtocol               = 1, /* single transaction translator */
+    .bMaxPacketSize0               = 64,
+    .bNumConfigurations            = 1,
+    .confs = (USBDescConfig[]) {
+        {
+            .bNumInterfaces        = 1,
+            .bConfigurationValue   = 1,
+            .bmAttributes          = USB_CFG_ATT_ONE | USB_CFG_ATT_SELFPOWER |
+                                     USB_CFG_ATT_WAKEUP,
+            .bMaxPower             = 50,
+            .nif = 1,
+            .ifs = &desc_iface_via_3431,
+        },
+    },
+};
+
+static const USBDesc desc_via_3431 = {
+    .id = {
+        .idVendor          = 0x2109,
+        .idProduct         = 0x3431,
+        .bcdDevice         = 0x0421,
+        .iProduct          = VIA_STR_PRODUCT,
+    },
+    .full  = &desc_device_via_3431,
+    .high  = &desc_device_via_3431,
+    .str   = desc_strings_via_3431,
+};
+
 static const uint8_t qemu_hub_hub_descriptor[] =
 {
         0x00,                   /*  u8  bLength; patched in later */
@@ -162,6 +225,17 @@ static const uint8_t qemu_hub_hub_descriptor[] =
         0x00,                   /*   (per-port OC, no power switching) */
         0x01,                   /*  u8  bPwrOn2pwrGood; 2ms */
         0x00                    /*  u8  bHubContrCurrent; 0 mA */
+
+        /* DeviceRemovable and PortPwrCtrlMask patched in later */
+};
+
+static const uint8_t via_3431_hub_descriptor[] = {
+        0x00,                   /*  u8  bLength; patched in later */
+        0x29,                   /*  u8  bDescriptorType */
+        0x00,                   /*  u8  bNbrPorts; patched in later */
+        0xe0, 0x00,             /* u16  wHubCharacteristics */
+        50,                     /*  u8  bPwrOn2PwrGood; 100 ms */
+        100,                    /*  u8  bHubContrCurrent; 100 mA */
 
         /* DeviceRemovable and PortPwrCtrlMask patched in later */
 };
@@ -201,10 +275,12 @@ static bool usb_hub_port_update(USBHubPort *port)
 
     if (port->port.dev && port->port.dev->attached) {
         notify = usb_hub_port_set(port, PORT_STAT_CONNECTION);
+        usb_hub_port_clear(port, PORT_STAT_LOW_SPEED |
+                                 PORT_STAT_HIGH_SPEED);
         if (port->port.dev->speed == USB_SPEED_LOW) {
             usb_hub_port_set(port, PORT_STAT_LOW_SPEED);
-        } else {
-            usb_hub_port_clear(port, PORT_STAT_LOW_SPEED);
+        } else if (port->port.dev->speed == USB_SPEED_HIGH) {
+            usb_hub_port_set(port, PORT_STAT_HIGH_SPEED);
         }
     }
     return notify;
@@ -351,6 +427,7 @@ static void usb_hub_handle_control(USBDevice *dev, USBPacket *p,
                int request, int value, int index, int length, uint8_t *data)
 {
     USBHubState *s = (USBHubState *)dev;
+    USBHubClass *hc = USB_HUB_GET_CLASS(s);
     int ret;
 
     trace_usb_hub_control(s->dev.addr, request, value, index, length);
@@ -488,8 +565,7 @@ static void usb_hub_handle_control(USBDevice *dev, USBPacket *p,
     case GetHubDescriptor:
         {
             unsigned int n, limit, var_hub_size = 0;
-            memcpy(data, qemu_hub_hub_descriptor,
-                   sizeof(qemu_hub_hub_descriptor));
+            memcpy(data, hc->hub_descriptor, hc->hub_descriptor_size);
             data[2] = s->num_ports;
 
             if (s->port_power) {
@@ -511,7 +587,7 @@ static void usb_hub_handle_control(USBDevice *dev, USBPacket *p,
                 var_hub_size++;
             }
 
-            p->actual_length = sizeof(qemu_hub_hub_descriptor) + var_hub_size;
+            p->actual_length = hc->hub_descriptor_size + var_hub_size;
             data[0] = p->actual_length;
             break;
         }
@@ -591,6 +667,7 @@ static USBPortOps usb_hub_port_ops = {
 static void usb_hub_realize(USBDevice *dev, Error **errp)
 {
     USBHubState *s = USB_HUB(dev);
+    USBHubClass *hc = USB_HUB_GET_CLASS(s);
     USBHubPort *port;
     int i;
 
@@ -605,8 +682,13 @@ static void usb_hub_realize(USBDevice *dev, Error **errp)
         return;
     }
 
-    usb_desc_create_serial(dev);
+    if (usb_device_get_usb_desc(dev)->id.iSerialNumber) {
+        usb_desc_create_serial(dev);
+    }
     usb_desc_init(dev);
+    if (hc->device_speedmask) {
+        dev->speedmask = hc->device_speedmask;
+    }
     s->port_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                  usb_hub_port_update_timer, s);
     s->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
@@ -614,7 +696,7 @@ static void usb_hub_realize(USBDevice *dev, Error **errp)
         port = &s->ports[i];
         usb_register_port(usb_bus_from_device(dev),
                           &port->port, s, i, &usb_hub_port_ops,
-                          USB_SPEED_MASK_LOW | USB_SPEED_MASK_FULL);
+                          hc->downstream_speedmask);
         usb_port_location(&port->port, dev->port, i+1);
     }
     usb_hub_handle_reset(dev);
@@ -674,6 +756,7 @@ static void usb_hub_class_initfn(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
+    USBHubClass *hc = USB_HUB_CLASS(klass);
 
     uc->realize        = usb_hub_realize;
     uc->product_desc   = "QEMU USB Hub";
@@ -687,18 +770,44 @@ static void usb_hub_class_initfn(ObjectClass *klass, const void *data)
     dc->fw_name = "hub";
     dc->vmsd = &vmstate_usb_hub;
     device_class_set_props(dc, usb_hub_properties);
+    hc->downstream_speedmask = USB_SPEED_MASK_LOW | USB_SPEED_MASK_FULL;
+    hc->hub_descriptor = qemu_hub_hub_descriptor;
+    hc->hub_descriptor_size = sizeof(qemu_hub_hub_descriptor);
 }
 
 static const TypeInfo hub_info = {
     .name          = TYPE_USB_HUB,
     .parent        = TYPE_USB_DEVICE,
     .instance_size = sizeof(USBHubState),
+    .class_size    = sizeof(USBHubClass),
     .class_init    = usb_hub_class_initfn,
+};
+
+static void usb_via_3431_hub_class_initfn(ObjectClass *klass,
+                                           const void *data)
+{
+    USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
+    USBHubClass *hc = USB_HUB_CLASS(klass);
+
+    uc->product_desc = "USB2.0 Hub";
+    uc->usb_desc = &desc_via_3431;
+    hc->device_speedmask = USB_SPEED_MASK_FULL | USB_SPEED_MASK_HIGH;
+    hc->downstream_speedmask = USB_SPEED_MASK_LOW | USB_SPEED_MASK_FULL |
+                               USB_SPEED_MASK_HIGH;
+    hc->hub_descriptor = via_3431_hub_descriptor;
+    hc->hub_descriptor_size = sizeof(via_3431_hub_descriptor);
+}
+
+static const TypeInfo via_3431_hub_info = {
+    .name          = TYPE_USB_VIA_3431_HUB,
+    .parent        = TYPE_USB_HUB,
+    .class_init    = usb_via_3431_hub_class_initfn,
 };
 
 static void usb_hub_register_types(void)
 {
     type_register_static(&hub_info);
+    type_register_static(&via_3431_hub_info);
 }
 
 type_init(usb_hub_register_types)

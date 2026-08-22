@@ -39,7 +39,10 @@
 struct USBHIDState {
     USBDevice dev;
     USBEndpoint *intr;
+    USBEndpoint *intr2;
     HIDState hid;
+    const uint8_t *report_desc[2];
+    size_t report_desc_len[2];
     uint32_t usb_version;
     char *display;
     uint32_t head;
@@ -260,6 +263,54 @@ static const USBDescIface desc_iface_keyboard2 = {
     },
 };
 
+static const USBDescIface desc_iface_pi400_keyboard[] = {
+    {
+        .bInterfaceNumber              = 0,
+        .bNumEndpoints                 = 1,
+        .bInterfaceClass               = USB_CLASS_HID,
+        .bInterfaceSubClass            = 0x01, /* boot */
+        .bInterfaceProtocol            = 0x01, /* keyboard */
+        .ndesc                         = 1,
+        .descs = (USBDescOther[]) {
+            {
+                .data = (uint8_t[]) {
+                    0x09, USB_DT_HID, 0x11, 0x01, 0x00, 0x01,
+                    USB_DT_REPORT, 65, 0,
+                },
+            },
+        },
+        .eps = (USBDescEndpoint[]) {
+            {
+                .bEndpointAddress      = USB_DIR_IN | 0x01,
+                .bmAttributes          = USB_ENDPOINT_XFER_INT,
+                .wMaxPacketSize        = 8,
+                .bInterval             = 10,
+            },
+        },
+    }, {
+        .bInterfaceNumber              = 1,
+        .bNumEndpoints                 = 1,
+        .bInterfaceClass               = USB_CLASS_HID,
+        .ndesc                         = 1,
+        .descs = (USBDescOther[]) {
+            {
+                .data = (uint8_t[]) {
+                    0x09, USB_DT_HID, 0x11, 0x01, 0x00, 0x01,
+                    USB_DT_REPORT, 59, 0,
+                },
+            },
+        },
+        .eps = (USBDescEndpoint[]) {
+            {
+                .bEndpointAddress      = USB_DIR_IN | 0x02,
+                .bmAttributes          = USB_ENDPOINT_XFER_INT,
+                .wMaxPacketSize        = 5,
+                .bInterval             = 10,
+            },
+        },
+    },
+};
+
 static const USBDescDevice desc_device_mouse = {
     .bcdUSB                        = 0x0100,
     .bMaxPacketSize0               = 8,
@@ -362,6 +413,22 @@ static const USBDescDevice desc_device_keyboard2 = {
     },
 };
 
+static const USBDescDevice desc_device_pi400_keyboard = {
+    .bcdUSB                        = 0x0200,
+    .bMaxPacketSize0               = 8,
+    .bNumConfigurations            = 1,
+    .confs = (USBDescConfig[]) {
+        {
+            .bNumInterfaces        = 2,
+            .bConfigurationValue   = 1,
+            .bmAttributes          = USB_CFG_ATT_ONE | USB_CFG_ATT_WAKEUP,
+            .bMaxPower             = 50,
+            .nif = 2,
+            .ifs = desc_iface_pi400_keyboard,
+        },
+    },
+};
+
 static const USBDescMSOS desc_msos_suspend = {
     .SelectiveSuspendEnabled = true,
 };
@@ -451,6 +518,23 @@ static const USBDesc desc_keyboard2 = {
     .high = &desc_device_keyboard2,
     .str  = desc_strings,
     .msos = &desc_msos_suspend,
+};
+
+static const USBDescStrings desc_strings_pi400_keyboard = {
+    [1] = " ",
+    [2] = "Raspberry Pi Internal Keyboard",
+};
+
+static const USBDesc desc_pi400_keyboard = {
+    .id = {
+        .idVendor          = 0x04d9,
+        .idProduct         = 0x0007,
+        .bcdDevice         = 0x0163,
+        .iManufacturer     = 1,
+        .iProduct          = 2,
+    },
+    .full = &desc_device_pi400_keyboard,
+    .str  = desc_strings_pi400_keyboard,
 };
 
 static const uint8_t qemu_mouse_hid_report_descriptor[] = {
@@ -558,6 +642,29 @@ static const uint8_t qemu_keyboard_hid_report_descriptor[] = {
     0xc0,		/* End Collection */
 };
 
+static const uint8_t pi400_keyboard_hid_report_descriptor[] = {
+    0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x05, 0x07,
+    0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01,
+    0x75, 0x08, 0x81, 0x01, 0x95, 0x03, 0x75, 0x01,
+    0x05, 0x08, 0x19, 0x01, 0x29, 0x03, 0x91, 0x02,
+    0x95, 0x05, 0x75, 0x01, 0x91, 0x01, 0x95, 0x06,
+    0x75, 0x08, 0x15, 0x00, 0x26, 0xff, 0x00, 0x05,
+    0x07, 0x19, 0x00, 0x2a, 0xff, 0x00, 0x81, 0x00,
+    0xc0,
+};
+
+static const uint8_t pi400_consumer_hid_report_descriptor[] = {
+    0x05, 0x0c, 0x09, 0x01, 0xa1, 0x01, 0x05, 0x0c,
+    0x75, 0x01, 0x95, 0x01, 0x15, 0x00, 0x25, 0x01,
+    0x09, 0xcd, 0x81, 0x06, 0x09, 0xb5, 0x81, 0x02,
+    0x09, 0xb6, 0x81, 0x02, 0x09, 0xb8, 0x81, 0x06,
+    0x09, 0xe2, 0x81, 0x06, 0x09, 0xea, 0x81, 0x02,
+    0x09, 0xe9, 0x81, 0x02, 0x0a, 0x23, 0x02, 0x81,
+    0x02, 0x0a, 0x92, 0x01, 0x81, 0x02, 0x95, 0x07,
+    0x81, 0x01, 0xc0,
+};
+
 static void usb_hid_changed(HIDState *hs)
 {
     USBHIDState *us = container_of(hs, USBHIDState, hid);
@@ -577,6 +684,8 @@ static void usb_hid_handle_control(USBDevice *dev, USBPacket *p,
 {
     USBHIDState *us = USB_HID(dev);
     HIDState *hs = &us->hid;
+    const uint8_t *report = NULL;
+    size_t report_len = 0;
     int ret;
 
     ret = usb_desc_handle_control(dev, p, request, value, index, length, data);
@@ -589,47 +698,60 @@ static void usb_hid_handle_control(USBDevice *dev, USBPacket *p,
     case InterfaceRequest | USB_REQ_GET_DESCRIPTOR:
         switch (value >> 8) {
         case 0x22:
-            if (hs->kind == HID_MOUSE) {
-                memcpy(data, qemu_mouse_hid_report_descriptor,
-                       sizeof(qemu_mouse_hid_report_descriptor));
-                p->actual_length = sizeof(qemu_mouse_hid_report_descriptor);
-            } else if (hs->kind == HID_TABLET) {
-                memcpy(data, qemu_tablet_hid_report_descriptor,
-                       sizeof(qemu_tablet_hid_report_descriptor));
-                p->actual_length = sizeof(qemu_tablet_hid_report_descriptor);
-            } else if (hs->kind == HID_KEYBOARD) {
-                memcpy(data, qemu_keyboard_hid_report_descriptor,
-                       sizeof(qemu_keyboard_hid_report_descriptor));
-                p->actual_length = sizeof(qemu_keyboard_hid_report_descriptor);
+            if (index < ARRAY_SIZE(us->report_desc) &&
+                us->report_desc[index]) {
+                report = us->report_desc[index];
+                report_len = us->report_desc_len[index];
+            } else if (index == 0 && hs->kind == HID_MOUSE) {
+                report = qemu_mouse_hid_report_descriptor;
+                report_len = sizeof(qemu_mouse_hid_report_descriptor);
+            } else if (index == 0 && hs->kind == HID_TABLET) {
+                report = qemu_tablet_hid_report_descriptor;
+                report_len = sizeof(qemu_tablet_hid_report_descriptor);
+            } else if (index == 0 && hs->kind == HID_KEYBOARD) {
+                report = qemu_keyboard_hid_report_descriptor;
+                report_len = sizeof(qemu_keyboard_hid_report_descriptor);
             }
+            if (!report) {
+                goto fail;
+            }
+            p->actual_length = MIN((size_t)length, report_len);
+            memcpy(data, report, p->actual_length);
             break;
         default:
             goto fail;
         }
         break;
     case HID_GET_REPORT:
-        if (hs->kind == HID_MOUSE || hs->kind == HID_TABLET) {
+        if (us->intr2 && index == 1) {
+            p->actual_length = MIN(length, 5);
+            memset(data, 0, p->actual_length);
+        } else if (hs->kind == HID_MOUSE || hs->kind == HID_TABLET) {
             p->actual_length = hid_pointer_poll(hs, data, length);
         } else if (hs->kind == HID_KEYBOARD) {
             p->actual_length = hid_keyboard_poll(hs, data, length);
         }
         break;
     case HID_SET_REPORT:
-        if (hs->kind == HID_KEYBOARD) {
+        if (us->intr2 && index == 1) {
+            goto fail;
+        } else if (hs->kind == HID_KEYBOARD) {
             p->actual_length = hid_keyboard_write(hs, data, length);
         } else {
             goto fail;
         }
         break;
     case HID_GET_PROTOCOL:
-        if (hs->kind != HID_KEYBOARD && hs->kind != HID_MOUSE) {
+        if ((us->intr2 && index == 1) ||
+            (hs->kind != HID_KEYBOARD && hs->kind != HID_MOUSE)) {
             goto fail;
         }
         data[0] = hs->protocol;
         p->actual_length = 1;
         break;
     case HID_SET_PROTOCOL:
-        if (hs->kind != HID_KEYBOARD && hs->kind != HID_MOUSE) {
+        if ((us->intr2 && index == 1) ||
+            (hs->kind != HID_KEYBOARD && hs->kind != HID_MOUSE)) {
             goto fail;
         }
         hs->protocol = value;
@@ -676,6 +798,8 @@ static void usb_hid_handle_data(USBDevice *dev, USBPacket *p)
                 len = hid_keyboard_poll(hs, buf, p->iov.size);
             }
             usb_packet_copy(p, buf, len);
+        } else if (us->intr2 && p->ep->nr == 2) {
+            p->status = USB_RET_NAK;
         } else {
             goto fail;
         }
@@ -716,7 +840,9 @@ static void usb_hid_initfn(USBDevice *dev, int kind,
         return;
     }
 
-    usb_desc_create_serial(dev);
+    if (usb_device_get_usb_desc(dev)->id.iSerialNumber) {
+        usb_desc_create_serial(dev);
+    }
     usb_desc_init(dev);
     us->intr = usb_ep_get(dev, USB_TOKEN_IN, 1);
     hid_init(&us->hid, kind, usb_hid_changed);
@@ -739,6 +865,25 @@ static void usb_mouse_realize(USBDevice *dev, Error **errp)
 static void usb_keyboard_realize(USBDevice *dev, Error **errp)
 {
     usb_hid_initfn(dev, HID_KEYBOARD, &desc_keyboard, &desc_keyboard2, errp);
+}
+
+static void usb_pi400_keyboard_realize(USBDevice *dev, Error **errp)
+{
+    USBHIDState *us = USB_HID(dev);
+
+    usb_hid_initfn(dev, HID_KEYBOARD, &desc_pi400_keyboard,
+                   &desc_pi400_keyboard, errp);
+    if (!dev->usb_desc) {
+        return;
+    }
+
+    dev->speed = USB_SPEED_LOW;
+    dev->speedmask = USB_SPEED_MASK_LOW;
+    us->intr2 = usb_ep_get(dev, USB_TOKEN_IN, 2);
+    us->report_desc[0] = pi400_keyboard_hid_report_descriptor;
+    us->report_desc_len[0] = sizeof(pi400_keyboard_hid_report_descriptor);
+    us->report_desc[1] = pi400_consumer_hid_report_descriptor;
+    us->report_desc_len[1] = sizeof(pi400_consumer_hid_report_descriptor);
 }
 
 static int usb_ptr_post_load(void *opaque, int version_id)
@@ -862,6 +1007,21 @@ static const TypeInfo usb_keyboard_info = {
     .class_init    = usb_keyboard_class_initfn,
 };
 
+static void usb_pi400_keyboard_class_initfn(ObjectClass *klass,
+                                             const void *data)
+{
+    USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
+
+    uc->realize = usb_pi400_keyboard_realize;
+    uc->product_desc = "Raspberry Pi Internal Keyboard";
+}
+
+static const TypeInfo usb_pi400_keyboard_info = {
+    .name          = TYPE_USB_PI400_KEYBOARD,
+    .parent        = "usb-kbd",
+    .class_init    = usb_pi400_keyboard_class_initfn,
+};
+
 static void usb_hid_register_types(void)
 {
     type_register_static(&usb_hid_type_info);
@@ -870,6 +1030,7 @@ static void usb_hid_register_types(void)
     type_register_static(&usb_mouse_info);
     usb_legacy_register("usb-mouse", "mouse", NULL);
     type_register_static(&usb_keyboard_info);
+    type_register_static(&usb_pi400_keyboard_info);
     usb_legacy_register("usb-kbd", "keyboard", NULL);
 }
 

@@ -134,8 +134,12 @@
 #define IMAN_IE         (1<<1)
 
 #define ERDP_EHB        (1<<3)
+#define ERDP_DESI_MASK  0x7
 
 #define TRB_SIZE 16
+
+#define HCSPARAMS2_ERST_MAX_SHIFT 4
+#define HCSPARAMS2_ERST_MAX_MASK  0xf
 typedef struct XHCITRB {
     uint64_t parameter;
     uint32_t status;
@@ -309,6 +313,11 @@ typedef struct XHCIEvRingSeg {
     uint32_t size;
     uint32_t rsvd;
 } XHCIEvRingSeg;
+
+typedef struct XHCIEvRingPos {
+    uint32_t seg;
+    uint32_t idx;
+} XHCIEvRingPos;
 
 static void xhci_kick_ep(XHCIState *xhci, unsigned int slotid,
                          unsigned int epid, unsigned int streamid);
@@ -614,11 +623,107 @@ static inline int xhci_running(XHCIState *xhci)
     return !(xhci->usbsts & USBSTS_HCH);
 }
 
+static uint32_t xhci_hcsparams2(const XHCIState *xhci)
+{
+    return xhci->register_model == XHCI_REGISTER_MODEL_VL805 ?
+           0xfc000031 : 0x0000000f;
+}
+
+static uint32_t xhci_erst_max_segs(const XHCIState *xhci)
+{
+    uint32_t exponent = (xhci_hcsparams2(xhci) >>
+                         HCSPARAMS2_ERST_MAX_SHIFT) &
+                        HCSPARAMS2_ERST_MAX_MASK;
+
+    return MIN(1U << exponent, XHCI_MAX_ERST_SEGS);
+}
+
+static bool xhci_er_pos_valid(const XHCIInterrupter *intr,
+                              const XHCIEvRingPos *pos)
+{
+    return pos->seg < intr->er_seg_count &&
+           pos->idx < intr->er_seg_size[pos->seg];
+}
+
+static bool xhci_er_pos_equal(const XHCIEvRingPos *a,
+                              const XHCIEvRingPos *b)
+{
+    return a->seg == b->seg && a->idx == b->idx;
+}
+
+static bool xhci_er_pos_advance(const XHCIInterrupter *intr,
+                                XHCIEvRingPos *pos)
+{
+    if (!xhci_er_pos_valid(intr, pos)) {
+        return false;
+    }
+
+    pos->idx++;
+    if (pos->idx == intr->er_seg_size[pos->seg]) {
+        pos->idx = 0;
+        pos->seg++;
+        if (pos->seg == intr->er_seg_count) {
+            pos->seg = 0;
+        }
+    }
+    return true;
+}
+
+static bool xhci_er_addr_in_seg(const XHCIInterrupter *intr,
+                                uint32_t seg, dma_addr_t addr,
+                                XHCIEvRingPos *pos)
+{
+    dma_addr_t offset;
+
+    if (seg >= intr->er_seg_count || addr < intr->er_seg_start[seg]) {
+        return false;
+    }
+
+    offset = addr - intr->er_seg_start[seg];
+    if ((offset & (TRB_SIZE - 1)) ||
+        offset / TRB_SIZE >= intr->er_seg_size[seg]) {
+        return false;
+    }
+
+    pos->seg = seg;
+    pos->idx = offset / TRB_SIZE;
+    return true;
+}
+
+static bool xhci_er_find_dequeue(const XHCIInterrupter *intr,
+                                 dma_addr_t erdp, XHCIEvRingPos *pos)
+{
+    uint32_t desi = erdp & ERDP_DESI_MASK;
+    dma_addr_t addr = erdp & ~(dma_addr_t)(TRB_SIZE - 1);
+    uint32_t seg;
+
+    /* With at most eight segments DESI identifies the exact ERST entry. */
+    if (xhci_er_addr_in_seg(intr, desi, addr, pos)) {
+        return true;
+    }
+
+    /* Treat DESI as the architectural hint that it is, not as an address. */
+    for (seg = 0; seg < intr->er_seg_count; seg++) {
+        if (seg != desi && xhci_er_addr_in_seg(intr, seg, addr, pos)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void xhci_write_event(XHCIState *xhci, XHCIEvent *event, int v)
 {
     XHCIInterrupter *intr = &xhci->intr[v];
+    XHCIEvRingPos enqueue = { intr->er_seg_idx, intr->er_ep_idx };
     XHCITRB ev_trb;
     dma_addr_t addr;
+
+    if (!xhci_er_pos_valid(intr, &enqueue)) {
+        DPRINTF("xhci: invalid event ring enqueue position %u:%u\n",
+                enqueue.seg, enqueue.idx);
+        xhci_die(xhci);
+        return;
+    }
 
     ev_trb.parameter = cpu_to_le64(event->ptr);
     ev_trb.status = cpu_to_le32(event->length | (event->ccode << 24));
@@ -633,7 +738,8 @@ static void xhci_write_event(XHCIState *xhci, XHCIEvent *event, int v)
                                event_name(event), ev_trb.parameter,
                                ev_trb.status, ev_trb.control);
 
-    addr = intr->er_start + TRB_SIZE*intr->er_ep_idx;
+    addr = intr->er_seg_start[intr->er_seg_idx] +
+           TRB_SIZE * intr->er_ep_idx;
     if (dma_memory_write(xhci->as, addr, &ev_trb, TRB_SIZE,
                          MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: DMA memory access failed!\n",
@@ -642,9 +748,13 @@ static void xhci_write_event(XHCIState *xhci, XHCIEvent *event, int v)
     }
 
     intr->er_ep_idx++;
-    if (intr->er_ep_idx >= intr->er_size) {
+    if (intr->er_ep_idx == intr->er_seg_size[intr->er_seg_idx]) {
         intr->er_ep_idx = 0;
-        intr->er_pcs = !intr->er_pcs;
+        intr->er_seg_idx++;
+        if (intr->er_seg_idx == intr->er_seg_count) {
+            intr->er_seg_idx = 0;
+            intr->er_pcs = !intr->er_pcs;
+        }
     }
 }
 
@@ -652,7 +762,9 @@ static void xhci_event(XHCIState *xhci, XHCIEvent *event, int v)
 {
     XHCIInterrupter *intr;
     dma_addr_t erdp;
-    unsigned int dp_idx;
+    XHCIEvRingPos dequeue;
+    XHCIEvRingPos next;
+    XHCIEvRingPos next_next;
 
     if (xhci->numintrs == 1 ||
         (xhci->intr_mapping_supported && !xhci->intr_mapping_supported(xhci))) {
@@ -666,23 +778,26 @@ static void xhci_event(XHCIState *xhci, XHCIEvent *event, int v)
     intr = &xhci->intr[v];
 
     erdp = xhci_addr64(intr->erdp_low, intr->erdp_high);
-    if (erdp < intr->er_start ||
-        erdp >= (intr->er_start + TRB_SIZE*intr->er_size)) {
+    if (!xhci_er_find_dequeue(intr, erdp, &dequeue)) {
         DPRINTF("xhci: ERDP out of bounds: "DMA_ADDR_FMT"\n", erdp);
-        DPRINTF("xhci: ER[%d] at "DMA_ADDR_FMT" len %d\n",
-                v, intr->er_start, intr->er_size);
         xhci_die(xhci);
         return;
     }
 
-    dp_idx = (erdp - intr->er_start) / TRB_SIZE;
-    assert(dp_idx < intr->er_size);
+    next.seg = intr->er_seg_idx;
+    next.idx = intr->er_ep_idx;
+    if (!xhci_er_pos_advance(intr, &next)) {
+        xhci_die(xhci);
+        return;
+    }
+    next_next = next;
+    assert(xhci_er_pos_advance(intr, &next_next));
 
-    if ((intr->er_ep_idx + 2) % intr->er_size == dp_idx) {
+    if (xhci_er_pos_equal(&next_next, &dequeue)) {
         DPRINTF("xhci: ER %d full, send ring full error\n", v);
         XHCIEvent full = {ER_HOST_CONTROLLER, CC_EVENT_RING_FULL_ERROR};
         xhci_write_event(xhci, &full, v);
-    } else if ((intr->er_ep_idx + 1) % intr->er_size == dp_idx) {
+    } else if (xhci_er_pos_equal(&next, &dequeue)) {
         DPRINTF("xhci: ER %d full, drop event\n", v);
     } else {
         xhci_write_event(xhci, event, v);
@@ -809,48 +924,71 @@ static int xhci_ring_chain_length(XHCIState *xhci, const XHCIRing *ring)
     return -1;
 }
 
+static void xhci_er_clear(XHCIInterrupter *intr)
+{
+    intr->er_start = 0;
+    intr->er_size = 0;
+    intr->er_seg_count = 0;
+    intr->er_seg_idx = 0;
+    intr->er_ep_idx = 0;
+    intr->er_pcs = 1;
+    memset(intr->er_seg_start, 0, sizeof(intr->er_seg_start));
+    memset(intr->er_seg_size, 0, sizeof(intr->er_seg_size));
+}
+
 static void xhci_er_reset(XHCIState *xhci, int v)
 {
     XHCIInterrupter *intr = &xhci->intr[v];
-    XHCIEvRingSeg seg;
     dma_addr_t erstba = xhci_addr64(intr->erstba_low, intr->erstba_high);
+    uint32_t i;
+
+    xhci_er_clear(intr);
 
     if (intr->erstsz == 0 || erstba == 0) {
-        /* disabled */
-        intr->er_start = 0;
-        intr->er_size = 0;
         return;
     }
-    /* cache the (sole) event ring segment location */
-    if (intr->erstsz != 1) {
+
+    if (intr->erstsz > xhci_erst_max_segs(xhci)) {
         DPRINTF("xhci: invalid value for ERSTSZ: %d\n", intr->erstsz);
         xhci_die(xhci);
         return;
     }
-    if (dma_memory_read(xhci->as, erstba, &seg, sizeof(seg),
-                    MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
-        qemu_log_mask(LOG_GUEST_ERROR, "%s: DMA memory access failed!\n",
-                      __func__);
-        xhci_die(xhci);
-        return;
+
+    for (i = 0; i < intr->erstsz; i++) {
+        XHCIEvRingSeg seg;
+        dma_addr_t start;
+
+        if (dma_memory_read(xhci->as, erstba + i * sizeof(seg),
+                            &seg, sizeof(seg),
+                            MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: DMA memory access failed!\n", __func__);
+            xhci_die(xhci);
+            return;
+        }
+
+        le32_to_cpus(&seg.addr_low);
+        le32_to_cpus(&seg.addr_high);
+        le32_to_cpus(&seg.size);
+        le32_to_cpus(&seg.rsvd);
+        start = xhci_addr64(seg.addr_low, seg.addr_high);
+        if ((start & 0x3f) || seg.size < 16 || seg.size > 4096 ||
+            seg.rsvd) {
+            DPRINTF("xhci: invalid event ring segment %u: "
+                    DMA_ADDR_FMT " [%u]\n", i, start, seg.size);
+            xhci_die(xhci);
+            return;
+        }
+
+        intr->er_seg_start[i] = start;
+        intr->er_seg_size[i] = seg.size;
+        DPRINTF("xhci: event ring[%d].%u: " DMA_ADDR_FMT " [%u]\n",
+                v, i, start, seg.size);
     }
 
-    le32_to_cpus(&seg.addr_low);
-    le32_to_cpus(&seg.addr_high);
-    le32_to_cpus(&seg.size);
-    if (seg.size < 16 || seg.size > 4096) {
-        DPRINTF("xhci: invalid value for segment size: %d\n", seg.size);
-        xhci_die(xhci);
-        return;
-    }
-    intr->er_start = xhci_addr64(seg.addr_low, seg.addr_high);
-    intr->er_size = seg.size;
-
-    intr->er_ep_idx = 0;
-    intr->er_pcs = 1;
-
-    DPRINTF("xhci: event ring[%d]:" DMA_ADDR_FMT " [%d]\n",
-            v, intr->er_start, intr->er_size);
+    intr->er_seg_count = intr->erstsz;
+    intr->er_start = intr->er_seg_start[0];
+    intr->er_size = intr->er_seg_size[0];
 }
 
 static void xhci_run(XHCIState *xhci)
@@ -2757,8 +2895,7 @@ static void xhci_reset(DeviceState *dev)
         xhci->intr[i].erdp_low = 0;
         xhci->intr[i].erdp_high = 0;
 
-        xhci->intr[i].er_ep_idx = 0;
-        xhci->intr[i].er_pcs = 1;
+        xhci_er_clear(&xhci->intr[i]);
         xhci->intr[i].ev_buffer_put = 0;
         xhci->intr[i].ev_buffer_get = 0;
     }
@@ -2782,7 +2919,7 @@ static uint64_t xhci_cap_read(void *ptr, hwaddr reg, unsigned size)
             | (xhci->numintrs<<8) | xhci->numslots;
         break;
     case 0x08: /* HCSPARAMS 2 */
-        ret = vl805 ? 0xfc000031 : 0x0000000f;
+        ret = xhci_hcsparams2(xhci);
         break;
     case 0x0c: /* HCSPARAMS 3 */
         ret = vl805 ? 0x00e70004 : 0x00000000;
@@ -3170,10 +3307,13 @@ static void xhci_runtime_write(void *ptr, hwaddr reg,
         intr->erdp_low = (val & ~ERDP_EHB) | (intr->erdp_low & ERDP_EHB);
         if (val & ERDP_EHB) {
             dma_addr_t erdp = xhci_addr64(intr->erdp_low, intr->erdp_high);
-            unsigned int dp_idx = (erdp - intr->er_start) / TRB_SIZE;
-            if (erdp >= intr->er_start &&
-                erdp < (intr->er_start + TRB_SIZE * intr->er_size) &&
-                dp_idx != intr->er_ep_idx) {
+            XHCIEvRingPos dequeue;
+            XHCIEvRingPos enqueue = {
+                intr->er_seg_idx, intr->er_ep_idx
+            };
+
+            if (xhci_er_find_dequeue(intr, erdp, &dequeue) &&
+                !xhci_er_pos_equal(&dequeue, &enqueue)) {
                 xhci_intr_raise(xhci, v);
             }
         }
@@ -3650,8 +3790,14 @@ static int usb_xhci_post_load(void *opaque, int version_id)
     dma_addr_t dcbaap, pctx;
     uint32_t slot_ctx[4];
     uint32_t ep_ctx[5];
-    int slotid, epid, state;
+    int i, slotid, epid, state;
     uint64_t addr;
+
+    for (i = 0; i < xhci->numintrs; i++) {
+        if (xhci->intr[i].er_seg_count > xhci_erst_max_segs(xhci)) {
+            return -EINVAL;
+        }
+    }
 
     dcbaap = xhci_addr64(xhci->dcbaap_low, xhci->dcbaap_high);
 
@@ -3742,9 +3888,53 @@ static bool xhci_er_full(void *opaque, int version_id)
     return false;
 }
 
+static int xhci_intr_post_load(void *opaque, int version_id)
+{
+    XHCIInterrupter *intr = opaque;
+    uint32_t i;
+
+    if (version_id < 2) {
+        memset(intr->er_seg_start, 0, sizeof(intr->er_seg_start));
+        memset(intr->er_seg_size, 0, sizeof(intr->er_seg_size));
+        intr->er_seg_idx = 0;
+        if (intr->er_size) {
+            intr->er_seg_count = 1;
+            intr->er_seg_start[0] = intr->er_start;
+            intr->er_seg_size[0] = intr->er_size;
+        } else {
+            intr->er_seg_count = 0;
+        }
+    }
+
+    if (intr->er_seg_count > XHCI_MAX_ERST_SEGS ||
+        (intr->er_seg_count && intr->er_seg_idx >= intr->er_seg_count)) {
+        return -EINVAL;
+    }
+
+    for (i = 0; i < intr->er_seg_count; i++) {
+        if ((version_id >= 2 && (intr->er_seg_start[i] & 0x3f)) ||
+            intr->er_seg_size[i] < 16 || intr->er_seg_size[i] > 4096) {
+            return -EINVAL;
+        }
+    }
+    if (intr->er_seg_count &&
+        intr->er_ep_idx >= intr->er_seg_size[intr->er_seg_idx]) {
+        return -EINVAL;
+    }
+    if (!intr->er_seg_count && (intr->er_seg_idx || intr->er_ep_idx)) {
+        return -EINVAL;
+    }
+
+    intr->er_start = intr->er_seg_count ? intr->er_seg_start[0] : 0;
+    intr->er_size = intr->er_seg_count ? intr->er_seg_size[0] : 0;
+    return 0;
+}
+
 static const VMStateDescription vmstate_xhci_intr = {
     .name = "xhci-intr",
-    .version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 1,
+    .post_load = xhci_intr_post_load,
     .fields = (const VMStateField[]) {
         /* registers */
         VMSTATE_UINT32(iman,          XHCIInterrupter),
@@ -3761,6 +3951,12 @@ static const VMStateDescription vmstate_xhci_intr = {
         VMSTATE_UINT64(er_start,      XHCIInterrupter),
         VMSTATE_UINT32(er_size,       XHCIInterrupter),
         VMSTATE_UINT32(er_ep_idx,     XHCIInterrupter),
+        VMSTATE_UINT32_V(er_seg_count, XHCIInterrupter, 2),
+        VMSTATE_UINT32_V(er_seg_idx,   XHCIInterrupter, 2),
+        VMSTATE_UINT64_ARRAY_V(er_seg_start, XHCIInterrupter,
+                               XHCI_MAX_ERST_SEGS, 2),
+        VMSTATE_UINT32_ARRAY_V(er_seg_size, XHCIInterrupter,
+                               XHCI_MAX_ERST_SEGS, 2),
 
         /* event queue (used if ring is full) */
         VMSTATE_BOOL(er_full_unused,  XHCIInterrupter),

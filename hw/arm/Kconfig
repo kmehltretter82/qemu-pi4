@@ -366,6 +366,7 @@ config RASPI4
     select PL011 # UART
     select SDHCI
     select USB_DWC2
+    select USB_HUB
     select USB_HID
     select USB_XHCI_PCI
     select BCM2835_SPI

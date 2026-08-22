@@ -1,6 +1,8 @@
 #ifndef HW_USB_HID_H
 #define HW_USB_HID_H
 
+#define TYPE_USB_PI400_KEYBOARD "usb-pi400-keyboard"
+
 /* HID interface requests */
 #define HID_GET_REPORT   0xa101
 #define HID_GET_IDLE     0xa102

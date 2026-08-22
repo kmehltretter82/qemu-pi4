@@ -83,6 +83,19 @@ static void test_upper_ram_mapping(void)
     g_assert_cmphex(readl(RASPI400_UPPER_RAM_LAST), ==, pattern);
 }
 
+static void test_usb_topology(void)
+{
+    g_autofree char *usb = qtest_hmp(global_qtest, "info usb");
+    g_autofree char *qtree = qtest_hmp(global_qtest, "info qtree");
+
+    g_assert_nonnull(strstr(usb,
+        "Port 1, Speed 480 Mb/s, Product USB2.0 Hub"));
+    g_assert_nonnull(strstr(usb,
+        "Port 1.4, Speed 1.5 Mb/s, Product Raspberry Pi Internal Keyboard"));
+    g_assert_nonnull(strstr(qtree, "dev: usb-via-3431-hub"));
+    g_assert_nonnull(strstr(qtree, "dev: usb-pi400-keyboard"));
+}
+
 int main(int argc, char **argv)
 {
     int ret;
@@ -99,6 +112,7 @@ int main(int argc, char **argv)
     qtest_add_func("/raspi400/memory/default_size", test_default_ram_size);
     qtest_add_func("/raspi400/memory/upper_mapping",
                    test_upper_ram_mapping);
+    qtest_add_func("/raspi400/usb/topology", test_usb_topology);
 
     qtest_start("-machine raspi400");
     ret = g_test_run();

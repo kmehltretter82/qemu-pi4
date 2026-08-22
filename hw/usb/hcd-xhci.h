@@ -32,6 +32,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(XHCIState, XHCI)
 /* Very pessimistic, let's hope it's enough for all cases */
 #define EV_QUEUE (((3 * 24) + 16) * XHCI_MAXSLOTS)
 
+/* The VL805 advertises ERST Max = 3, or up to eight ring segments. */
+#define XHCI_MAX_ERST_SEGS 8
+
 typedef struct XHCIStreamContext XHCIStreamContext;
 typedef struct XHCIEPContext XHCIEPContext;
 
@@ -165,9 +168,15 @@ typedef struct XHCIInterrupter {
 
     bool msix_used, er_pcs;
 
+    /* Version 1 migration aliases for event ring segment zero. */
     dma_addr_t er_start;
     uint32_t er_size;
     unsigned int er_ep_idx;
+
+    uint32_t er_seg_count;
+    uint32_t er_seg_idx;
+    dma_addr_t er_seg_start[XHCI_MAX_ERST_SEGS];
+    uint32_t er_seg_size[XHCI_MAX_ERST_SEGS];
 
     /* kept for live migration compat only */
     bool er_full_unused;
