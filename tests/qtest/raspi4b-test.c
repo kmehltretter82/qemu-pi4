@@ -81,8 +81,14 @@
 #define RASPI4_PCIE_MDIO_ADDR        (RASPI4_PCIE_BASE + 0x1100)
 #define RASPI4_PCIE_MDIO_WR_DATA     (RASPI4_PCIE_BASE + 0x1104)
 #define RASPI4_PCIE_MDIO_RD_DATA     (RASPI4_PCIE_BASE + 0x1108)
+#define RASPI4_PCIE_MISC_CTRL        (RASPI4_PCIE_BASE + 0x4008)
 #define RASPI4_PCIE_OUT_LO           (RASPI4_PCIE_BASE + 0x400c)
 #define RASPI4_PCIE_OUT_HI           (RASPI4_PCIE_BASE + 0x4010)
+#define RASPI4_PCIE_RC_BAR2_LO       (RASPI4_PCIE_BASE + 0x4034)
+#define RASPI4_PCIE_RC_BAR2_HI       (RASPI4_PCIE_BASE + 0x4038)
+#define RASPI4_PCIE_MSI_BAR_LO       (RASPI4_PCIE_BASE + 0x4044)
+#define RASPI4_PCIE_MSI_BAR_HI       (RASPI4_PCIE_BASE + 0x4048)
+#define RASPI4_PCIE_MSI_DATA         (RASPI4_PCIE_BASE + 0x404c)
 #define RASPI4_PCIE_STATUS           (RASPI4_PCIE_BASE + 0x4068)
 #define RASPI4_PCIE_MISC_REVISION    (RASPI4_PCIE_BASE + 0x406c)
 #define RASPI4_PCIE_BASE_LIMIT       (RASPI4_PCIE_BASE + 0x4070)
@@ -91,6 +97,11 @@
 #define RASPI4_PCIE_EXT_CFG_DATA     (RASPI4_PCIE_BASE + 0x8000)
 #define RASPI4_PCIE_EXT_CFG_INDEX    (RASPI4_PCIE_BASE + 0x9000)
 #define RASPI4_PCIE_SW_INIT          (RASPI4_PCIE_BASE + 0x9210)
+#define RASPI4_PCIE_MSI_STATUS       (RASPI4_PCIE_BASE + 0x4500)
+#define RASPI4_PCIE_MSI_CLEAR        (RASPI4_PCIE_BASE + 0x4508)
+#define RASPI4_PCIE_MSI_MASK_STATUS  (RASPI4_PCIE_BASE + 0x450c)
+#define RASPI4_PCIE_MSI_MASK_SET     (RASPI4_PCIE_BASE + 0x4510)
+#define RASPI4_PCIE_MSI_MASK_CLEAR   (RASPI4_PCIE_BASE + 0x4514)
 #define RASPI4_PCIE_VENDOR_REG1      (RASPI4_PCIE_BASE + 0x0188)
 #define RASPI4_PCIE_ID_VAL3          (RASPI4_PCIE_BASE + 0x043c)
 #define RASPI4_PCIE_PRIV_LINK_CAP    (RASPI4_PCIE_BASE + 0x04dc)
@@ -107,6 +118,7 @@
                                       PCIE_STATUS_DL_ACTIVE)
 #define PCIE_STATUS_TEST_MASK        (PCIE_STATUS_RC_MODE | \
                                       PCIE_STATUS_LINK_MASK)
+#define PCIE_MISC_CTRL_SCB_ACCESS_EN (1U << 12)
 
 #define BCM2711_PCIE_ID              0x271114e4U
 #define BCM2711_PCIE_REVISION        0x20U
@@ -117,10 +129,31 @@
 #define BCM2711_PCIE_MDIO_SSC_PLL    ((1U << 10) | (1U << 11))
 
 #define RASPI4_PCIE_CPU_WINDOW       0x600000000ULL
+#define RASPI4_PCIE_EDU_PCI_BAR      0xf8000000U
+#define RASPI4_PCIE_EDU_CPU_BAR      RASPI4_PCIE_CPU_WINDOW
+#define RASPI4_PCIE_EDU_ID           0x11e81234U
+#define RASPI4_PCIE_EDU_MAGIC        0x010000edU
+#define RASPI4_PCIE_EDU_GIC_INTX     143
+#define RASPI4_PCIE_EDU_GIC_MSI      148
+
+#define EDU_IRQ_STATUS               0x24
+#define EDU_IRQ_RAISE                0x60
+#define EDU_IRQ_ACK                  0x64
+#define EDU_DMA_SRC                  0x80
+#define EDU_DMA_DST                  0x88
+#define EDU_DMA_COUNT                0x90
+#define EDU_DMA_CMD                  0x98
+#define EDU_DMA_BUFFER               0x40000
+#define EDU_DMA_RUN                  (1U << 0)
+#define EDU_DMA_TO_PCI               (1U << 1)
+
+#define PCIE_DMA_BASE                0x400000000ULL
+#define PCIE_DMA_SIZE_ENCODING_256M  0x0d
 
 #ifndef _WIN32
 static int genet_test_socket = -1;
 #endif
+static bool pcie_has_edu;
 
 static bool qom_bus_has_sd_card(const char *path)
 {
@@ -232,6 +265,109 @@ static void pcie_assert_qmp_root(uint8_t primary, uint8_t secondary,
     }
 
     g_assert_not_reached();
+}
+
+static void pcie_select_edu(void)
+{
+    writel(RASPI4_PCIE_EXT_CFG_INDEX, pcie_cfg_index(1, 0, 0));
+}
+
+static uint8_t pcie_edu_cfg_readb(unsigned int offset)
+{
+    pcie_select_edu();
+    return readb(RASPI4_PCIE_EXT_CFG_DATA + offset);
+}
+
+static uint16_t pcie_edu_cfg_readw(unsigned int offset)
+{
+    pcie_select_edu();
+    return readw(RASPI4_PCIE_EXT_CFG_DATA + offset);
+}
+
+static uint32_t pcie_edu_cfg_readl(unsigned int offset)
+{
+    pcie_select_edu();
+    return readl(RASPI4_PCIE_EXT_CFG_DATA + offset);
+}
+
+static void pcie_edu_cfg_writew(unsigned int offset, uint16_t value)
+{
+    pcie_select_edu();
+    writew(RASPI4_PCIE_EXT_CFG_DATA + offset, value);
+}
+
+static void pcie_edu_cfg_writel(unsigned int offset, uint32_t value)
+{
+    pcie_select_edu();
+    writel(RASPI4_PCIE_EXT_CFG_DATA + offset, value);
+}
+
+static uint8_t pcie_edu_find_capability(uint8_t cap_id)
+{
+    uint8_t offset = pcie_edu_cfg_readb(PCI_CAPABILITY_LIST) & ~3U;
+    unsigned int ttl = 48;
+
+    while (offset >= 0x40 && ttl--) {
+        if (pcie_edu_cfg_readb(offset + PCI_CAP_LIST_ID) == cap_id) {
+            return offset;
+        }
+        offset = pcie_edu_cfg_readb(offset + PCI_CAP_LIST_NEXT) & ~3U;
+    }
+    return 0;
+}
+
+static bool pcie_edu_test_start(void)
+{
+    const uint16_t command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
+
+    if (!pcie_has_edu) {
+        g_test_skip("QEMU was built without the edu PCI test endpoint");
+        return false;
+    }
+
+    qtest_system_reset(global_qtest);
+    writel(RASPI4_PCIE_BASE + PCI_PRIMARY_BUS, 0x00010100);
+    pcie_select_edu();
+    g_assert_cmphex(readl(RASPI4_PCIE_EXT_CFG_DATA), ==, UINT32_MAX);
+
+    writel(RASPI4_PCIE_SW_INIT, 0);
+    pcie_assert_link(true);
+    g_assert_cmphex(pcie_edu_cfg_readl(PCI_VENDOR_ID), ==,
+                    RASPI4_PCIE_EDU_ID);
+
+    pcie_edu_cfg_writel(PCI_BASE_ADDRESS_0, UINT32_MAX);
+    g_assert_cmphex(pcie_edu_cfg_readl(PCI_BASE_ADDRESS_0) &
+                    PCI_BASE_ADDRESS_MEM_MASK, ==, 0xfff00000);
+    pcie_edu_cfg_writel(PCI_BASE_ADDRESS_0, RASPI4_PCIE_EDU_PCI_BAR);
+
+    /* Forward the endpoint's 1 MiB BAR through the root port. */
+    writel(RASPI4_PCIE_BASE + PCI_MEMORY_BASE, 0xf800f800);
+    writew(RASPI4_PCIE_BASE + PCI_COMMAND, command);
+    pcie_edu_cfg_writew(PCI_COMMAND, command);
+
+    /* Linux 7.2 DT: CPU 0x600000000 -> PCI 0xf8000000, 64 MiB. */
+    writel(RASPI4_PCIE_OUT_LO, RASPI4_PCIE_EDU_PCI_BAR);
+    writel(RASPI4_PCIE_OUT_HI, 0);
+    writel(RASPI4_PCIE_BASE_LIMIT, 0x03f00000);
+    writel(RASPI4_PCIE_BASE_HI, 6);
+    writel(RASPI4_PCIE_LIMIT_HI, 6);
+
+    g_assert_cmphex(readl(RASPI4_PCIE_EDU_CPU_BAR), ==,
+                    RASPI4_PCIE_EDU_MAGIC);
+    return true;
+}
+
+static void pcie_edu_dma(uint64_t src, uint64_t dst, size_t size,
+                         uint32_t command)
+{
+    writeq(RASPI4_PCIE_EDU_CPU_BAR + EDU_DMA_SRC, src);
+    writeq(RASPI4_PCIE_EDU_CPU_BAR + EDU_DMA_DST, dst);
+    writeq(RASPI4_PCIE_EDU_CPU_BAR + EDU_DMA_COUNT, size);
+    writeq(RASPI4_PCIE_EDU_CPU_BAR + EDU_DMA_CMD,
+           command | EDU_DMA_RUN);
+    qtest_clock_step(global_qtest, 101 * 1000 * 1000);
+    g_assert_false(readq(RASPI4_PCIE_EDU_CPU_BAR + EDU_DMA_CMD) &
+                   EDU_DMA_RUN);
 }
 
 static void test_pcie_root_config(void)
@@ -351,6 +487,158 @@ static void test_pcie_outbound_windows(void)
     writel(RASPI4_PCIE_BASE_HI, 0xff);
     g_assert_cmphex(readl(RASPI4_PCIE_CPU_WINDOW), ==, 0);
 
+    qtest_system_reset(global_qtest);
+}
+
+static void test_pcie_edu_config_and_mmio(void)
+{
+    const uint32_t value = 0x12345678;
+
+    if (!pcie_edu_test_start()) {
+        return;
+    }
+
+    g_assert_cmphex(pcie_edu_cfg_readl(PCI_VENDOR_ID), ==,
+                    RASPI4_PCIE_EDU_ID);
+    g_assert_cmphex(pcie_edu_cfg_readl(PCI_BASE_ADDRESS_0), ==,
+                    RASPI4_PCIE_EDU_PCI_BAR);
+    writel(RASPI4_PCIE_EDU_CPU_BAR + 4, value);
+    g_assert_cmphex(readl(RASPI4_PCIE_EDU_CPU_BAR + 4), ==, ~value);
+
+    qtest_system_reset(global_qtest);
+}
+
+static void test_pcie_edu_intx(void)
+{
+    if (!pcie_edu_test_start()) {
+        return;
+    }
+
+    writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_RAISE, 1);
+    g_assert_cmphex(readl(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_STATUS), ==, 1);
+    g_assert_true(get_irq(RASPI4_PCIE_EDU_GIC_INTX));
+    for (unsigned int irq = RASPI4_PCIE_EDU_GIC_INTX + 1;
+         irq < RASPI4_PCIE_EDU_GIC_MSI; irq++) {
+        g_assert_false(get_irq(irq));
+    }
+    g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
+
+    writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_ACK, 1);
+    g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_INTX));
+    qtest_system_reset(global_qtest);
+}
+
+static void test_pcie_edu_inbound_dma(void)
+{
+    static const uint8_t payload[] = {
+        0x51, 0x45, 0x4d, 0x55, 0x2d, 0x50, 0x69, 0x34,
+        0x2d, 0x50, 0x43, 0x49, 0x65, 0x2d, 0x44,
+        0x4d, 0x41, 0x2d, 0x74, 0x65, 0x73, 0x74, 0x21,
+    };
+    const uint64_t source = 0x10000;
+    const uint64_t destination = 0x20000;
+    const uint64_t protected = 0x30000;
+    uint8_t actual[sizeof(payload)];
+    uint8_t sentinel[sizeof(payload)];
+
+    if (!pcie_edu_test_start()) {
+        return;
+    }
+
+    /* PCI 0x400000000..0x40fffffff aliases the first 256 MiB of RAM. */
+    writel(RASPI4_PCIE_MISC_CTRL,
+           readl(RASPI4_PCIE_MISC_CTRL) |
+           PCIE_MISC_CTRL_SCB_ACCESS_EN);
+    writel(RASPI4_PCIE_RC_BAR2_HI, 4);
+    writel(RASPI4_PCIE_RC_BAR2_LO, PCIE_DMA_SIZE_ENCODING_256M);
+
+    memwrite(source, payload, sizeof(payload));
+    qtest_memset(global_qtest, destination, 0, sizeof(payload));
+    pcie_edu_dma(PCIE_DMA_BASE + source, EDU_DMA_BUFFER,
+                 sizeof(payload), 0);
+    pcie_edu_dma(EDU_DMA_BUFFER, PCIE_DMA_BASE + destination,
+                 sizeof(payload), EDU_DMA_TO_PCI);
+    memread(destination, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), payload, sizeof(payload));
+
+    /* An unmapped PCI address must not fall through to CPU system memory. */
+    memset(sentinel, 0xa5, sizeof(sentinel));
+    memwrite(protected, sentinel, sizeof(sentinel));
+    pcie_edu_dma(EDU_DMA_BUFFER, protected, sizeof(payload),
+                 EDU_DMA_TO_PCI);
+    memread(protected, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), sentinel, sizeof(sentinel));
+
+    /* Asserting PERST removes the inbound window before a queued DMA runs. */
+    writeq(RASPI4_PCIE_EDU_CPU_BAR + EDU_DMA_SRC, EDU_DMA_BUFFER);
+    writeq(RASPI4_PCIE_EDU_CPU_BAR + EDU_DMA_DST,
+           PCIE_DMA_BASE + protected);
+    writeq(RASPI4_PCIE_EDU_CPU_BAR + EDU_DMA_COUNT, sizeof(payload));
+    writeq(RASPI4_PCIE_EDU_CPU_BAR + EDU_DMA_CMD,
+           EDU_DMA_TO_PCI | EDU_DMA_RUN);
+    writel(RASPI4_PCIE_SW_INIT, PCIE_SW_INIT_PERST);
+    qtest_clock_step(global_qtest, 101 * 1000 * 1000);
+    memread(protected, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), sentinel, sizeof(sentinel));
+
+    qtest_system_reset(global_qtest);
+}
+
+static void test_pcie_edu_msi(void)
+{
+    const uint32_t vector = 5;
+    const uint32_t vector_bit = 1U << vector;
+    uint8_t msi_cap;
+    uint16_t flags;
+    uint16_t command;
+
+    if (!pcie_edu_test_start()) {
+        return;
+    }
+
+    g_assert_cmphex(readl(RASPI4_PCIE_MSI_STATUS), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PCIE_MSI_MASK_STATUS), ==, UINT32_MAX);
+    g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
+
+    writel(RASPI4_PCIE_MSI_DATA, 0xffe06540);
+    writel(RASPI4_PCIE_MSI_BAR_HI, 0);
+    writel(RASPI4_PCIE_MSI_BAR_LO, 0xfffffffd);
+
+    /* The doorbell is private to PCI DMA, not CPU physical memory. */
+    writel(0xfffffffc, 0x6540 | vector);
+    g_assert_cmphex(readl(RASPI4_PCIE_MSI_STATUS), ==, 0);
+
+    msi_cap = pcie_edu_find_capability(PCI_CAP_ID_MSI);
+    g_assert_cmphex(msi_cap, !=, 0);
+    flags = pcie_edu_cfg_readw(msi_cap + PCI_MSI_FLAGS);
+    g_assert_true(flags & PCI_MSI_FLAGS_64BIT);
+    pcie_edu_cfg_writel(msi_cap + PCI_MSI_ADDRESS_LO, 0xfffffffc);
+    pcie_edu_cfg_writel(msi_cap + PCI_MSI_ADDRESS_HI, 0);
+    pcie_edu_cfg_writew(msi_cap + PCI_MSI_DATA_64, 0x6540 | vector);
+    pcie_edu_cfg_writew(msi_cap + PCI_MSI_FLAGS,
+                        flags | PCI_MSI_FLAGS_ENABLE);
+    command = pcie_edu_cfg_readw(PCI_COMMAND);
+    pcie_edu_cfg_writew(PCI_COMMAND, command | PCI_COMMAND_INTX_DISABLE);
+
+    writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_RAISE, 1);
+    g_assert_cmphex(readl(RASPI4_PCIE_MSI_STATUS), ==, vector_bit);
+    g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_INTX));
+    g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
+
+    writel(RASPI4_PCIE_MSI_MASK_CLEAR, vector_bit);
+    g_assert_cmphex(readl(RASPI4_PCIE_MSI_MASK_STATUS), ==,
+                    UINT32_MAX & ~vector_bit);
+    g_assert_true(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
+    writel(RASPI4_PCIE_MSI_MASK_SET, vector_bit);
+    g_assert_cmphex(readl(RASPI4_PCIE_MSI_STATUS), ==, vector_bit);
+    g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
+    writel(RASPI4_PCIE_MSI_MASK_CLEAR, vector_bit);
+    g_assert_true(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
+    writel(RASPI4_PCIE_MSI_CLEAR, vector_bit);
+    g_assert_cmphex(readl(RASPI4_PCIE_MSI_STATUS), ==, 0);
+    g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
+
+    writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_ACK, 1);
     qtest_system_reset(global_qtest);
 }
 
@@ -723,9 +1011,9 @@ static void test_genet_packet_dma(void)
 int main(int argc, char **argv)
 {
     int ret;
+    g_autoptr(GString) cmd_line = g_string_new("-machine raspi4b");
 #ifndef _WIN32
     int test_sockets[2];
-    g_autoptr(GString) cmd_line = g_string_new("-machine raspi4b");
 #endif
 
     g_test_init(&argc, &argv, NULL);
@@ -745,12 +1033,27 @@ int main(int argc, char **argv)
                    test_pcie_indirect_absent);
     qtest_add_func("/raspi4b/pcie/outbound_windows",
                    test_pcie_outbound_windows);
+    qtest_add_func("/raspi4b/pcie/edu/config_and_mmio",
+                   test_pcie_edu_config_and_mmio);
+    qtest_add_func("/raspi4b/pcie/edu/intx", test_pcie_edu_intx);
+    qtest_add_func("/raspi4b/pcie/edu/inbound_dma",
+                   test_pcie_edu_inbound_dma);
+    qtest_add_func("/raspi4b/pcie/edu/msi", test_pcie_edu_msi);
     qtest_add_func("/raspi4b/pcie/system_reset", test_pcie_system_reset);
     qtest_add_func("/raspi4b/genet/registers_and_mdio",
                    test_genet_registers_and_mdio);
 #ifndef _WIN32
     qtest_add_func("/raspi4b/genet/packet_dma", test_genet_packet_dma);
+#endif
 
+    pcie_has_edu = qtest_has_device("edu");
+    if (pcie_has_edu) {
+        g_string_append(cmd_line,
+                        " -device edu,id=edu0,bus=pcie.1,addr=0,"
+                        "dma_mask=0xffffffffffffffff");
+    }
+
+#ifndef _WIN32
     ret = socketpair(PF_UNIX, SOCK_STREAM, 0, test_sockets);
     g_assert_cmpint(ret, !=, -1);
     g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
@@ -759,7 +1062,7 @@ int main(int argc, char **argv)
     qtest_start(cmd_line->str);
     close(test_sockets[1]);
 #else
-    qtest_start("-machine raspi4b");
+    qtest_start(cmd_line->str);
 #endif
 
     qtest_irq_intercept_in(global_qtest, "/machine/soc/peripherals");

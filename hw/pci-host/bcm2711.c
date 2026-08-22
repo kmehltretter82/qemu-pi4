@@ -17,6 +17,7 @@
 #include "hw/core/irq.h"
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pci_host.h"
+#include "hw/pci/msi.h"
 #include "hw/pci/pcie.h"
 #include "hw/pci/pcie_host.h"
 #include "hw/pci/pcie_port.h"
@@ -45,14 +46,31 @@
 #define BCM2711_PCIE_MDIO_PLL_LOCK   BIT(11)
 
 #define BCM2711_PCIE_MISC_CTRL     0x4008
+#define BCM2711_PCIE_MISC_CTRL_SCB_ACCESS_EN BIT(12)
 #define BCM2711_PCIE_OUT_LO(win)   (0x400c + (win) * 8)
 #define BCM2711_PCIE_OUT_HI(win)   (0x4010 + (win) * 8)
+#define BCM2711_PCIE_RC_BAR_LO(bar) (0x402c + ((bar) - 1) * 8)
+#define BCM2711_PCIE_RC_BAR_HI(bar) (0x4030 + ((bar) - 1) * 8)
+#define BCM2711_PCIE_RC_BAR_SIZE_MASK 0x1f
+#define BCM2711_PCIE_MSI_BAR_LO    0x4044
+#define BCM2711_PCIE_MSI_BAR_HI    0x4048
+#define BCM2711_PCIE_MSI_DATA      0x404c
+#define BCM2711_PCIE_MSI_BAR_ENABLE BIT(0)
 #define BCM2711_PCIE_STATUS        0x4068
 #define BCM2711_PCIE_REVISION_REG  0x406c
 #define BCM2711_PCIE_BASE_LIMIT(win) (0x4070 + (win) * 4)
 #define BCM2711_PCIE_BASE_HI(win)    (0x4080 + (win) * 8)
 #define BCM2711_PCIE_LIMIT_HI(win)   (0x4084 + (win) * 8)
 #define BCM2711_PCIE_HARD_DEBUG    0x4204
+
+#define BCM2711_PCIE_MSI_STATUS      0x4500
+#define BCM2711_PCIE_MSI_SET         0x4504
+#define BCM2711_PCIE_MSI_CLEAR       0x4508
+#define BCM2711_PCIE_MSI_MASK_STATUS 0x450c
+#define BCM2711_PCIE_MSI_MASK_SET    0x4510
+#define BCM2711_PCIE_MSI_MASK_CLEAR  0x4514
+#define BCM2711_PCIE_MSI_NUM_VECTORS 32
+#define BCM2711_PCIE_MSI_IRQ         5
 
 #define BCM2711_PCIE_STATUS_RC_MODE BIT(7)
 #define BCM2711_PCIE_STATUS_DL_ACTIVE BIT(5)
@@ -160,6 +178,162 @@ static void bcm2711_pcie_update_outbound(BCM2711PcieHostState *s)
     }
     memory_region_transaction_commit();
 }
+
+static void bcm2711_pcie_unmap_inbound(BCM2711PcieHostState *s)
+{
+    if (!s->inbound_mapped) {
+        return;
+    }
+
+    memory_region_transaction_begin();
+    memory_region_del_subregion(&s->dma_root, &s->inbound_alias);
+    s->inbound_mapped = false;
+    memory_region_transaction_commit();
+}
+
+static uint64_t bcm2711_pcie_inbound_size(uint32_t value)
+{
+    unsigned int encoding = value & BCM2711_PCIE_RC_BAR_SIZE_MASK;
+
+    if (encoding >= 0x1c) {
+        return 1ULL << (12 + encoding - 0x1c);
+    }
+    if (encoding >= 1 && encoding <= 0x15) {
+        return 1ULL << (15 + encoding);
+    }
+    return 0;
+}
+
+static void bcm2711_pcie_update_inbound(BCM2711PcieHostState *s)
+{
+    uint32_t low = bcm2711_pcie_reg_read32(
+        s, BCM2711_PCIE_RC_BAR_LO(2));
+    uint64_t pci_base;
+    uint64_t size;
+
+    bcm2711_pcie_unmap_inbound(s);
+    if (!bcm2711_pcie_link_up(s) ||
+        !(bcm2711_pcie_reg_read32(s, BCM2711_PCIE_MISC_CTRL) &
+          BCM2711_PCIE_MISC_CTRL_SCB_ACCESS_EN)) {
+        return;
+    }
+
+    size = bcm2711_pcie_inbound_size(low);
+    if (!size) {
+        return;
+    }
+
+    pci_base = deposit64(low & ~BCM2711_PCIE_RC_BAR_SIZE_MASK, 32, 32,
+                         bcm2711_pcie_reg_read32(
+                             s, BCM2711_PCIE_RC_BAR_HI(2)));
+    pci_base &= ~(size - 1);
+    size = MIN(size, memory_region_size(s->ram_mr));
+    if (!size || pci_base + size < pci_base) {
+        return;
+    }
+
+    memory_region_transaction_begin();
+    memory_region_set_alias_offset(&s->inbound_alias, 0);
+    memory_region_set_size(&s->inbound_alias, size);
+    memory_region_add_subregion_overlap(&s->dma_root, pci_base,
+                                        &s->inbound_alias, 0);
+    s->inbound_mapped = true;
+    memory_region_transaction_commit();
+}
+
+static void bcm2711_pcie_unmap_msi(BCM2711PcieHostState *s)
+{
+    if (!s->msi_mapped) {
+        return;
+    }
+
+    memory_region_transaction_begin();
+    memory_region_del_subregion(&s->dma_root, &s->msi_doorbell);
+    s->msi_mapped = false;
+    memory_region_transaction_commit();
+}
+
+static void bcm2711_pcie_update_msi_mapping(BCM2711PcieHostState *s)
+{
+    uint32_t low = bcm2711_pcie_reg_read32(s, BCM2711_PCIE_MSI_BAR_LO);
+    uint64_t address;
+
+    bcm2711_pcie_unmap_msi(s);
+    if (!bcm2711_pcie_link_up(s) ||
+        !(low & BCM2711_PCIE_MSI_BAR_ENABLE)) {
+        return;
+    }
+
+    address = deposit64(low & ~0x3U, 32, 32,
+                        bcm2711_pcie_reg_read32(s,
+                                               BCM2711_PCIE_MSI_BAR_HI));
+    if (address + 4 < address) {
+        return;
+    }
+
+    memory_region_transaction_begin();
+    memory_region_add_subregion_overlap(&s->dma_root, address,
+                                        &s->msi_doorbell, 1);
+    s->msi_mapped = true;
+    memory_region_transaction_commit();
+}
+
+static void bcm2711_pcie_update_msi_irq(BCM2711PcieHostState *s)
+{
+    uint32_t status = bcm2711_pcie_reg_read32(s,
+                                              BCM2711_PCIE_MSI_STATUS);
+    uint32_t mask = bcm2711_pcie_reg_read32(
+        s, BCM2711_PCIE_MSI_MASK_STATUS);
+    bool level = bcm2711_pcie_link_up(s) && (status & ~mask);
+
+    s->irq_level[BCM2711_PCIE_MSI_IRQ] = level;
+    qemu_set_irq(s->irq[BCM2711_PCIE_MSI_IRQ], level);
+}
+
+static uint64_t bcm2711_pcie_msi_doorbell_read(void *opaque, hwaddr offset,
+                                                unsigned size)
+{
+    return 0;
+}
+
+static void bcm2711_pcie_msi_doorbell_write(void *opaque, hwaddr offset,
+                                             uint64_t value, unsigned size)
+{
+    BCM2711PcieHostState *s = opaque;
+    uint32_t data = bcm2711_pcie_reg_read32(s, BCM2711_PCIE_MSI_DATA);
+    uint32_t status;
+    uint16_t compare_mask = data >> 16;
+    uint16_t incoming = value;
+    uint16_t match = data;
+    unsigned int vector;
+
+    if ((incoming & compare_mask) != (match & compare_mask)) {
+        return;
+    }
+
+    vector = incoming & ~compare_mask;
+    if (vector >= BCM2711_PCIE_MSI_NUM_VECTORS) {
+        return;
+    }
+    status = bcm2711_pcie_reg_read32(s, BCM2711_PCIE_MSI_STATUS);
+    bcm2711_pcie_reg_write32(s, BCM2711_PCIE_MSI_STATUS,
+                             status | BIT(vector));
+    bcm2711_pcie_update_msi_irq(s);
+}
+
+static const MemoryRegionOps bcm2711_pcie_msi_doorbell_ops = {
+    .read = bcm2711_pcie_msi_doorbell_read,
+    .write = bcm2711_pcie_msi_doorbell_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+};
 
 static bool bcm2711_pcie_is_outbound_register(hwaddr offset, unsigned size)
 {
@@ -315,6 +489,51 @@ static void bcm2711_pcie_handle_sw_init(BCM2711PcieHostState *s,
     }
 }
 
+static bool bcm2711_pcie_handle_msi_write(BCM2711PcieHostState *s,
+                                           hwaddr offset, uint64_t value,
+                                           unsigned size)
+{
+    hwaddr reg = offset & ~3ULL;
+    uint32_t bits;
+    uint32_t status;
+    uint32_t mask;
+
+    if (offset + size > reg + 4) {
+        return false;
+    }
+
+    bits = (uint32_t)value << ((offset & 3) * 8);
+    status = bcm2711_pcie_reg_read32(s, BCM2711_PCIE_MSI_STATUS);
+    mask = bcm2711_pcie_reg_read32(s, BCM2711_PCIE_MSI_MASK_STATUS);
+
+    switch (reg) {
+    case BCM2711_PCIE_MSI_STATUS:
+    case BCM2711_PCIE_MSI_MASK_STATUS:
+        break;
+    case BCM2711_PCIE_MSI_SET:
+        bcm2711_pcie_reg_write32(s, BCM2711_PCIE_MSI_STATUS,
+                                 status | bits);
+        break;
+    case BCM2711_PCIE_MSI_CLEAR:
+        bcm2711_pcie_reg_write32(s, BCM2711_PCIE_MSI_STATUS,
+                                 status & ~bits);
+        break;
+    case BCM2711_PCIE_MSI_MASK_SET:
+        bcm2711_pcie_reg_write32(s, BCM2711_PCIE_MSI_MASK_STATUS,
+                                 mask | bits);
+        break;
+    case BCM2711_PCIE_MSI_MASK_CLEAR:
+        bcm2711_pcie_reg_write32(s, BCM2711_PCIE_MSI_MASK_STATUS,
+                                 mask & ~bits);
+        break;
+    default:
+        return false;
+    }
+
+    bcm2711_pcie_update_msi_irq(s);
+    return true;
+}
+
 static void bcm2711_pcie_host_write(void *opaque, hwaddr offset,
                                     uint64_t value, unsigned size)
 {
@@ -344,6 +563,10 @@ static void bcm2711_pcie_host_write(void *opaque, hwaddr offset,
         return;
     }
 
+    if (bcm2711_pcie_handle_msi_write(s, offset, value, size)) {
+        return;
+    }
+
     if (ranges_overlap(offset, size, BCM2711_PCIE_STATUS, 4) ||
         ranges_overlap(offset, size, BCM2711_PCIE_REVISION_REG, 4) ||
         ranges_overlap(offset, size, BCM2711_PCIE_MDIO_RD_DATA, 4)) {
@@ -362,9 +585,19 @@ static void bcm2711_pcie_host_write(void *opaque, hwaddr offset,
     }
     if (ranges_overlap(offset, size, BCM2711_PCIE_SW_INIT, 4)) {
         bcm2711_pcie_handle_sw_init(s, old_sw_init);
+        bcm2711_pcie_update_inbound(s);
+        bcm2711_pcie_update_msi_mapping(s);
+        bcm2711_pcie_update_msi_irq(s);
     }
     if (bcm2711_pcie_is_outbound_register(offset, size)) {
         bcm2711_pcie_update_outbound(s);
+    }
+    if (ranges_overlap(offset, size, BCM2711_PCIE_MISC_CTRL, 4) ||
+        ranges_overlap(offset, size, BCM2711_PCIE_RC_BAR_LO(2), 8)) {
+        bcm2711_pcie_update_inbound(s);
+    }
+    if (ranges_overlap(offset, size, BCM2711_PCIE_MSI_BAR_LO, 8)) {
+        bcm2711_pcie_update_msi_mapping(s);
     }
 }
 
@@ -412,6 +645,8 @@ static void bcm2711_pcie_host_reset_hold(Object *obj, ResetType type)
     unsigned int i;
 
     bcm2711_pcie_unmap_outbound(s);
+    bcm2711_pcie_unmap_inbound(s);
+    bcm2711_pcie_unmap_msi(s);
     memset(s->regs, 0, sizeof(s->regs));
     bcm2711_pcie_reg_write32(s, BCM2711_PCIE_SW_INIT,
                              BCM2711_PCIE_SW_INIT_BRIDGE_RESET |
@@ -422,6 +657,8 @@ static void bcm2711_pcie_host_reset_hold(Object *obj, ResetType type)
         bcm2711_pcie_reg_write32(s, BCM2711_PCIE_BASE_LIMIT(i), 0xfff0);
         bcm2711_pcie_reg_write32(s, BCM2711_PCIE_BASE_HI(i), 0xff);
     }
+    bcm2711_pcie_reg_write32(s, BCM2711_PCIE_MSI_MASK_STATUS,
+                             UINT32_MAX);
     for (i = 0; i < BCM2711_PCIE_NUM_IRQS; i++) {
         s->irq_level[i] = 0;
         qemu_set_irq(s->irq[i], 0);
@@ -434,9 +671,12 @@ static int bcm2711_pcie_host_post_load(void *opaque, int version_id)
     unsigned int i;
 
     bcm2711_pcie_update_outbound(s);
-    for (i = 0; i < BCM2711_PCIE_NUM_IRQS; i++) {
+    bcm2711_pcie_update_inbound(s);
+    bcm2711_pcie_update_msi_mapping(s);
+    for (i = 0; i < BCM2711_PCIE_MSI_IRQ; i++) {
         qemu_set_irq(s->irq[i], s->irq_level[i]);
     }
+    bcm2711_pcie_update_msi_irq(s);
     return 0;
 }
 
@@ -461,12 +701,29 @@ static const char *bcm2711_pcie_root_bus_path(PCIHostState *host,
     return "0000:00";
 }
 
+static AddressSpace *bcm2711_pcie_dma_iommu(PCIBus *bus, void *opaque,
+                                             int devfn)
+{
+    BCM2711PcieHostState *s = opaque;
+
+    return &s->dma_as;
+}
+
+static const PCIIOMMUOps bcm2711_pcie_iommu_ops = {
+    .get_address_space = bcm2711_pcie_dma_iommu,
+};
+
 static void bcm2711_pcie_host_realize(DeviceState *dev, Error **errp)
 {
     BCM2711PcieHostState *s = BCM2711_PCIE_HOST(dev);
     PCIHostState *host = PCI_HOST_BRIDGE(dev);
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     unsigned int i;
+
+    if (!s->ram_mr) {
+        error_setg(errp, "BCM2711 PCIe host requires a RAM link");
+        return;
+    }
 
     memory_region_init_io(&s->regs_mr, OBJECT(s), &bcm2711_pcie_host_ops, s,
                           "bcm2711-pcie-registers",
@@ -479,6 +736,15 @@ static void bcm2711_pcie_host_realize(DeviceState *dev, Error **errp)
                           s, "bcm2711-pcie-memory-window", UINT64_MAX);
     memory_region_add_subregion(&s->pci_mem_window, 0, &s->pci_mem);
     memory_region_init(&s->pci_io, OBJECT(s), "bcm2711-pcie-io", 64 * KiB);
+
+    memory_region_init(&s->dma_root, OBJECT(s), "bcm2711-pcie-dma",
+                       UINT64_MAX);
+    memory_region_init_alias(&s->inbound_alias, OBJECT(s),
+                             "bcm2711-pcie-inbound", s->ram_mr, 0, 1);
+    memory_region_init_io(&s->msi_doorbell, OBJECT(s),
+                          &bcm2711_pcie_msi_doorbell_ops, s,
+                          "bcm2711-pcie-msi-doorbell", 4);
+    address_space_init(&s->dma_as, &s->dma_root, "bcm2711-pcie-dma");
 
     for (i = 0; i < BCM2711_PCIE_NUM_OUT_WINDOWS; i++) {
         g_autofree char *name = g_strdup_printf("bcm2711-pcie-outbound-%u",
@@ -497,10 +763,12 @@ static void bcm2711_pcie_host_realize(DeviceState *dev, Error **errp)
                                       TYPE_PCIE_BUS);
     host->bus->flags |= PCI_BUS_EXTENDED_CONFIG_SPACE;
     pci_bus_set_route_irq_fn(host->bus, bcm2711_pcie_route_irq);
+    pci_setup_iommu(host->bus, &bcm2711_pcie_iommu_ops, s);
 
     if (!qdev_realize(DEVICE(&s->root_port), BUS(host->bus), errp)) {
         pci_unregister_root_bus(host->bus);
         host->bus = NULL;
+        address_space_destroy(&s->dma_as);
         return;
     }
 }
@@ -509,12 +777,20 @@ static void bcm2711_pcie_host_unrealize(DeviceState *dev)
 {
     BCM2711PcieHostState *s = BCM2711_PCIE_HOST(dev);
     PCIHostState *host = PCI_HOST_BRIDGE(dev);
+    unsigned int i;
 
     bcm2711_pcie_unmap_outbound(s);
+    bcm2711_pcie_unmap_inbound(s);
+    bcm2711_pcie_unmap_msi(s);
     if (host->bus) {
         pci_unregister_root_bus(host->bus);
         host->bus = NULL;
     }
+    for (i = 0; i < BCM2711_PCIE_NUM_IRQS; i++) {
+        s->irq_level[i] = 0;
+        qemu_set_irq(s->irq[i], 0);
+    }
+    address_space_destroy(&s->dma_as);
 }
 
 static void bcm2711_pcie_host_init(Object *obj)
@@ -528,6 +804,11 @@ static void bcm2711_pcie_host_init(Object *obj)
     qdev_prop_set_bit(DEVICE(&s->root_port), "hotplug", false);
 }
 
+static const Property bcm2711_pcie_host_properties[] = {
+    DEFINE_PROP_LINK("ram", BCM2711PcieHostState, ram_mr,
+                     TYPE_MEMORY_REGION, MemoryRegion *),
+};
+
 static void bcm2711_pcie_host_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -540,9 +821,11 @@ static void bcm2711_pcie_host_class_init(ObjectClass *oc, const void *data)
     dc->user_creatable = false;
     dc->fw_name = "pci";
     dc->vmsd = &vmstate_bcm2711_pcie_host;
+    device_class_set_props(dc, bcm2711_pcie_host_properties);
     hc->root_bus_path = bcm2711_pcie_root_bus_path;
     rc->phases.hold = bcm2711_pcie_host_reset_hold;
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
+    msi_nonbroken = true;
 }
 
 static void bcm2711_pcie_root_port_realize(DeviceState *dev, Error **errp)

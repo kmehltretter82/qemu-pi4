@@ -37,6 +37,14 @@ struct BCM2711PcieHostState {
     MemoryRegion outbound_alias[BCM2711_PCIE_NUM_OUT_WINDOWS];
     bool outbound_mapped[BCM2711_PCIE_NUM_OUT_WINDOWS];
 
+    MemoryRegion dma_root;
+    AddressSpace dma_as;
+    MemoryRegion inbound_alias;
+    MemoryRegion msi_doorbell;
+    MemoryRegion *ram_mr;
+    bool inbound_mapped;
+    bool msi_mapped;
+
     qemu_irq irq[BCM2711_PCIE_NUM_IRQS];
     uint8_t irq_level[BCM2711_PCIE_NUM_IRQS];
 

@@ -230,6 +230,10 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpio), 0));
 
     /* PCIe host registers are in the BCM2711 lower-peripheral window. */
+    object_property_set_link(
+        OBJECT(&s->pcie), "ram",
+        object_property_get_link(OBJECT(dev), "ram", &error_abort),
+        &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->pcie), errp)) {
         return;
     }
