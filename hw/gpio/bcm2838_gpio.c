@@ -58,6 +58,12 @@
 #define RESET_VAL_CNTRL_REG2 0x50AAA95A
 #define RESET_VAL_CNTRL_REG3 0x00055555
 
+#define GPIO_REG_BANK1_VALID_MASK 0x03ffffff
+#define GPIO_IRQ_BANK0_MASK       0x0fffffff
+#define GPIO_IRQ_BANK1_LOW_MASK   0x00003fff
+#define GPIO_IRQ_BANK2_MASK       0x03ffc000
+#define GPIO_PUP_REG3_VALID_MASK  0x000fffff
+
 #define NUM_FSELN_IN_GPFSELN 10
 #define NUM_BITS_FSELN       3
 #define MASK_FSELN           0x7
@@ -87,9 +93,108 @@ static uint32_t gpfsel_get(BCM2838GpioState *s, uint8_t reg)
     return value;
 }
 
+static uint32_t bcm2838_gpio_valid_mask(unsigned int bank)
+{
+    return bank ? GPIO_REG_BANK1_VALID_MASK : UINT32_MAX;
+}
+
+static uint32_t *bcm2838_gpio_output_latch(BCM2838GpioState *s,
+                                           unsigned int bank)
+{
+    return bank ? &s->lev1 : &s->lev0;
+}
+
+static uint32_t bcm2838_gpio_output_mask(BCM2838GpioState *s,
+                                         unsigned int bank)
+{
+    unsigned int first = bank * 32;
+    unsigned int last = MIN(first + 32, BCM2838_GPIO_NUM);
+    uint32_t mask = 0;
+
+    for (unsigned int pin = first; pin < last; pin++) {
+        if (s->fsel[pin] == BCM2838_FSEL_GPIO_OUT) {
+            mask |= BIT(pin - first);
+        }
+    }
+    return mask;
+}
+
+static uint32_t bcm2838_gpio_level(BCM2838GpioState *s, unsigned int bank)
+{
+    uint32_t output_mask = bcm2838_gpio_output_mask(s, bank);
+    uint32_t output = *bcm2838_gpio_output_latch(s, bank);
+
+    return ((output & output_mask) |
+            (s->input_level[bank] & ~output_mask)) &
+           bcm2838_gpio_valid_mask(bank);
+}
+
+static void bcm2838_gpio_update_irqs(BCM2838GpioState *s)
+{
+    uint32_t events0 = s->event_status[0];
+    uint32_t events1 = s->event_status[1] & GPIO_REG_BANK1_VALID_MASK;
+
+    qemu_set_irq(s->irq[0], !!(events0 & GPIO_IRQ_BANK0_MASK));
+    qemu_set_irq(s->irq[1],
+                 !!((events0 & ~GPIO_IRQ_BANK0_MASK) |
+                    (events1 & GPIO_IRQ_BANK1_LOW_MASK)));
+    qemu_set_irq(s->irq[2], !!(events1 & GPIO_IRQ_BANK2_MASK));
+    qemu_set_irq(s->irq[3], !!(events0 | events1));
+}
+
+static void bcm2838_gpio_latch_events(BCM2838GpioState *s,
+                                      unsigned int bank,
+                                      uint32_t old_level,
+                                      uint32_t new_level)
+{
+    uint32_t rising = ~old_level & new_level;
+    uint32_t falling = old_level & ~new_level;
+    uint32_t events;
+
+    events = rising & (s->rising_detect[bank] |
+                       s->async_rising_detect[bank]);
+    events |= falling & (s->falling_detect[bank] |
+                         s->async_falling_detect[bank]);
+    events |= new_level & s->high_detect[bank];
+    events |= ~new_level & s->low_detect[bank];
+    s->event_status[bank] |= events & bcm2838_gpio_valid_mask(bank);
+    bcm2838_gpio_update_irqs(s);
+}
+
+static void bcm2838_gpio_refresh_level_events(BCM2838GpioState *s,
+                                              unsigned int bank)
+{
+    uint32_t level = bcm2838_gpio_level(s, bank);
+    uint32_t events = (level & s->high_detect[bank]) |
+                      (~level & s->low_detect[bank]);
+
+    s->event_status[bank] |= events & bcm2838_gpio_valid_mask(bank);
+    bcm2838_gpio_update_irqs(s);
+}
+
+static void bcm2838_gpio_drive_outputs(BCM2838GpioState *s)
+{
+    for (unsigned int pin = 0; pin < BCM2838_GPIO_NUM; pin++) {
+        unsigned int bank = pin / 32;
+        unsigned int bit = pin % 32;
+        int level = 0;
+
+        if (s->fsel[pin] == BCM2838_FSEL_GPIO_OUT) {
+            level = !!(*bcm2838_gpio_output_latch(s, bank) & BIT(bit));
+        }
+        qemu_set_irq(s->out[pin], level);
+    }
+}
+
 static void gpfsel_set(BCM2838GpioState *s, uint8_t reg, uint32_t value)
 {
+    uint32_t old_level[BCM2838_GPIO_REG_BANKS];
     int i;
+
+    for (i = 0; i < BCM2838_GPIO_REG_BANKS; i++) {
+        old_level[i] = bcm2838_gpio_level(s, i);
+    }
+
     for (i = 0; i < NUM_FSELN_IN_GPFSELN; i++) {
         uint32_t index = NUM_FSELN_IN_GPFSELN * reg + i;
         if (index < sizeof(s->fsel)) {
@@ -122,6 +227,12 @@ static void gpfsel_set(BCM2838GpioState *s, uint8_t reg, uint32_t value)
         sdbus_reparent_card(s->sdbus_sdhci, s->sdbus_sdhost);
         s->sd_fsel = BCM2838_FSEL_ALT0;
     }
+
+    bcm2838_gpio_drive_outputs(s);
+    for (i = 0; i < BCM2838_GPIO_REG_BANKS; i++) {
+        bcm2838_gpio_latch_events(s, i, old_level[i],
+                                  bcm2838_gpio_level(s, i));
+    }
 }
 
 static int gpfsel_is_out(BCM2838GpioState *s, int index)
@@ -132,38 +243,47 @@ static int gpfsel_is_out(BCM2838GpioState *s, int index)
     return 0;
 }
 
-static void gpset(BCM2838GpioState *s, uint32_t val, uint8_t start,
-                  uint8_t count, uint32_t *lev)
+static void bcm2838_gpio_update_output_latch(BCM2838GpioState *s,
+                                             unsigned int bank,
+                                             uint32_t value, bool set)
 {
-    uint32_t changes = val & ~*lev;
-    uint32_t cur = 1;
+    uint32_t *latch = bcm2838_gpio_output_latch(s, bank);
+    uint32_t old_level = bcm2838_gpio_level(s, bank);
+    uint32_t mask = value & bcm2838_gpio_valid_mask(bank);
+    unsigned int first = bank * 32;
+    unsigned int last = MIN(first + 32, BCM2838_GPIO_NUM);
 
-    int i;
-    for (i = 0; i < count; i++) {
-        if ((changes & cur) && (gpfsel_is_out(s, start + i))) {
-            qemu_set_irq(s->out[start + i], 1);
-        }
-        cur <<= 1;
+    if (set) {
+        *latch |= mask;
+    } else {
+        *latch &= ~mask;
     }
 
-    *lev |= val;
+    for (unsigned int pin = first; pin < last; pin++) {
+        if ((mask & BIT(pin - first)) && gpfsel_is_out(s, pin)) {
+            qemu_set_irq(s->out[pin], set);
+        }
+    }
+
+    bcm2838_gpio_latch_events(s, bank, old_level,
+                              bcm2838_gpio_level(s, bank));
 }
 
-static void gpclr(BCM2838GpioState *s, uint32_t val, uint8_t start,
-                  uint8_t count, uint32_t *lev)
+static void bcm2838_gpio_set(void *opaque, int irq, int level)
 {
-    uint32_t changes = val & *lev;
-    uint32_t cur = 1;
+    BCM2838GpioState *s = BCM2838_GPIO(opaque);
+    unsigned int bank = irq / 32;
+    unsigned int bit = irq % 32;
+    uint32_t old_level = bcm2838_gpio_level(s, bank);
 
-    int i;
-    for (i = 0; i < count; i++) {
-        if ((changes & cur) && (gpfsel_is_out(s, start + i))) {
-            qemu_set_irq(s->out[start + i], 0);
-        }
-        cur <<= 1;
+    if (level > 0) {
+        s->input_level[bank] |= BIT(bit);
+    } else {
+        s->input_level[bank] &= ~BIT(bit);
     }
 
-    *lev &= ~val;
+    bcm2838_gpio_latch_events(s, bank, old_level,
+                              bcm2838_gpio_level(s, bank));
 }
 
 static uint64_t bcm2838_gpio_read(void *opaque, hwaddr offset, unsigned size)
@@ -191,28 +311,40 @@ static uint64_t bcm2838_gpio_read(void *opaque, hwaddr offset, unsigned size)
                       TYPE_BCM2838_GPIO, __func__, value, offset, size);
         break;
     case GPLEV0:
-        value = s->lev0;
+        value = bcm2838_gpio_level(s, 0);
         break;
     case GPLEV1:
-        value = s->lev1;
+        value = bcm2838_gpio_level(s, 1);
         break;
     case GPEDS0:
     case GPEDS1:
+        value = s->event_status[(offset - GPEDS0) / BYTES_IN_WORD];
+        break;
     case GPREN0:
     case GPREN1:
+        value = s->rising_detect[(offset - GPREN0) / BYTES_IN_WORD];
+        break;
     case GPFEN0:
     case GPFEN1:
+        value = s->falling_detect[(offset - GPFEN0) / BYTES_IN_WORD];
+        break;
     case GPHEN0:
     case GPHEN1:
+        value = s->high_detect[(offset - GPHEN0) / BYTES_IN_WORD];
+        break;
     case GPLEN0:
     case GPLEN1:
+        value = s->low_detect[(offset - GPLEN0) / BYTES_IN_WORD];
+        break;
     case GPAREN0:
     case GPAREN1:
+        value = s->async_rising_detect[
+            (offset - GPAREN0) / BYTES_IN_WORD];
+        break;
     case GPAFEN0:
     case GPAFEN1:
-        /* Not implemented */
-        qemu_log_mask(LOG_UNIMP, "%s: %s: not implemented for %"HWADDR_PRIx"\n",
-                      TYPE_BCM2838_GPIO, __func__, offset);
+        value = s->async_falling_detect[
+            (offset - GPAFEN0) / BYTES_IN_WORD];
         break;
     case GPIO_PUP_PDN_CNTRL_REG0:
     case GPIO_PUP_PDN_CNTRL_REG1:
@@ -245,16 +377,16 @@ static void bcm2838_gpio_write(void *opaque, hwaddr offset, uint64_t value,
         gpfsel_set(s, offset / BYTES_IN_WORD, value);
         break;
     case GPSET0:
-        gpset(s, value, 0, 32, &s->lev0);
+        bcm2838_gpio_update_output_latch(s, 0, value, true);
         break;
     case GPSET1:
-        gpset(s, value, 32, 22, &s->lev1);
+        bcm2838_gpio_update_output_latch(s, 1, value, true);
         break;
     case GPCLR0:
-        gpclr(s, value, 0, 32, &s->lev0);
+        bcm2838_gpio_update_output_latch(s, 0, value, false);
         break;
     case GPCLR1:
-        gpclr(s, value, 32, 22, &s->lev1);
+        bcm2838_gpio_update_output_latch(s, 1, value, false);
         break;
     case GPLEV0:
     case GPLEV1:
@@ -266,29 +398,79 @@ static void bcm2838_gpio_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case GPEDS0:
     case GPEDS1:
+    {
+        unsigned int bank = (offset - GPEDS0) / BYTES_IN_WORD;
+
+        s->event_status[bank] &= ~value;
+        bcm2838_gpio_refresh_level_events(s, bank);
+        break;
+    }
     case GPREN0:
     case GPREN1:
+    {
+        unsigned int bank = (offset - GPREN0) / BYTES_IN_WORD;
+
+        s->rising_detect[bank] = value & bcm2838_gpio_valid_mask(bank);
+        break;
+    }
     case GPFEN0:
     case GPFEN1:
+    {
+        unsigned int bank = (offset - GPFEN0) / BYTES_IN_WORD;
+
+        s->falling_detect[bank] = value & bcm2838_gpio_valid_mask(bank);
+        break;
+    }
     case GPHEN0:
     case GPHEN1:
+    {
+        unsigned int bank = (offset - GPHEN0) / BYTES_IN_WORD;
+
+        s->high_detect[bank] = value & bcm2838_gpio_valid_mask(bank);
+        bcm2838_gpio_refresh_level_events(s, bank);
+        break;
+    }
     case GPLEN0:
     case GPLEN1:
+    {
+        unsigned int bank = (offset - GPLEN0) / BYTES_IN_WORD;
+
+        s->low_detect[bank] = value & bcm2838_gpio_valid_mask(bank);
+        bcm2838_gpio_refresh_level_events(s, bank);
+        break;
+    }
     case GPAREN0:
     case GPAREN1:
+    {
+        unsigned int bank = (offset - GPAREN0) / BYTES_IN_WORD;
+
+        s->async_rising_detect[bank] =
+            value & bcm2838_gpio_valid_mask(bank);
+        break;
+    }
     case GPAFEN0:
     case GPAFEN1:
-        /* Not implemented */
-        qemu_log_mask(LOG_UNIMP, "%s: %s: not implemented for %"HWADDR_PRIx"\n",
-                      TYPE_BCM2838_GPIO, __func__, offset);
+    {
+        unsigned int bank = (offset - GPAFEN0) / BYTES_IN_WORD;
+
+        s->async_falling_detect[bank] =
+            value & bcm2838_gpio_valid_mask(bank);
         break;
+    }
     case GPIO_PUP_PDN_CNTRL_REG0:
     case GPIO_PUP_PDN_CNTRL_REG1:
     case GPIO_PUP_PDN_CNTRL_REG2:
     case GPIO_PUP_PDN_CNTRL_REG3:
-        s->pup_cntrl_reg[(offset - GPIO_PUP_PDN_CNTRL_REG0)
-                         / sizeof(s->pup_cntrl_reg[0])] = value;
+    {
+        unsigned int reg = (offset - GPIO_PUP_PDN_CNTRL_REG0) /
+                           sizeof(s->pup_cntrl_reg[0]);
+
+        s->pup_cntrl_reg[reg] = value;
+        if (reg == GPIO_PUP_PDN_CNTRL_NUM - 1) {
+            s->pup_cntrl_reg[reg] &= GPIO_PUP_REG3_VALID_MASK;
+        }
         break;
+    }
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "%s: %s: bad offset %"HWADDR_PRIx"\n",
                   TYPE_BCM2838_GPIO, __func__, offset);
@@ -300,7 +482,6 @@ static void bcm2838_gpio_reset(DeviceState *dev)
     BCM2838GpioState *s = BCM2838_GPIO(dev);
 
     memset(s->fsel, 0, sizeof(s->fsel));
-
     s->sd_fsel = 0;
 
     /* SDHCI is selected by default */
@@ -308,32 +489,99 @@ static void bcm2838_gpio_reset(DeviceState *dev)
 
     s->lev0 = 0;
     s->lev1 = 0;
-
-    memset(s->fsel, 0, sizeof(s->fsel));
+    /* External pin levels are not controller state and survive reset. */
+    memset(s->event_status, 0, sizeof(s->event_status));
+    memset(s->rising_detect, 0, sizeof(s->rising_detect));
+    memset(s->falling_detect, 0, sizeof(s->falling_detect));
+    memset(s->high_detect, 0, sizeof(s->high_detect));
+    memset(s->low_detect, 0, sizeof(s->low_detect));
+    memset(s->async_rising_detect, 0, sizeof(s->async_rising_detect));
+    memset(s->async_falling_detect, 0, sizeof(s->async_falling_detect));
 
     s->pup_cntrl_reg[0] = RESET_VAL_CNTRL_REG0;
     s->pup_cntrl_reg[1] = RESET_VAL_CNTRL_REG1;
     s->pup_cntrl_reg[2] = RESET_VAL_CNTRL_REG2;
     s->pup_cntrl_reg[3] = RESET_VAL_CNTRL_REG3;
+
+    bcm2838_gpio_drive_outputs(s);
+    bcm2838_gpio_update_irqs(s);
 }
 
 static const MemoryRegionOps bcm2838_gpio_ops = {
     .read = bcm2838_gpio_read,
     .write = bcm2838_gpio_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+        .unaligned = false,
+    },
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
 };
+
+static int bcm2838_gpio_post_load(void *opaque, int version_id)
+{
+    BCM2838GpioState *s = BCM2838_GPIO(opaque);
+    uint32_t invalid = s->input_level[1] | s->event_status[1] |
+                       s->rising_detect[1] | s->falling_detect[1] |
+                       s->high_detect[1] | s->low_detect[1] |
+                       s->async_rising_detect[1] |
+                       s->async_falling_detect[1];
+
+    if (version_id >= 2 && (invalid & ~GPIO_REG_BANK1_VALID_MASK)) {
+        return -EINVAL;
+    }
+
+    /* Version-one streams could retain writes to reserved GPSET1 bits. */
+    s->lev1 &= GPIO_REG_BANK1_VALID_MASK;
+    s->input_level[1] &= GPIO_REG_BANK1_VALID_MASK;
+    s->event_status[1] &= GPIO_REG_BANK1_VALID_MASK;
+    s->rising_detect[1] &= GPIO_REG_BANK1_VALID_MASK;
+    s->falling_detect[1] &= GPIO_REG_BANK1_VALID_MASK;
+    s->high_detect[1] &= GPIO_REG_BANK1_VALID_MASK;
+    s->low_detect[1] &= GPIO_REG_BANK1_VALID_MASK;
+    s->async_rising_detect[1] &= GPIO_REG_BANK1_VALID_MASK;
+    s->async_falling_detect[1] &= GPIO_REG_BANK1_VALID_MASK;
+    s->pup_cntrl_reg[3] &= GPIO_PUP_REG3_VALID_MASK;
+
+    bcm2838_gpio_drive_outputs(s);
+    for (unsigned int bank = 0; bank < BCM2838_GPIO_REG_BANKS; bank++) {
+        bcm2838_gpio_refresh_level_events(s, bank);
+    }
+    return 0;
+}
 
 static const VMStateDescription vmstate_bcm2838_gpio = {
     .name = "bcm2838_gpio",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .post_load = bcm2838_gpio_post_load,
+    .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(fsel, BCM2838GpioState, BCM2838_GPIO_NUM),
         VMSTATE_UINT32(lev0, BCM2838GpioState),
         VMSTATE_UINT32(lev1, BCM2838GpioState),
         VMSTATE_UINT8(sd_fsel, BCM2838GpioState),
         VMSTATE_UINT32_ARRAY(pup_cntrl_reg, BCM2838GpioState,
                              GPIO_PUP_PDN_CNTRL_NUM),
+        VMSTATE_UINT32_ARRAY_V(input_level, BCM2838GpioState,
+                               BCM2838_GPIO_REG_BANKS, 2),
+        VMSTATE_UINT32_ARRAY_V(event_status, BCM2838GpioState,
+                               BCM2838_GPIO_REG_BANKS, 2),
+        VMSTATE_UINT32_ARRAY_V(rising_detect, BCM2838GpioState,
+                               BCM2838_GPIO_REG_BANKS, 2),
+        VMSTATE_UINT32_ARRAY_V(falling_detect, BCM2838GpioState,
+                               BCM2838_GPIO_REG_BANKS, 2),
+        VMSTATE_UINT32_ARRAY_V(high_detect, BCM2838GpioState,
+                               BCM2838_GPIO_REG_BANKS, 2),
+        VMSTATE_UINT32_ARRAY_V(low_detect, BCM2838GpioState,
+                               BCM2838_GPIO_REG_BANKS, 2),
+        VMSTATE_UINT32_ARRAY_V(async_rising_detect, BCM2838GpioState,
+                               BCM2838_GPIO_REG_BANKS, 2),
+        VMSTATE_UINT32_ARRAY_V(async_falling_detect, BCM2838GpioState,
+                               BCM2838_GPIO_REG_BANKS, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -349,6 +597,10 @@ static void bcm2838_gpio_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &bcm2838_gpio_ops, s,
                           "bcm2838_gpio", BCM2838_GPIO_REGS_SIZE);
     sysbus_init_mmio(sbd, &s->iomem);
+    for (unsigned int i = 0; i < BCM2838_GPIO_IRQS; i++) {
+        sysbus_init_irq(sbd, &s->irq[i]);
+    }
+    qdev_init_gpio_in(dev, bcm2838_gpio_set, BCM2838_GPIO_NUM);
     qdev_init_gpio_out(dev, s->out, BCM2838_GPIO_NUM);
 }
 

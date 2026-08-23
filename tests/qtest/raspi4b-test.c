@@ -50,6 +50,34 @@
 #define SPI0_CS_INTD              (1U << 9)
 #define SPI0_CS_TA                (1U << 7)
 
+#define RASPI4_GPIO_BASE          0xfe200000
+#define RASPI4_GPIO_GPFSEL5       (RASPI4_GPIO_BASE + 0x14)
+#define RASPI4_GPIO_GPSET1        (RASPI4_GPIO_BASE + 0x20)
+#define RASPI4_GPIO_GPCLR1        (RASPI4_GPIO_BASE + 0x2c)
+#define RASPI4_GPIO_GPLEV0        (RASPI4_GPIO_BASE + 0x34)
+#define RASPI4_GPIO_GPLEV1        (RASPI4_GPIO_BASE + 0x38)
+#define RASPI4_GPIO_GPEDS0        (RASPI4_GPIO_BASE + 0x40)
+#define RASPI4_GPIO_GPEDS1        (RASPI4_GPIO_BASE + 0x44)
+#define RASPI4_GPIO_GPREN0        (RASPI4_GPIO_BASE + 0x4c)
+#define RASPI4_GPIO_GPREN1        (RASPI4_GPIO_BASE + 0x50)
+#define RASPI4_GPIO_GPFEN0        (RASPI4_GPIO_BASE + 0x58)
+#define RASPI4_GPIO_GPHEN0        (RASPI4_GPIO_BASE + 0x64)
+#define RASPI4_GPIO_GPLEN0        (RASPI4_GPIO_BASE + 0x70)
+#define RASPI4_GPIO_GPAREN0       (RASPI4_GPIO_BASE + 0x7c)
+#define RASPI4_GPIO_GPAFEN0       (RASPI4_GPIO_BASE + 0x88)
+#define RASPI4_GPIO_GPAFEN1       (RASPI4_GPIO_BASE + 0x8c)
+#define RASPI4_GPIO_QOM_PATH      "/machine/soc/peripherals/gpio"
+#define RASPI4_GPIO_GIC_IRQ0      113
+#define RASPI4_GPIO_GIC_IRQ1      114
+#define RASPI4_GPIO_GIC_IRQ2      115
+#define RASPI4_GPIO_GIC_IRQ_ALL   116
+#define GPIO_PIN5                 (1U << 5)
+#define GPIO_PIN30                (1U << 30)
+#define GPIO_PIN50_BANK1          (1U << (50 - 32))
+#define GPIO_PIN57_BANK1          (1U << (57 - 32))
+#define GPIO_FSEL5_PIN57_OUTPUT   (1U << ((57 - 50) * 3))
+#define GPIO_BANK1_VALID_MASK     0x03ffffffU
+
 #define RASPI4_RNG200_BASE        0xfe104000
 #define RASPI4_RNG200_CTRL        (RASPI4_RNG200_BASE + 0x00)
 #define RASPI4_RNG200_SOFT_RESET  (RASPI4_RNG200_BASE + 0x04)
@@ -242,6 +270,7 @@ static int genet_test_socket = -1;
 #endif
 static bool pcie_has_edu;
 
+static void gpio_set_input(unsigned int pin, int level);
 static void rng200_refill_words(unsigned int words);
 
 static bool qom_bus_has_sd_card(const char *path)
@@ -1194,7 +1223,7 @@ static void test_pcie_vl805_multisegment_migration(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
-static void test_rng200_and_thermal_migration(void)
+static void test_soc_peripheral_migration(void)
 {
     g_autoptr(GError) error = NULL;
     g_autofree char *tmpdir = NULL;
@@ -1208,6 +1237,14 @@ static void test_rng200_and_thermal_migration(void)
     QDict *response;
     int net_sockets[2];
     int ret;
+
+    writel(RASPI4_GPIO_GPAREN0, GPIO_PIN30);
+    writel(RASPI4_GPIO_GPAFEN0, GPIO_PIN30);
+    gpio_set_input(30, 1);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPLEV0), ==, GPIO_PIN30);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, GPIO_PIN30);
+    g_assert_true(get_irq(RASPI4_GPIO_GIC_IRQ1));
+    g_assert_true(get_irq(RASPI4_GPIO_GIC_IRQ_ALL));
 
     writel(RASPI4_RNG200_TOTAL_LIMIT, 64);
     writel(RASPI4_RNG200_INT_ENABLE, RNG200_INT_STARTUP);
@@ -1226,7 +1263,7 @@ static void test_rng200_and_thermal_migration(void)
     qobject_unref(response);
 
     qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
-    tmpdir = g_dir_make_tmp("raspi4b-rng-migration-XXXXXX", &error);
+    tmpdir = g_dir_make_tmp("raspi4b-soc-migration-XXXXXX", &error);
     g_assert_no_error(error);
     g_assert_nonnull(tmpdir);
     state_path = g_build_filename(tmpdir, "state", NULL);
@@ -1249,6 +1286,25 @@ static void test_rng200_and_thermal_migration(void)
     destination = qtest_init(cmd_line->str);
     close(net_sockets[1]);
     raspi4b_wait_for_migration(destination);
+
+    g_assert_cmphex(qtest_readl(destination, RASPI4_GPIO_GPAREN0), ==,
+                    GPIO_PIN30);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_GPIO_GPAFEN0), ==,
+                    GPIO_PIN30);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_GPIO_GPLEV0), ==,
+                    GPIO_PIN30);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_GPIO_GPEDS0), ==,
+                    GPIO_PIN30);
+
+    qtest_irq_intercept_in(destination, "/machine/soc/peripherals");
+    qtest_writel(destination, RASPI4_GPIO_GPEDS0, GPIO_PIN30);
+    g_assert_false(qtest_get_irq(destination, RASPI4_GPIO_GIC_IRQ1));
+    g_assert_false(qtest_get_irq(destination, RASPI4_GPIO_GIC_IRQ_ALL));
+    qtest_set_irq_in(destination, RASPI4_GPIO_QOM_PATH, NULL, 30, 0);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_GPIO_GPEDS0), ==,
+                    GPIO_PIN30);
+    g_assert_true(qtest_get_irq(destination, RASPI4_GPIO_GIC_IRQ1));
+    g_assert_true(qtest_get_irq(destination, RASPI4_GPIO_GIC_IRQ_ALL));
 
     g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_CTRL), ==,
                     RNG200_CTRL_RATE_1MHZ | RNG200_CTRL_ENABLE);
@@ -1502,6 +1558,115 @@ static void test_spi0_interrupt(void)
     g_assert_true(get_irq(RASPI4_SPI0_GIC_IRQ));
     writel(RASPI4_SPI0_CS, 0);
     g_assert_false(get_irq(RASPI4_SPI0_GIC_IRQ));
+}
+
+static void gpio_set_input(unsigned int pin, int level)
+{
+    qtest_set_irq_in(global_qtest, RASPI4_GPIO_QOM_PATH, NULL, pin, level);
+}
+
+static void test_gpio_events_and_interrupts(void)
+{
+    g_assert_cmphex(readl(RASPI4_GPIO_GPLEV0), ==, 0);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPLEV1), ==, 0);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, 0);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS1), ==, 0);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPREN0), ==, 0);
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ0));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ1));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ2));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ_ALL));
+
+    /* A rising edge in GPIO bank 0 drives its bank and all-bank IRQs. */
+    writel(RASPI4_GPIO_GPREN0, GPIO_PIN5);
+    gpio_set_input(5, 1);
+    g_assert_true(readl(RASPI4_GPIO_GPLEV0) & GPIO_PIN5);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, GPIO_PIN5);
+    g_assert_true(get_irq(RASPI4_GPIO_GIC_IRQ0));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ1));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ2));
+    g_assert_true(get_irq(RASPI4_GPIO_GIC_IRQ_ALL));
+    writel(RASPI4_GPIO_GPEDS0, GPIO_PIN5);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, 0);
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ0));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ_ALL));
+
+    /* Synchronous falling-edge detection uses the same event latch. */
+    writel(RASPI4_GPIO_GPREN0, 0);
+    writel(RASPI4_GPIO_GPFEN0, GPIO_PIN5);
+    gpio_set_input(5, 0);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, GPIO_PIN5);
+    writel(RASPI4_GPIO_GPEDS0, GPIO_PIN5);
+
+    /* GPIOs 28-45 use the second bank interrupt. */
+    writel(RASPI4_GPIO_GPFEN0, 0);
+    writel(RASPI4_GPIO_GPAREN0, GPIO_PIN30);
+    gpio_set_input(30, 1);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, GPIO_PIN30);
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ0));
+    g_assert_true(get_irq(RASPI4_GPIO_GIC_IRQ1));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ2));
+    g_assert_true(get_irq(RASPI4_GPIO_GIC_IRQ_ALL));
+    writel(RASPI4_GPIO_GPEDS0, GPIO_PIN30);
+
+    /* GPIOs 46-57 use the third bank interrupt. */
+    gpio_set_input(50, 1);
+    writel(RASPI4_GPIO_GPAFEN1, GPIO_PIN50_BANK1);
+    gpio_set_input(50, 0);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS1), ==, GPIO_PIN50_BANK1);
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ0));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ1));
+    g_assert_true(get_irq(RASPI4_GPIO_GIC_IRQ2));
+    g_assert_true(get_irq(RASPI4_GPIO_GIC_IRQ_ALL));
+    writel(RASPI4_GPIO_GPEDS1, GPIO_PIN50_BANK1);
+
+    /* Writes to reserved bits above GPIO57 are ignored. */
+    writel(RASPI4_GPIO_GPREN1, UINT32_MAX);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPREN1), ==,
+                    GPIO_BANK1_VALID_MASK);
+    writel(RASPI4_GPIO_GPREN1, 0);
+
+    /* An active level prevents its W1C status bit from clearing. */
+    writel(RASPI4_GPIO_GPAREN0, 0);
+    gpio_set_input(5, 1);
+    writel(RASPI4_GPIO_GPHEN0, GPIO_PIN5);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, GPIO_PIN5);
+    writel(RASPI4_GPIO_GPEDS0, GPIO_PIN5);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, GPIO_PIN5);
+    gpio_set_input(5, 0);
+    writel(RASPI4_GPIO_GPEDS0, GPIO_PIN5);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, 0);
+    writel(RASPI4_GPIO_GPHEN0, 0);
+
+    writel(RASPI4_GPIO_GPLEN0, GPIO_PIN5);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, GPIO_PIN5);
+    writel(RASPI4_GPIO_GPEDS0, GPIO_PIN5);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, GPIO_PIN5);
+    gpio_set_input(5, 1);
+    writel(RASPI4_GPIO_GPEDS0, GPIO_PIN5);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, 0);
+    writel(RASPI4_GPIO_GPLEN0, 0);
+
+    /* GPSET retains an output latch while the pin remains an input. */
+    writel(RASPI4_GPIO_GPSET1, GPIO_PIN57_BANK1);
+    g_assert_false(readl(RASPI4_GPIO_GPLEV1) & GPIO_PIN57_BANK1);
+    writel(RASPI4_GPIO_GPFSEL5, GPIO_FSEL5_PIN57_OUTPUT);
+    g_assert_true(readl(RASPI4_GPIO_GPLEV1) & GPIO_PIN57_BANK1);
+    writel(RASPI4_GPIO_GPCLR1, GPIO_PIN57_BANK1);
+    g_assert_false(readl(RASPI4_GPIO_GPLEV1) & GPIO_PIN57_BANK1);
+
+    qtest_system_reset(global_qtest);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPFSEL5), ==, 0);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPLEV0), ==,
+                    GPIO_PIN5 | GPIO_PIN30);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPLEV1), ==, 0);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPREN0), ==, 0);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS0), ==, 0);
+    g_assert_cmphex(readl(RASPI4_GPIO_GPEDS1), ==, 0);
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ0));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ1));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ2));
+    g_assert_false(get_irq(RASPI4_GPIO_GIC_IRQ_ALL));
 }
 
 static void rng200_refill_words(unsigned int words)
@@ -1998,13 +2163,15 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/interrupts/system_timer",
                      test_system_timer_interrupts);
     raspi4b_add_test("/raspi4b/interrupts/spi0", test_spi0_interrupt);
+    raspi4b_add_test("/raspi4b/gpio/events_and_interrupts",
+                     test_gpio_events_and_interrupts);
     raspi4b_add_test("/raspi4b/rng200/fifo_and_interrupts",
                      test_rng200_fifo_and_interrupts);
     raspi4b_add_test("/raspi4b/rng200/rate_and_enable_mask",
                      test_rng200_rate_and_enable_mask);
 #ifndef _WIN32
-    raspi4b_add_test("/raspi4b/migration/rng200_and_thermal",
-                     test_rng200_and_thermal_migration);
+    raspi4b_add_test("/raspi4b/migration/soc_peripherals",
+                     test_soc_peripheral_migration);
 #endif
     raspi4b_add_test("/raspi4b/thermal/temperature",
                      test_thermal_temperature);

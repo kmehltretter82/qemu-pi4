@@ -231,6 +231,14 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in(gicdev, n));
     }
 
+    /* Connect the three GPIO bank interrupts and the all-bank interrupt. */
+    for (int n = GIC_SPI_INTERRUPT_GPIO_0;
+         n <= GIC_SPI_INTERRUPT_GPIO_ALL; n++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&ps->gpio),
+                           n - GIC_SPI_INTERRUPT_GPIO_0,
+                           qdev_get_gpio_in(gicdev, n));
+    }
+
     /* Connect SPI0 to its BCM2711 GIC SPI. */
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->spi[0]), 0,
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_SPI0));
