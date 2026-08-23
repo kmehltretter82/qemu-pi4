@@ -69,6 +69,13 @@ image, attaches it as a QEMU ``46f4:0001`` mass-storage device on VIA hub port
 one, and deletes it when QEMU exits.  The guest receives no physical disk or
 user-supplied disk image; only that temporary file is modified.
 
+The runner captures the complete QEMU console and exits successfully only if
+QEMU exits cleanly and the guest prints ``PI4-LAB: upstream Linux boot
+successful``.  The guest also verifies that the USB block device can service
+a sector read before starting the integrity checks; seeing its ``/dev`` node
+alone is not considered sufficient because Linux can publish it before disk
+initialization has completed.
+
 The initramfs verifies that upstream Linux selected ``iproc-rng200``, obtains
 64 bytes through ``/dev/hwrng``, and reports the modeled 35050-millidegree
 reading through its ``cpu-thermal`` zone.  It also verifies the exact BCM2711

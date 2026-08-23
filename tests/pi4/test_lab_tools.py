@@ -168,6 +168,52 @@ class ShellScriptTests(unittest.TestCase):
             str(PI4_SCRIPTS / "run-linux.sh"),
         ], check=True)
 
+    def run_linux_with_fake_qemu(self, output, qemu_status=0):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            artifacts = temporary / "artifacts"
+            artifacts.mkdir()
+            for name in ("Image", "bcm2711-rpi-4-b.dtb",
+                         "initramfs.cpio.gz"):
+                (artifacts / name).touch()
+
+            qemu = temporary / "qemu-system-aarch64"
+            qemu.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' {output!r}\n"
+                f"exit {qemu_status}\n",
+                encoding="utf-8",
+            )
+            qemu.chmod(0o755)
+
+            return subprocess.run([
+                "bash", str(PI4_SCRIPTS / "run-linux.sh"),
+                "--qemu", str(qemu),
+                "--artifacts", str(artifacts),
+                "--machine", "raspi4b",
+            ], check=False, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+
+    def test_linux_runner_requires_success_marker(self):
+        result = self.run_linux_with_fake_qemu(
+            "PI4-LAB: acceptance failed (1 check)")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("acceptance marker was not produced", result.stderr)
+
+    def test_linux_runner_accepts_success_marker(self):
+        result = self.run_linux_with_fake_qemu(
+            "PI4-LAB: upstream Linux boot successful")
+
+        self.assertEqual(result.returncode, 0)
+
+    def test_linux_runner_propagates_qemu_failure(self):
+        result = self.run_linux_with_fake_qemu(
+            "PI4-LAB: upstream Linux boot successful", qemu_status=7)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("QEMU exited before completing", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

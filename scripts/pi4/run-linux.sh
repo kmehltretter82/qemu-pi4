@@ -84,11 +84,14 @@ done
 
 usb_storage_image=$(mktemp \
     "${TMPDIR:-/tmp}/qemu-pi4-usb-storage.XXXXXX")
+qemu_log=
 cleanup()
 {
     rm -f -- "$usb_storage_image"
+    [[ -z $qemu_log ]] || rm -f -- "$qemu_log"
 }
 trap cleanup EXIT
+qemu_log=$(mktemp "${TMPDIR:-/tmp}/qemu-pi4-linux-log.XXXXXX")
 
 # Leave an 8 MiB sparse raw image.  The guest writes only this disposable file.
 dd if=/dev/zero of="$usb_storage_image" bs=1 count=1 \
@@ -100,7 +103,7 @@ kernel_append+=' rdinit=/init panic=-1 clk_ignore_unused ip=dhcp'
 kernel_append+=' pi4lab.usb_storage=1'
 [[ -z $extra_append ]] || kernel_append+=" $extra_append"
 
-"$qemu_binary" \
+if ! "$qemu_binary" \
     -machine "$machine" \
     -kernel "$artifacts_dir/Image" \
     -dtb "$artifacts_dir/$dtb_name" \
@@ -110,4 +113,12 @@ kernel_append+=' pi4lab.usb_storage=1'
     -device usb-storage,drive=pi4-usb-storage,bus=vl805.0,port=1.1 \
     -nic user,model=genet \
     -nographic \
-    -no-reboot
+    -no-reboot 2>&1 | tee "$qemu_log"; then
+    echo "QEMU exited before completing the Pi 4 Linux acceptance run" >&2
+    exit 1
+fi
+
+if ! grep -Fq 'PI4-LAB: upstream Linux boot successful' "$qemu_log"; then
+    echo "Pi 4 Linux acceptance marker was not produced" >&2
+    exit 1
+fi

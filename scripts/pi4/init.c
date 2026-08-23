@@ -429,9 +429,29 @@ static int wait_for_vl805_usb_block(int present, char *device_path,
 {
     int attempt;
 
+    if (present && (!device_path || !path_size)) {
+        return -1;
+    }
     for (attempt = 0; attempt < SYSFS_WAIT_ATTEMPTS; attempt++) {
-        if (vl805_usb_block_path(device_path, path_size) == present) {
+        int found = vl805_usb_block_path(device_path, path_size);
+
+        if (!present && !found) {
             return 0;
+        }
+        if (present && found) {
+            unsigned char sector[512];
+            ssize_t count;
+            int fd = open(device_path, O_RDONLY);
+
+            if (fd >= 0) {
+                do {
+                    count = pread(fd, sector, sizeof(sector), 0);
+                } while (count < 0 && errno == EINTR);
+                close(fd);
+                if (count == (ssize_t)sizeof(sector)) {
+                    return 0;
+                }
+            }
         }
         usleep(SYSFS_WAIT_US);
     }
