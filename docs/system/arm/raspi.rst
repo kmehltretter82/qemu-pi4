@@ -123,6 +123,21 @@ Ports ``1.1`` through ``1.3`` are free on both machines.  Port ``1.4`` is also
 free on ``raspi4b`` but contains the integrated keyboard on ``raspi400``.
 Remove ``snapshot=on`` only when writes to the host image should persist.
 
+DWC2 core reset
+---------------
+
+The on-SoC USB2 host controller implements the observable effects of a DWC2
+core soft reset.  It terminates modeled host transfers, clears the global,
+host and channel interrupt masks, resets receive-status and frame state, and
+deasserts the interrupt while preserving configuration and interrupt-status
+registers.  The ``GRSTCTL`` core-reset and receive/transmit FIFO-flush action
+bits self-clear as software expects.
+
+This is a DMA-only host model.  It has no separately observable FIFO payload,
+so a FIFO-flush command has no additional buffered data to discard.  Slave
+mode FIFO accesses and the DWC2 gadget/device register banks remain
+unimplemented.
+
 Ethernet
 --------
 

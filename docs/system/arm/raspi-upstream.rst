@@ -461,6 +461,46 @@ QP4-UP-025: BCM2711 GPIO event registers and interrupts are unimplemented
   register/IRQ/reset/migration tests, and address migration compatibility for
   the existing machine type.
 
+QP4-UP-026: DWC2 core reset and FIFO flush effects are unimplemented
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: known limitation; E1 register-contract evidence, with normal
+  Linux use but no demonstrated E2 or E3 failure
+:Fork commit: ``3ac780f5191ee850ab15a6bb4d38328f3cbfcc6e``
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Contract: The archived `DWC2 2.94 GRSTCTL register description
+  <https://nest-open-source.googlesource.com/manifest_repos/u-boot/+/5e15fb1fe70ac2857e056ad5d238ad8e3373fdb5/drivers/usb/host/dwc_otg_regs_294.h>`__
+  says that core soft reset returns the internal state machines to idle,
+  terminates AHB and USB transactions, clears interrupt-generating mask bits,
+  preserves interrupt status and configuration, flushes the FIFOs and
+  self-clears.  It also defines receive and selected/all-transmit FIFO flush
+  commands as self-clearing operations.  QEMU advertises revision 2.94a in
+  ``GSNPSID``.
+:Observed issue: On the unmodified current-master binary, ``GRSTCTL`` initially
+  read ``0x80000000``.  After writing ``GAHBCFG=0x00000021``,
+  ``GINTMSK=0x04000000`` and ``GRSTCTL=0x80000001``, the reset bit self-cleared
+  but ``GINTMSK`` incorrectly remained ``0x04000000``.  The model also left
+  host transfer and mask state untouched and logged core reset and receive and
+  transmit FIFO flushes as unimplemented.  A pinned Linux 7.2 boot exercised
+  two core resets and both FIFO-flush forms during ordinary DWC2 probe, but
+  completed successfully because the existing self-clear-on-read behavior
+  satisfied its polling loops.
+:Why known limitation: The DWC2 model has contained explicit ``TODO`` and
+  ``LOG_UNIMP`` cases for these commands since its introduction, so this is
+  not a regression.  Searches of QEMU GitLab and qemu-devel on 2026-08-23 did
+  not find an exact existing report, but normal Linux use currently has no
+  observed failure beyond incomplete state fidelity and diagnostic noise.
+:Fork change: Core reset stops modeled transfers, clears global, host and
+  channel interrupt masks, resets receive-status and frame state, deasserts
+  the IRQ, and preserves configuration and interrupt status.  Receive and
+  transmit FIFO commands complete without additional payload work because the
+  DMA-only model has no separately modeled FIFO contents.  A focused qtest
+  covers the observable register and interrupt contract.
+:Before sending: Do not file a standalone issue without new test-oracle or
+  workload impact, a regression, or a human-authored viable fix.  Any upstream
+  implementation must be produced independently under QEMU's current
+  provenance policy and should add focused reset and in-flight-transfer tests.
+
 Rejected and research-only findings
 ------------------------------------
 

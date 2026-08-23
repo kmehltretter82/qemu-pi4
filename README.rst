@@ -27,6 +27,11 @@ edge and level event detection, and routes its three bank interrupts plus the
 all-bank interrupt to the GIC.  Qtests cover the event registers, interrupt
 grouping, reset and live migration.
 
+The on-SoC DWC2 USB controller implements core-soft-reset effects, including
+terminating modeled host transfers, clearing interrupt masks while preserving
+configuration and status, and completing receive/transmit FIFO flush commands.
+The pinned upstream Linux lab exercises those commands during normal probe.
+
 Both boards expose the BCM2711 PCIe root complex and the fixed VIA VL805 xHCI
 controller used for their external USB ports.  The model includes private PCI
 DMA, MSI, multi-segment xHCI event rings, the VIA four-port USB 2 hub, and the

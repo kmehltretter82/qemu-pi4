@@ -197,6 +197,32 @@ active high and low level reassertion, every interrupt group, reserved bits,
 output-latch retention, persistent external input levels across reset and
 live migration with asserted events.
 
+DWC2 reset reference evidence
+-----------------------------
+
+The emulated controller reports DWC2 revision 2.94a in ``GSNPSID``.  The
+archived `DWC2 2.94 GRSTCTL register description
+<https://nest-open-source.googlesource.com/manifest_repos/u-boot/+/5e15fb1fe70ac2857e056ad5d238ad8e3373fdb5/drivers/usb/host/dwc_otg_regs_294.h>`__
+states that a core soft reset returns the state machines to idle, terminates
+AHB and USB transactions, clears interrupt-generating mask bits, preserves
+interrupt status and configuration, flushes the FIFOs and self-clears.  The
+same description defines receive-FIFO flush and selective or all-transmit-FIFO
+flush as self-clearing operations.
+
+Before fork commit ``3ac780f519``, the pinned Linux 7.2 diagnostic boot issued
+two core soft resets, one all-transmit-FIFO flush and one receive-FIFO flush
+during ordinary DWC2 probe.  QEMU logged all four operations as unimplemented.
+After the change, the diagnostic boots for both ``raspi4b`` and ``raspi400``
+contained no DWC2 unimplemented message and retained every Linux acceptance
+check.  The complete 32-subtest Pi 4 qtest target and five-subtest Pi 400
+target also passed.
+
+The focused DWC2 qtest checks mask clearing, IRQ deassertion, host-channel
+disable, configuration and status preservation, and immediate completion of
+receive and all-transmit FIFO commands.  Raw DWC2 register writes were not
+made on the real Pi 400 for this milestone; the revision-matched register
+contract and the upstream Linux driver path establish the expected behavior.
+
 Capture and compare a full Linux system
 ---------------------------------------
 
