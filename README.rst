@@ -32,6 +32,12 @@ terminating modeled host transfers, clearing interrupt masks while preserving
 configuration and status, and completing receive/transmit FIFO flush commands.
 The pinned upstream Linux lab exercises those commands during normal probe.
 
+The VideoCore property interface tracks firmware clock and power-domain state,
+accepts Linux's reboot notification, and resets pending mailbox responses
+cleanly.  The state survives live migration.  Clock and domain values are a
+firmware control-plane model only: they do not yet gate CPUs, clocks, or device
+MMIO in the emulator.
+
 Both boards expose the BCM2711 PCIe root complex and the fixed VIA VL805 xHCI
 controller used for their external USB ports.  The model includes private PCI
 DMA, MSI, multi-segment xHCI event rings, the VIA four-port USB 2 hub, and the

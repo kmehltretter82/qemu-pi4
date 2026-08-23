@@ -501,6 +501,89 @@ QP4-UP-026: DWC2 core reset and FIFO flush effects are unimplemented
   implementation must be produced independently under QEMU's current
   provenance policy and should add focused reset and in-flight-transfer tests.
 
+QP4-UP-027: firmware property child state survives a system reset
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate; E1, with no demonstrated E2 or E3 failure
+:Fork commit: ``3e05eb0ad0ac5af3abfd7ad6daa8a7e7bec62f01``
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Environment: ``qemu-system-aarch64`` 11.1.50
+  (``v11.1.0-453-geea8fe61b8``), native arm64 build on macOS 14.8.7,
+  ``-machine raspi4b -accel qtest``.  No guest CPU instructions are involved.
+:Contract: QEMU's :doc:`../../devel/reset` documentation defines cold reset as
+  restoring the initial state corresponding to the start of QEMU.  The
+  property child is a sysbus device and already contains a reset helper which
+  clears its ``pending`` state, but current upstream calls that helper only
+  from ``realize`` and does not register it as a device reset method.
+:Observed issue: A direct qtest run filled the 32-entry ARM response mailbox,
+  issued one more valid property request so its child response remained
+  pending, requested an ordinary guest reset through the emulated Pi watchdog,
+  and submitted a valid ``GET_CLOCK_STATE`` request after reset.  Unmodified
+  current master returned the empty-mailbox value ``0x0000000f`` instead of
+  the expected property response address ``0x00001008``.  The fork returned
+  ``0x00001008``.  The stale child ``pending`` flag makes the new request wait
+  in the ARM-to-VideoCore mailbox even though the parent mailbox was reset.
+:History and impact: The helper and missing class registration date to the
+  property's initial 2016 commit ``04f1ab15b9f``; this is not a regression.
+  GitLab, qemu-devel, documentation, source-history and recent-commit searches
+  on 2026-08-23 found no exact duplicate.  The reproducer deliberately
+  saturates the mailbox before reset, and no real workload or external test
+  suite is currently known to fail, so the evidence stops at E1.
+:Reproducer: ``scripts/pi4/repro-property-reset.py`` speaks the qtest protocol
+  directly and has no dependency on fork-only devices.  On 2026-08-23 it
+  produced ``0x0000000f`` with current upstream and ``0x00001008`` with the
+  fork.  It is an AI-derived local research artifact and is not eligible for
+  upstream submission.
+:Fork change: Register the existing reset helper, lower the child IRQ, and
+  reset all fork-added property state.  A focused qtest proves failure against
+  the preserved pre-fix binary, successful service after reset, default-state
+  restoration, and migration.
+:Before sending: The user must personally inspect and rerun a minimal auditable
+  reproducer on current master, validate the source analysis, and disclose the
+  automated assistance in any report.  Do not submit this fork's AI-derived
+  code or test upstream; any patch must be independently produced by a human
+  under QEMU's live provenance policy.
+
+QP4-UP-028: firmware clock and domain state properties are incomplete
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: known limitation; E1 clock-state contract evidence and
+  normal Linux use, with no demonstrated E2 or E3 failure
+:Fork commit: ``3e05eb0ad0ac5af3abfd7ad6daa8a7e7bec62f01``
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Contract: The `Raspberry Pi mailbox property interface
+  <https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface>`__
+  defines ``GET_CLOCK_STATE`` and ``SET_CLOCK_STATE`` as an ID and state pair,
+  with bit 0 selecting on or off and bit 1 reporting a nonexistent clock.
+  Linux's firmware clock driver uses that interface.  Its Raspberry Pi power
+  driver probes ``GET_DOMAIN_STATE``, and the firmware core sends
+  ``NOTIFY_REBOOT`` from its shutdown callback.
+:Observed issue: Current upstream always reports every clock as enabled.
+  ``SET_CLOCK_STATE`` logs an explicit not-implemented message and does not
+  affect the next GET.  ``GET_DOMAIN_STATE`` and ``NOTIFY_REBOOT`` are
+  unhandled.  A pinned Linux 7.2 boot takes all three paths on both Pi 4B and
+  Pi 400, but still boots successfully; the visible effect is inconsistent
+  control-plane state and three diagnostic messages.
+:Why known limitation: The source explicitly marks the clock SET operation as
+  not implemented and has no cases for the other two optional tags.  This is
+  missing model scope rather than a regression, and Linux has no observed
+  failure.  BCM2711 devices use the separate direct PM/ASB path for functional
+  power control, so merely advertising firmware domain state does not add
+  device power gating.
+:Hardware evidence: A Pi 400 runtime capture found enabled clocks 2, 4, 9 and
+  15 and enabled firmware domains 4, 5, 7, 20 and 23.  A same-state clock SET
+  behaved consistently.  A raw V3D domain-off experiment blocked the caller
+  until reboot, so the project does not automate domain writes or claim their
+  deeper sequencing semantics.
+:Fork change: Track valid clock and domain state, report invalid IDs, accept
+  reboot notification as an explicit no-op, and reset and migrate the state.
+  This is intentionally metadata only: it does not stop vCPUs or gate device
+  MMIO.
+:Before sending: Do not open a standalone issue without new workload or test
+  impact, a regression, or independently human-authored implementation work.
+  Any upstream patch must comply with QEMU's live provenance policy and should
+  keep the shallow-model limitation explicit.
+
 Rejected and research-only findings
 ------------------------------------
 

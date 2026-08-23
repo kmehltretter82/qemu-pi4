@@ -223,6 +223,48 @@ receive and all-transmit FIFO commands.  Raw DWC2 register writes were not
 made on the real Pi 400 for this milestone; the revision-matched register
 contract and the upstream Linux driver path establish the expected behavior.
 
+Firmware property-state reference evidence
+------------------------------------------
+
+A Pi 400 capture on 2026-08-23 used ``/dev/vcio`` to query the VideoCore
+property interface.  The board ran Raspberry Pi OS kernel
+``6.18.39+rpt-rpi-v8`` with firmware
+``288930ab4712b99596f32732664aaaeb881ef1e0`` dated 2026-05-21.  Every
+two-word query returned a response header of ``0x80000008`` and echoed the
+requested ID.
+
+Clock IDs 2, 4, 9 and 15 reported enabled.  IDs 1, 3, 5 through 8 and 10
+through 14 reported disabled.  IDs 0, 16 and 17 returned the not-present bit.
+A same-state ``SET_CLOCK_STATE`` request kept V3D clock ID 5 disabled, and a
+following query confirmed the state.  These are runtime observations after
+Linux boot, not firmware-reset defaults; the fork keeps all known clocks
+initially enabled to preserve its prior guest-visible behavior.
+
+Firmware domain IDs 4, 5, 7, 20 and 23 reported enabled; IDs 0 through 24
+otherwise reported disabled.  Those enabled IDs correspond to video scaler,
+VPU1, USB, transposer and ARM.  An exploratory write of nonzero state to V3D
+domain ID 11 was followed by an enabled query, but its direct response changed
+the returned ID unexpectedly.  A subsequent attempt to disable that live
+domain left the ``/dev/vcio`` caller in uninterruptible sleep until the board
+was rebooted.  The board recovered normally.  Raw domain-state writes are
+therefore excluded from automated hardware capture, and that anomalous SET
+response is not used as a response-layout contract.
+
+Before fork commit ``3e05eb0ad0``, a pinned Linux 7.2 diagnostic boot on each
+board model logged ``SET_CLOCK_STATE`` as not implemented and
+``GET_DOMAIN_STATE`` and ``NOTIFY_REBOOT`` as unhandled.  With the change,
+both Linux boots retained the complete PCIe, VL805, MSI, USB-storage, GENET
+and Pi 400 keyboard acceptance checks, and those three property messages
+disappeared.  Four unrelated serial messages remain in each diagnostic log.
+The complete 33-subtest Pi 4B and five-subtest Pi 400 qtest targets passed;
+the Pi 4B tests also cover invalid IDs, reset defaults, a response stalled by
+a full mailbox, and migration of changed clock and domain state.
+
+The emulated state is intentionally shallow.  Property calls do not power-gate
+MMIO devices, stop vCPUs, or reproduce firmware sequencing and latency.  The
+hardware capture establishes useful IDs, state encoding and one runtime
+snapshot without claiming those deeper effects.
+
 Capture and compare a full Linux system
 ---------------------------------------
 

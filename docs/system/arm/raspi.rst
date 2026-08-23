@@ -46,8 +46,9 @@ Implemented devices
  * Broadcom GENET v5 Gigabit Ethernet controller with an external
    BCM54213PE-compatible PHY
  * MailBox controller (MBOX)
- * VideoCore firmware property interface, including firmware-controlled GPIOs
-   and the Pi 4-family VL805 initialization notification
+ * VideoCore firmware property interface, including firmware-controlled GPIOs,
+   clock and power-domain state, reboot notification, and the Pi 4-family
+   VL805 initialization notification
  * Peripheral SPI controller (SPI)
  * Broadcom Serial Controller (I2C)
  * BCM2711 RNG200 random number generator, including its 16-word FIFO,
@@ -137,6 +138,31 @@ This is a DMA-only host model.  It has no separately observable FIFO payload,
 so a FIFO-flush command has no additional buffered data to discard.  Slave
 mode FIFO accesses and the DWC2 gadget/device register banks remain
 unimplemented.
+
+Firmware clock and power state
+------------------------------
+
+The VideoCore property interface stores the enable state reported by
+``GET_CLOCK_STATE`` and changed by ``SET_CLOCK_STATE``.  Known clocks start
+enabled, preserving the behavior of the earlier stateless implementation;
+invalid clock IDs report the firmware's not-present bit.
+
+``GET_DOMAIN_STATE`` and ``SET_DOMAIN_STATE`` similarly track the 23 firmware
+power-domain IDs.  The initial enabled set is video scaler, VPU1, USB,
+transposer and ARM, matching the state captured from the project's Pi 400
+after a normal Linux boot.  ``NOTIFY_REBOOT`` is accepted as an explicit
+no-op because QEMU has no VideoCore firmware execution state to quiesce.
+
+Clock and domain state resets with the machine and migrates with the VM.  A
+machine reset also discards a property response stalled behind a full ARM
+mailbox and lowers its child interrupt, so a request from the new boot cannot
+be blocked by the previous one.
+
+This is a control-plane compatibility model, not functional clock or power
+gating.  Turning off the ARM clock does not stop a vCPU, and turning off a
+domain does not hide, reset or suspend the corresponding QEMU device.  The
+captured domain defaults are a useful runtime reference, not a claim about
+every Raspberry Pi firmware version or every point during boot.
 
 Ethernet
 --------
