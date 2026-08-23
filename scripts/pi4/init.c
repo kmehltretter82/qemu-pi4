@@ -35,6 +35,7 @@
 #define USB_STORAGE_PRODUCT "0001"
 #define USB_STORAGE_OFFSET (1024 * 1024)
 #define USB_STORAGE_TRANSFER_SIZE (256 * 1024)
+#define HWRNG_SAMPLE_SIZE 64
 #define SYSFS_WAIT_ATTEMPTS 100
 #define SYSFS_WAIT_US 100000
 
@@ -544,6 +545,77 @@ static int rebind_vl805(int storage_expected)
     return 0;
 }
 
+static int verify_hwrng(void)
+{
+    unsigned char sample[HWRNG_SAMPLE_SIZE];
+    size_t offset = 0;
+    int attempts = 0;
+    int fd;
+
+    if (!value_equals("/sys/class/misc/hw_random/rng_current",
+                      "iproc-rng200")) {
+        return -1;
+    }
+
+    fd = open("/dev/hwrng", O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+        return -1;
+    }
+    while (offset < sizeof(sample) && attempts < SYSFS_WAIT_ATTEMPTS) {
+        ssize_t count = read(fd, sample + offset, sizeof(sample) - offset);
+
+        if (count > 0) {
+            offset += count;
+            continue;
+        }
+        if (count < 0 && errno != EAGAIN && errno != EINTR) {
+            break;
+        }
+        attempts++;
+        usleep(SYSFS_WAIT_US);
+    }
+    close(fd);
+    return offset == sizeof(sample) ? 0 : -1;
+}
+
+static int cpu_thermal_temperature(long *temperature)
+{
+    struct dirent *entry;
+    DIR *directory = opendir("/sys/class/thermal");
+
+    if (!directory) {
+        return -1;
+    }
+    while ((entry = readdir(directory))) {
+        char path[PATH_MAX];
+        char value[128];
+        char trailing;
+        long parsed;
+
+        if (strncmp(entry->d_name, "thermal_zone", 12)) {
+            continue;
+        }
+        snprintf(path, sizeof(path), "/sys/class/thermal/%s/type",
+                 entry->d_name);
+        if (!value_equals(path, "cpu-thermal")) {
+            continue;
+        }
+        snprintf(path, sizeof(path), "/sys/class/thermal/%s/temp",
+                 entry->d_name);
+        if (read_value(path, value, sizeof(value))) {
+            continue;
+        }
+        if (sscanf(value, "%ld%c", &parsed, &trailing) != 1) {
+            continue;
+        }
+        *temperature = parsed;
+        closedir(directory);
+        return 0;
+    }
+    closedir(directory);
+    return -1;
+}
+
 static int model_is_pi400(void)
 {
     char model[128];
@@ -632,6 +704,7 @@ int main(void)
 {
     char storage_device[PATH_MAX] = { 0 };
     struct utsname uts;
+    long temperature = 0;
     unsigned long interrupts_before_rebind;
     int failures = 0;
     int pi400;
@@ -658,6 +731,16 @@ int main(void)
 
     pi400 = model_is_pi400();
     storage_test = cmdline_has_word("pi4lab.usb_storage=1");
+    report_check("RNG200 selected and /dev/hwrng supplies 64 bytes",
+                 verify_hwrng(), &failures);
+    if (!cpu_thermal_temperature(&temperature)) {
+        printf("PI4-LAB: cpu-thermal temperature: %ld mC\n", temperature);
+        report_check("BCM2711 cpu-thermal reports 35050 mC",
+                     temperature != 35050, &failures);
+    } else {
+        report_check("BCM2711 cpu-thermal reports 35050 mC", 1,
+                     &failures);
+    }
     report_check("BCM2711 PCIe root port 14e4:2711",
                  wait_for_pci_identity(PCI_ROOT_BDF, "0x14e4", "0x2711"),
                  &failures);

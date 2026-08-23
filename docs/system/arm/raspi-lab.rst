@@ -69,17 +69,20 @@ image, attaches it as a QEMU ``46f4:0001`` mass-storage device on VIA hub port
 one, and deletes it when QEMU exits.  The guest receives no physical disk or
 user-supplied disk image; only that temporary file is modified.
 
-The initramfs verifies the exact BCM2711 root-port and VL805 PCI identities,
-both xHCI root hubs, the VIA ``2109:3431`` hub, and nonzero MSI activity.  It
-writes and reads a deterministic 256 KiB pattern on the disposable USB disk
-after flushing the guest block cache.  It then unbinds and rebinds the xHCI
-driver, requires the complete USB topology and block device to re-enumerate,
-checks that the first pattern survived, and performs a second write/read
-cycle.  On ``raspi400`` it also requires the ``04d9:0007`` integrated keyboard
-and both of its HID interfaces; ``raspi4b`` correctly omits those checks.  It
-prints basic kernel and network state, the assigned IPv4 address, and the
-marker ``PI4-LAB: upstream Linux boot successful``, then requests reboot.  The
-runner uses ``-no-reboot``, so that successful request terminates QEMU.
+The initramfs verifies that upstream Linux selected ``iproc-rng200``, obtains
+64 bytes through ``/dev/hwrng``, and reports the modeled 35050-millidegree
+reading through its ``cpu-thermal`` zone.  It also verifies the exact BCM2711
+root-port and VL805 PCI identities, both xHCI root hubs, the VIA
+``2109:3431`` hub, and nonzero MSI activity.  It writes and reads a
+deterministic 256 KiB pattern on the disposable USB disk after flushing the
+guest block cache.  It then unbinds and rebinds the xHCI driver, requires the
+complete USB topology and block device to re-enumerate, checks that the first
+pattern survived, and performs a second write/read cycle.  On ``raspi400`` it
+also requires the ``04d9:0007`` integrated keyboard and both of its HID
+interfaces; ``raspi4b`` correctly omits those checks.  It prints basic kernel
+and network state, the assigned IPv4 address, and the marker ``PI4-LAB:
+upstream Linux boot successful``, then requests reboot.  The runner uses
+``-no-reboot``, so that successful request terminates QEMU.
 
 Linux can print a failed ``SYNCHRONIZE CACHE`` command while the deliberate
 driver unbind tears down the USB transport.  The test flushes and closes its
@@ -129,6 +132,35 @@ The Pi firmware files themselves are not distributed by this project. QEMU's
 ``raspi400`` machine uses the unmodified upstream Pi 400 DTB; the kernel
 ``Image`` remains identical on both systems, while the two initramfs images
 differ only in their test/return behavior.
+
+RNG200 and thermal reference evidence
+-------------------------------------
+
+The models use a non-writing Pi 400 hardware capture made on 2026-08-23,
+rather than values inferred only from Linux.  With the firmware-configured
+RNG enabled, the capture observed control ``0x00007fff``, revision
+``0x00040001``, a 16-word full FIFO reported as ``0x40001010``, and the empty
+state ``0x80001000`` after 16 data reads.  An additional empty read returned
+the stale data latch and set interrupt-status bit 4.  At rate selector 3, the
+FIFO progressed from one word immediately to four words after a nominal
+10-microsecond sleep, seven after a nominal 100-microsecond sleep, and full
+after a one-millisecond sleep.  This is consistent with the documented
+one-Mbit/s selector and a 32-microsecond period per 32-bit word once remote
+scheduling overhead is considered; the emulated timer uses the exact nominal
+rates rather than those coarse SSH measurement intervals.
+
+The same capture read AVS temperature status values ``0x00010701`` and
+``0x00010702`` while Linux reported 35537 and 35050 millidegrees Celsius.
+Removing valid bits 16 and 10 leaves raw codes 769 and 770; applying the
+BCM2711 device-tree formula ``-487 * raw + 410040`` reproduces both Linux
+values exactly.  These observations establish the fork model's register
+contract, but the previous absence of either device remains an enhancement,
+not an upstream QEMU correctness bug.
+
+On 2026-08-23, the pinned upstream Linux 7.2 acceptance image passed on both
+``raspi4b`` and ``raspi400`` with the RNG200 and thermal checks enabled.  The
+same boots also retained all PCIe, VL805, USB-storage, MSI, GENET, and Pi 400
+keyboard acceptance gates.
 
 Capture and compare a full Linux system
 ---------------------------------------

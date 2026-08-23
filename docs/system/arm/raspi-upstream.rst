@@ -473,13 +473,15 @@ invent it.
 Known feature gaps, not bug candidates
 --------------------------------------
 
-The absence of V3D 4.2, RNG200, thermal, and HDMI models, the unimplemented
-BCM2711 PCIe controller-event path, and missing Pi 400 consumer-control event
-production are tracked as implementation scope in :doc:`raspi`.  These are
-upstream enhancement opportunities, but should not be described as
-correctness bugs merely because the models or optional behavior do not exist.
-The fork's GENET v5, BCM2711 PCIe and VL805 models belong in the same
-enhancement category and are tracked above.
+The absence of V3D 4.2 and HDMI models, the unimplemented BCM2711 PCIe
+controller-event path, and missing Pi 400 consumer-control event production
+are tracked as implementation scope in :doc:`raspi`.  These are upstream
+enhancement opportunities, but should not be described as correctness bugs
+merely because the models or optional behavior do not exist.  The fork's
+GENET v5, BCM2711 PCIe, VL805, RNG200, and AVS thermal models belong in the
+same enhancement category and are tracked above or in :doc:`raspi-lab`.
+Implementing the former RNG200 and thermal gaps in this fork did not uncover a
+separate generic QEMU bug candidate.
 
 The defects found while reviewing the unmerged July 2026 PCIe series are kept
 in :doc:`raspi-pcie` and intentionally have no ``QP4-UP`` bug IDs.  They are

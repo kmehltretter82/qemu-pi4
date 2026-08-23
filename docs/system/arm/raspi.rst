@@ -49,6 +49,11 @@ Implemented devices
    and the Pi 4-family VL805 initialization notification
  * Peripheral SPI controller (SPI)
  * Broadcom Serial Controller (I2C)
+ * BCM2711 RNG200 random number generator, including its 16-word FIFO,
+   four generation rates, status and interrupt registers, soft resets, and
+   migratable refill timer and FIFO contents
+ * BCM2711 AVS thermal monitor, using the device-tree calibration and a
+   migratable, configurable temperature reading
  * BCM2711 PCIe host and root port, including dynamic outbound and inbound
    DMA windows, INTx, and MSI
  * Pi 4-family VIA VL805 PCIe xHCI personality, including the captured PCI and
@@ -71,8 +76,6 @@ Missing devices
  * Consumer-control key-event production for the Pi 400 keyboard's second HID
    interface; its identity, descriptors, enumeration and migration already
    work
- * RNG200 random number generator
- * BCM2711 thermal sensor
 
 Booting Linux from an SD image
 ------------------------------
@@ -132,3 +135,19 @@ The model implements the BCM2711 GENET v5 register layout, the external MDIO
 PHY, link state, descriptor DMA, interrupts, scatter-gather transmission and
 checksum offload.  Upstream Linux can acquire a DHCP lease through it.  MIB
 counters, wake-on-LAN and hardware receive filtering are not yet modeled.
+
+Random number and thermal sensors
+---------------------------------
+
+The upstream Linux ``iproc-rng200`` driver can select the on-SoC RNG and read
+``/dev/hwrng``.  RNG data is generated through QEMU's guest-randomness API;
+the device's already-produced FIFO data and next refill deadline migrate with
+the VM.
+
+The AVS monitor reports 35050 millidegrees Celsius by default, corresponding
+to raw code 770 and the BCM2711 device-tree calibration.  Its QOM
+``temperature`` property is exposed at
+``/machine/soc/peripherals/thermal`` in millidegrees Celsius.  Setting it
+through QMP updates the raw ten-bit reading with the sensor's 487-millidegree
+quantization.  The upstream ``bcm2711_thermal`` driver exposes the result as
+the ``cpu-thermal`` thermal zone.
