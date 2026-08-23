@@ -23,6 +23,13 @@
 #define RPI_EXP_GPIO_BASE       128
 #define RPI4_VL805_PCI_DEV_ADDR (1U << 20)
 
+#define RPI_FW_DOMAIN_DEFAULTS \
+    (BIT(RPI_FIRMWARE_VIDEO_SCALER_DOMAIN_ID) | \
+     BIT(RPI_FIRMWARE_VPU1_DOMAIN_ID) | \
+     BIT(RPI_FIRMWARE_USB_DOMAIN_ID) | \
+     BIT(RPI_FIRMWARE_TRANSPOSER_DOMAIN_ID) | \
+     BIT(RPI_FIRMWARE_ARM_DOMAIN_ID))
+
 /* https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface */
 
 static bool bcm2835_property_gpio_index(uint32_t gpio, unsigned int *index)
@@ -118,16 +125,31 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
         /* Clocks */
 
         case RPI_FWREQ_GET_CLOCK_STATE:
-            stl_le_phys(&s->dma_as, value + 16, 0x1);
-            resplen = 8;
-            break;
-
         case RPI_FWREQ_SET_CLOCK_STATE:
-            qemu_log_mask(LOG_UNIMP,
-                          "bcm2835_property: 0x%08x set clock state NYI\n",
-                          tag);
+        {
+            uint32_t id;
+            uint32_t state;
+
+            if (bufsize < 8) {
+                break;
+            }
+
+            id = ldl_le_phys(&s->dma_as, value + 12);
+            if (id == 0 || id >= RPI_FIRMWARE_NUM_CLK_ID) {
+                state = RPI_FIRMWARE_STATE_NOT_EXIST;
+            } else {
+                if (tag == RPI_FWREQ_SET_CLOCK_STATE) {
+                    state = ldl_le_phys(&s->dma_as, value + 16);
+                    s->clock_states = deposit32(s->clock_states, id, 1,
+                                                state &
+                                                RPI_FIRMWARE_STATE_ENABLE);
+                }
+                state = extract32(s->clock_states, id, 1);
+            }
+            stl_le_phys(&s->dma_as, value + 16, state);
             resplen = 8;
             break;
+        }
 
         case RPI_FWREQ_GET_CLOCK_RATE:
         case RPI_FWREQ_GET_MAX_CLOCK_RATE:
@@ -355,6 +377,39 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
         case RPI_FWREQ_GET_THROTTLED:
             stl_le_phys(&s->dma_as, value + 12, 0);
             resplen = 4;
+            break;
+
+        /* Firmware-managed power domains */
+
+        case RPI_FWREQ_GET_DOMAIN_STATE:
+        case RPI_FWREQ_SET_DOMAIN_STATE:
+        {
+            uint32_t id;
+            uint32_t state;
+
+            if (bufsize < 8) {
+                break;
+            }
+
+            id = ldl_le_phys(&s->dma_as, value + 12);
+            if (id == 0 || id >= RPI_FIRMWARE_NUM_DOMAIN_ID) {
+                state = 0;
+            } else {
+                if (tag == RPI_FWREQ_SET_DOMAIN_STATE) {
+                    state = ldl_le_phys(&s->dma_as, value + 16);
+                    s->domain_states = deposit32(s->domain_states, id, 1,
+                                                 !!state);
+                }
+                state = extract32(s->domain_states, id, 1);
+            }
+            stl_le_phys(&s->dma_as, value + 16, state);
+            resplen = 8;
+            break;
+        }
+
+        case RPI_FWREQ_NOTIFY_REBOOT:
+            /* There is no VideoCore firmware state to quiesce in QEMU. */
+            resplen = 0;
             break;
 
         /* Firmware-controlled GPIO expander */
@@ -611,12 +666,14 @@ static const MemoryRegionOps bcm2835_property_ops = {
 
 static const VMStateDescription vmstate_bcm2835_property = {
     .name = TYPE_BCM2835_PROPERTY,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_MACADDR(macaddr, BCM2835PropertyState),
         VMSTATE_UINT32(addr, BCM2835PropertyState),
         VMSTATE_BOOL(pending, BCM2835PropertyState),
+        VMSTATE_UINT32_V(clock_states, BCM2835PropertyState, 3),
+        VMSTATE_UINT32_V(domain_states, BCM2835PropertyState, 3),
         VMSTATE_UINT32_ARRAY_V(gpio_direction, BCM2835PropertyState,
                                BCM2835_PROPERTY_GPIO_COUNT, 2),
         VMSTATE_UINT32_ARRAY_V(gpio_polarity, BCM2835PropertyState,
@@ -655,6 +712,9 @@ static void bcm2835_property_reset(DeviceState *dev)
     BCM2835PropertyState *s = BCM2835_PROPERTY(dev);
 
     s->pending = false;
+    qemu_set_irq(s->mbox_irq, 0);
+    s->clock_states = MAKE_64BIT_MASK(1, RPI_FIRMWARE_NUM_CLK_ID - 1);
+    s->domain_states = RPI_FW_DOMAIN_DEFAULTS;
     memset(s->gpio_direction, 0, sizeof(s->gpio_direction));
     memset(s->gpio_polarity, 0, sizeof(s->gpio_polarity));
     memset(s->gpio_term_en, 0, sizeof(s->gpio_term_en));
@@ -696,6 +756,7 @@ static void bcm2835_property_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_props(dc, bcm2835_property_props);
+    device_class_set_legacy_reset(dc, bcm2835_property_reset);
     dc->realize = bcm2835_property_realize;
     dc->vmsd = &vmstate_bcm2835_property;
 }

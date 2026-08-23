@@ -41,6 +41,9 @@ struct BCM2835PropertyState {
     char *command_line;
     bool pending;
 
+    uint32_t clock_states;
+    uint32_t domain_states;
+
     uint32_t gpio_direction[BCM2835_PROPERTY_GPIO_COUNT];
     uint32_t gpio_polarity[BCM2835_PROPERTY_GPIO_COUNT];
     uint32_t gpio_term_en[BCM2835_PROPERTY_GPIO_COUNT];

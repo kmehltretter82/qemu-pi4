@@ -277,6 +277,10 @@ static bool pcie_has_edu;
 
 static void gpio_set_input(unsigned int pin, int level);
 static void rng200_refill_words(unsigned int words);
+static void property_request_qtest(QTestState *qts, uint32_t tag,
+                                   const uint32_t *payload, size_t words,
+                                   size_t response_bytes);
+static uint32_t property_payload_qtest(QTestState *qts, size_t word);
 
 static bool qom_bus_has_sd_card(const char *path)
 {
@@ -1243,6 +1247,19 @@ static void test_soc_peripheral_migration(void)
     int net_sockets[2];
     int ret;
 
+    const uint32_t clock_off[] = {
+        RPI_FIRMWARE_ARM_CLK_ID, 0,
+    };
+    const uint32_t domain_on[] = {
+        RPI_FIRMWARE_V3D_DOMAIN_ID, RPI_FIRMWARE_STATE_ENABLE,
+    };
+    const uint32_t get_clock[] = {
+        RPI_FIRMWARE_ARM_CLK_ID, UINT32_MAX,
+    };
+    const uint32_t get_domain[] = {
+        RPI_FIRMWARE_V3D_DOMAIN_ID, UINT32_MAX,
+    };
+
     writel(RASPI4_GPIO_GPAREN0, GPIO_PIN30);
     writel(RASPI4_GPIO_GPAFEN0, GPIO_PIN30);
     gpio_set_input(30, 1);
@@ -1266,6 +1283,11 @@ static void test_soc_peripheral_migration(void)
         RASPI4_THERMAL_QOM_PATH, THERMAL_TEST_MC);
     g_assert(qdict_haskey(response, "return"));
     qobject_unref(response);
+
+    property_request_qtest(source, RPI_FWREQ_SET_CLOCK_STATE, clock_off,
+                           G_N_ELEMENTS(clock_off), sizeof(clock_off));
+    property_request_qtest(source, RPI_FWREQ_SET_DOMAIN_STATE, domain_on,
+                           G_N_ELEMENTS(domain_on), sizeof(domain_on));
 
     qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
     tmpdir = g_dir_make_tmp("raspi4b-soc-migration-XXXXXX", &error);
@@ -1329,6 +1351,14 @@ static void test_soc_peripheral_migration(void)
     qobject_unref(response);
     g_assert_cmphex(qtest_readl(destination, RASPI4_THERMAL_STATUS), ==,
                     THERMAL_STATUS_VALID | THERMAL_TEST_RAW);
+
+    property_request_qtest(destination, RPI_FWREQ_GET_CLOCK_STATE, get_clock,
+                           G_N_ELEMENTS(get_clock), sizeof(get_clock));
+    g_assert_cmphex(property_payload_qtest(destination, 1), ==, 0);
+    property_request_qtest(destination, RPI_FWREQ_GET_DOMAIN_STATE, get_domain,
+                           G_N_ELEMENTS(get_domain), sizeof(get_domain));
+    g_assert_cmphex(property_payload_qtest(destination, 1), ==,
+                    RPI_FIRMWARE_STATE_ENABLE);
 
     /* The FIFO payload itself, not just its count, must migrate. */
     source_word = qtest_readl(source, RASPI4_RNG200_FIFO_DATA);
@@ -1871,38 +1901,52 @@ static void test_sd_card_on_emmc2(void)
         "/machine/soc/peripherals/sdhci/sd-bus"));
 }
 
-static void property_request(uint32_t tag, const uint32_t *payload,
-                             size_t words, size_t response_bytes)
+static void property_request_qtest(QTestState *qts, uint32_t tag,
+                                   const uint32_t *payload, size_t words,
+                                   size_t response_bytes)
 {
     uint32_t payload_bytes = words * sizeof(*payload);
     uint32_t total_bytes = 24 + payload_bytes;
     uint32_t response;
     size_t i;
 
-    writel(RASPI4_PROPERTY_BUFFER, total_bytes);
-    writel(RASPI4_PROPERTY_BUFFER + 4, 0);
-    writel(RASPI4_PROPERTY_BUFFER + 8, tag);
-    writel(RASPI4_PROPERTY_BUFFER + 12, payload_bytes);
-    writel(RASPI4_PROPERTY_BUFFER + 16, 0);
+    qtest_writel(qts, RASPI4_PROPERTY_BUFFER, total_bytes);
+    qtest_writel(qts, RASPI4_PROPERTY_BUFFER + 4, 0);
+    qtest_writel(qts, RASPI4_PROPERTY_BUFFER + 8, tag);
+    qtest_writel(qts, RASPI4_PROPERTY_BUFFER + 12, payload_bytes);
+    qtest_writel(qts, RASPI4_PROPERTY_BUFFER + 16, 0);
     for (i = 0; i < words; i++) {
-        writel(RASPI4_PROPERTY_BUFFER + 20 + i * 4, payload[i]);
+        qtest_writel(qts, RASPI4_PROPERTY_BUFFER + 20 + i * 4,
+                     payload[i]);
     }
-    writel(RASPI4_PROPERTY_BUFFER + 20 + payload_bytes, 0);
+    qtest_writel(qts, RASPI4_PROPERTY_BUFFER + 20 + payload_bytes, 0);
 
-    writel(RASPI4_MBOX_WRITE,
-           RASPI4_PROPERTY_BUFFER | MBOX_CHAN_PROPERTY);
-    response = readl(RASPI4_MBOX_READ);
+    qtest_writel(qts, RASPI4_MBOX_WRITE,
+                 RASPI4_PROPERTY_BUFFER | MBOX_CHAN_PROPERTY);
+    response = qtest_readl(qts, RASPI4_MBOX_READ);
 
     g_assert_cmphex(response, ==,
                     RASPI4_PROPERTY_BUFFER | MBOX_CHAN_PROPERTY);
-    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==, 0x80000000);
-    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==,
+    g_assert_cmphex(qtest_readl(qts, RASPI4_PROPERTY_BUFFER + 4), ==,
+                    0x80000000);
+    g_assert_cmphex(qtest_readl(qts, RASPI4_PROPERTY_BUFFER + 16), ==,
                     0x80000000 | response_bytes);
+}
+
+static void property_request(uint32_t tag, const uint32_t *payload,
+                             size_t words, size_t response_bytes)
+{
+    property_request_qtest(global_qtest, tag, payload, words, response_bytes);
+}
+
+static uint32_t property_payload_qtest(QTestState *qts, size_t word)
+{
+    return qtest_readl(qts, RASPI4_PROPERTY_BUFFER + 20 + word * 4);
 }
 
 static uint32_t property_payload(size_t word)
 {
-    return readl(RASPI4_PROPERTY_BUFFER + 20 + word * 4);
+    return property_payload_qtest(global_qtest, word);
 }
 
 static void test_firmware_gpio(void)
@@ -1955,6 +1999,119 @@ static void test_firmware_dma_channels(void)
     property_request(RPI_FWREQ_GET_DMA_CHANNELS, payload,
                      G_N_ELEMENTS(payload), sizeof(payload));
     g_assert_cmphex(property_payload(0), ==, 0x07f5);
+}
+
+static void test_firmware_state_and_reboot(void)
+{
+    const uint32_t get_arm_clock[] = {
+        RPI_FIRMWARE_ARM_CLK_ID, UINT32_MAX,
+    };
+    const uint32_t set_arm_clock_off[] = {
+        RPI_FIRMWARE_ARM_CLK_ID, 0,
+    };
+    const uint32_t set_arm_clock_reserved[] = {
+        RPI_FIRMWARE_ARM_CLK_ID, ~RPI_FIRMWARE_STATE_ENABLE,
+    };
+    const uint32_t get_invalid_clock[] = {
+        RPI_FIRMWARE_NUM_CLK_ID, UINT32_MAX,
+    };
+    const uint32_t get_arm_domain[] = {
+        RPI_FIRMWARE_ARM_DOMAIN_ID, UINT32_MAX,
+    };
+    const uint32_t get_v3d_domain[] = {
+        RPI_FIRMWARE_V3D_DOMAIN_ID, UINT32_MAX,
+    };
+    const uint32_t set_v3d_domain_on[] = {
+        RPI_FIRMWARE_V3D_DOMAIN_ID, RPI_FIRMWARE_STATE_ENABLE,
+    };
+    const uint32_t set_v3d_domain_off[] = {
+        RPI_FIRMWARE_V3D_DOMAIN_ID, 0,
+    };
+    const uint32_t set_invalid_domain_on[] = {
+        0, RPI_FIRMWARE_STATE_ENABLE,
+    };
+    const uint32_t get_invalid_domain[] = {
+        RPI_FIRMWARE_NUM_DOMAIN_ID, UINT32_MAX,
+    };
+
+    /* A reset must discard a child response stalled behind a full mailbox. */
+    writel(RASPI4_PROPERTY_BUFFER, 32);
+    writel(RASPI4_PROPERTY_BUFFER + 8, RPI_FWREQ_GET_CLOCK_STATE);
+    writel(RASPI4_PROPERTY_BUFFER + 12, 8);
+    writel(RASPI4_PROPERTY_BUFFER + 20, RPI_FIRMWARE_ARM_CLK_ID);
+    writel(RASPI4_PROPERTY_BUFFER + 24, UINT32_MAX);
+    writel(RASPI4_PROPERTY_BUFFER + 28, RPI_FWREQ_PROPERTY_END);
+    for (unsigned int i = 0; i <= MBOX_SIZE; i++) {
+        writel(RASPI4_PROPERTY_BUFFER + 4, 0);
+        writel(RASPI4_PROPERTY_BUFFER + 16, 0);
+        writel(RASPI4_MBOX_WRITE,
+               RASPI4_PROPERTY_BUFFER | MBOX_CHAN_PROPERTY);
+    }
+    raspi4b_watchdog_reset();
+
+    property_request(RPI_FWREQ_GET_CLOCK_STATE, get_arm_clock,
+                     G_N_ELEMENTS(get_arm_clock), sizeof(get_arm_clock));
+    g_assert_cmphex(property_payload(1), ==, RPI_FIRMWARE_STATE_ENABLE);
+
+    property_request(RPI_FWREQ_SET_CLOCK_STATE, set_arm_clock_off,
+                     G_N_ELEMENTS(set_arm_clock_off),
+                     sizeof(set_arm_clock_off));
+    g_assert_cmphex(property_payload(1), ==, 0);
+    property_request(RPI_FWREQ_GET_CLOCK_STATE, get_arm_clock,
+                     G_N_ELEMENTS(get_arm_clock), sizeof(get_arm_clock));
+    g_assert_cmphex(property_payload(1), ==, 0);
+
+    property_request(RPI_FWREQ_SET_CLOCK_STATE, set_arm_clock_reserved,
+                     G_N_ELEMENTS(set_arm_clock_reserved),
+                     sizeof(set_arm_clock_reserved));
+    g_assert_cmphex(property_payload(1), ==, 0);
+
+    property_request(RPI_FWREQ_GET_CLOCK_STATE, get_invalid_clock,
+                     G_N_ELEMENTS(get_invalid_clock),
+                     sizeof(get_invalid_clock));
+    g_assert_cmphex(property_payload(1), ==,
+                    RPI_FIRMWARE_STATE_NOT_EXIST);
+
+    property_request(RPI_FWREQ_GET_DOMAIN_STATE, get_arm_domain,
+                     G_N_ELEMENTS(get_arm_domain), sizeof(get_arm_domain));
+    g_assert_cmphex(property_payload(1), ==, RPI_FIRMWARE_STATE_ENABLE);
+    property_request(RPI_FWREQ_GET_DOMAIN_STATE, get_v3d_domain,
+                     G_N_ELEMENTS(get_v3d_domain), sizeof(get_v3d_domain));
+    g_assert_cmphex(property_payload(1), ==, 0);
+    property_request(RPI_FWREQ_SET_DOMAIN_STATE, set_invalid_domain_on,
+                     G_N_ELEMENTS(set_invalid_domain_on),
+                     sizeof(set_invalid_domain_on));
+    g_assert_cmphex(property_payload(1), ==, 0);
+    property_request(RPI_FWREQ_GET_DOMAIN_STATE, get_invalid_domain,
+                     G_N_ELEMENTS(get_invalid_domain),
+                     sizeof(get_invalid_domain));
+    g_assert_cmphex(property_payload(1), ==, 0);
+
+    property_request(RPI_FWREQ_SET_DOMAIN_STATE, set_v3d_domain_on,
+                     G_N_ELEMENTS(set_v3d_domain_on),
+                     sizeof(set_v3d_domain_on));
+    g_assert_cmphex(property_payload(1), ==, RPI_FIRMWARE_STATE_ENABLE);
+    property_request(RPI_FWREQ_GET_DOMAIN_STATE, get_v3d_domain,
+                     G_N_ELEMENTS(get_v3d_domain), sizeof(get_v3d_domain));
+    g_assert_cmphex(property_payload(1), ==, RPI_FIRMWARE_STATE_ENABLE);
+
+    property_request(RPI_FWREQ_SET_DOMAIN_STATE, set_v3d_domain_off,
+                     G_N_ELEMENTS(set_v3d_domain_off),
+                     sizeof(set_v3d_domain_off));
+    g_assert_cmphex(property_payload(1), ==, 0);
+    property_request(RPI_FWREQ_NOTIFY_REBOOT, NULL, 0, 0);
+
+    property_request(RPI_FWREQ_SET_DOMAIN_STATE, set_v3d_domain_on,
+                     G_N_ELEMENTS(set_v3d_domain_on),
+                     sizeof(set_v3d_domain_on));
+    raspi4b_watchdog_reset();
+
+    property_request(RPI_FWREQ_GET_CLOCK_STATE, get_arm_clock,
+                     G_N_ELEMENTS(get_arm_clock), sizeof(get_arm_clock));
+    g_assert_cmphex(property_payload(1), ==, RPI_FIRMWARE_STATE_ENABLE);
+    property_request(RPI_FWREQ_GET_DOMAIN_STATE, get_v3d_domain,
+                     G_N_ELEMENTS(get_v3d_domain), sizeof(get_v3d_domain));
+    g_assert_cmphex(property_payload(1), ==, 0);
 }
 
 static void test_firmware_notify_xhci_reset(void)
@@ -2241,6 +2398,8 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/firmware_gpio", test_firmware_gpio);
     raspi4b_add_test("/raspi4b/firmware_dma_channels",
                      test_firmware_dma_channels);
+    raspi4b_add_test("/raspi4b/firmware/state_and_reboot",
+                     test_firmware_state_and_reboot);
     raspi4b_add_test("/raspi4b/firmware/notify_xhci_reset",
                      test_firmware_notify_xhci_reset);
     raspi4b_add_test("/raspi4b/pcie/root_config", test_pcie_root_config);
