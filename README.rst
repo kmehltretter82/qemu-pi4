@@ -27,6 +27,11 @@ edge and level event detection, and routes its three bank interrupts plus the
 all-bank interrupt to the GIC.  Qtests cover the event registers, interrupt
 grouping, reset and live migration.
 
+The BCM2835 AUX mini UART models its supported RTS control and CTS status
+bits, forwards modem-line state to capable character backends, and restores
+FIFO, interrupt, IRQ and modem-control defaults on a cold reset.  Its RTS
+control state survives live migration.
+
 The on-SoC DWC2 USB controller implements core-soft-reset effects, including
 terminating modeled host transfers, clearing interrupt masks while preserving
 configuration and status, and completing receive/transmit FIFO flush commands.

@@ -39,7 +39,8 @@ Implemented devices
  * System Timer
  * GPIO controller, including all 58 input/output lines, edge and level event
    detection, and the three bank interrupts plus the all-bank interrupt
- * Serial ports (BCM2835 AUX - 16550 based - and PL011)
+ * Serial ports (BCM2835 AUX - 16550 based - and PL011), including the mini
+   UART's supported RTS control and CTS status bits
  * Frame Buffer
  * Arasan eMMC2 SD/MMC host controller and external SD card
  * USB2 host controller (DWC2 and MPHI)
@@ -123,6 +124,29 @@ snapshot writes::
 Ports ``1.1`` through ``1.3`` are free on both machines.  Port ``1.4`` is also
 free on ``raspi4b`` but contains the integrated keyboard on ``raspi400``.
 Remove ``snapshot=on`` only when writes to the host image should persist.
+
+Mini UART modem control and reset
+---------------------------------
+
+The BCM2835 AUX mini UART is 16550-like rather than a complete 16550.  The
+model implements the device's one modem-control output and one modem-status
+input: ``AUX_MU_MCR`` bit 1 controls active-low RTS, and ``AUX_MU_MSR`` bit 4
+reports active-low CTS.  Unsupported bits are ignored and read as zero.  When
+the selected QEMU character backend supports serial modem controls, RTS and
+CTS are passed through its ``TIOCM`` interface; otherwise CTS retains the
+documented reset status.
+
+A cold reset discards received FIFO data, clears the interrupt enable and
+derived interrupt state, lowers the GIC input, resets RTS control, and lets a
+previously back-pressured character backend send input again.  The FIFO,
+interrupt and RTS-control state migrates with the VM, and post-load processing
+reconstructs the IRQ and external RTS output.
+
+Line control, the scratch and baud registers, automatic flow control and the
+two auxiliary SPI controllers remain unimplemented.  The shared auxiliary
+enable and extra-control registers also retain the earlier simplified
+always-enabled and transmit/receive-enabled behavior; GPIO pin-mux timing is
+not modeled.
 
 DWC2 core reset
 ---------------

@@ -584,6 +584,89 @@ QP4-UP-028: firmware clock and domain state properties are incomplete
   Any upstream patch must comply with QEMU's live provenance policy and should
   keep the shallow-model limitation explicit.
 
+QP4-UP-029: BCM2835 AUX UART interrupt state survives a system reset
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate; E1, with no demonstrated E2 or E3 failure
+:Fork commit: ``4f78fe1e54f5ea625a1298821df563f8d2a90b57``
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Environment: ``qemu-system-aarch64`` 11.1.50
+  (``v11.1.0-453-geea8fe61b8``), native arm64 build on macOS 14.8.7,
+  ``-machine raspi4b -accel qtest``.  No guest CPU instructions are involved.
+:Contract: QEMU's :doc:`../../devel/reset` documentation defines cold reset as
+  restoring the initial state corresponding to the start of QEMU.  The AUX
+  UART is a sysbus device, but current upstream registers no reset method for
+  it.
+:Observed issue: A direct qtest run observed the startup values ``IER=0xc0``
+  and ``AUX_IRQ=0``, enabled the model's always-ready transmit interrupt to
+  obtain ``IER=0xc2`` and ``AUX_IRQ=1``, and requested an ordinary cold reset
+  through the emulated Pi watchdog.  Unmodified current master still returned
+  ``IER=0xc2`` and ``AUX_IRQ=1`` after reset; the fork returned the initial
+  ``IER=0xc0`` and ``AUX_IRQ=0`` and accepted a new interrupt cycle.
+:History and impact: The missing reset method dates to the device's initial
+  2016 commit ``97398d900ca`` and is not a regression.  GitLab, qemu-devel,
+  source-history and recent-commit searches on 2026-08-23 found no exact
+  duplicate.  The reproducer is synthetic, and no maintained guest or
+  external test suite is currently known to fail, so the evidence stops at
+  E1.
+:Reproducer: ``scripts/pi4/repro-aux-reset.py`` speaks the qtest protocol
+  directly and has no dependency on fork-only devices.  On 2026-08-23 it
+  exited 1 with the current-upstream state above and 0 with the fork.  It is
+  an AI-derived local research artifact and is not eligible for upstream
+  submission.
+:Fork change: Add a device reset which clears FIFO contents and positions,
+  interrupt enable and derived state, the IRQ output and modem control.  The
+  qtest covers asserted GIC SPI 93 across reset, register defaults and reuse
+  after reset; migration post-load processing also reconstructs the derived
+  IRQ output.
+:Before sending: The user must personally inspect and rerun a minimal auditable
+  reproducer on current master, validate the source analysis, and disclose the
+  automated assistance in any report.  Do not submit this fork's AI-derived
+  code or test upstream; any patch must be independently produced by a human
+  under QEMU's live provenance policy.
+
+QP4-UP-030: BCM2835 AUX UART modem registers are incomplete
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: known limitation; E1 register-contract evidence and normal
+  Linux use, with no demonstrated E2 or E3 failure
+:Fork commit: ``4f78fe1e54f5ea625a1298821df563f8d2a90b57``
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Contract: `BCM2711 ARM Peripherals
+  <https://datasheets.raspberrypi.com/bcm2711/bcm2711-peripherals.pdf>`__
+  section 2.2 says unsupported 16550 bits are ignored and read as zero.  Its
+  MCR table defines bit 1 as read/write active-low RTS with reset value zero;
+  its MSR table defines bit 4 as the inverse of the CTS input with reset value
+  one.  The maintained Linux BCM2835 AUX driver identifies RTS as the only MCR
+  flag.
+:Observed issue: Current upstream explicitly logs MCR reads and writes and MSR
+  reads as unimplemented.  A direct qtest write of all ones to MCR read back
+  zero instead of the required supported-bit value ``0x2``.  A pinned Linux
+  7.2 boot writes MCR during ordinary AUX serial initialization and produces
+  one unimplemented-access message on both Pi 4B and Pi 400, but continues to
+  boot successfully.
+:Why known limitation: The source header has advertised line and modem control
+  as unimplemented since 2016.  `QEMU issue 2591
+  <https://gitlab.com/qemu-project/qemu/-/work_items/2591>`__ already includes
+  the Linux MCR diagnostic.  A `2019 RFC
+  <https://patchew.org/QEMU/20190820123417.27930-1-philmd%40redhat.com/>`__
+  proposed replacing the device with a generic 16550; review instead favored
+  improving the actual mini-UART model.  A new issue containing only the
+  missing-register observation would therefore add little.
+:Hardware evidence: A read-only Pi 400 runtime snapshot found
+  ``AUX_ENABLES=0`` and zero in every sampled mini-UART register, including
+  MCR and MSR.  Linux had disabled the shared block, so this snapshot does not
+  override the documented reset values or establish active modem-line state.
+:Fork change: Store only the supported RTS bit, report CTS from a capable
+  character backend with the documented reset fallback, propagate RTS through
+  the backend's modem-control interface, reset the output and migrate its
+  control state.  Automatic flow control, GPIO pin muxing and shared-block
+  power gating remain outside this change.
+:Before sending: Do not open a duplicate issue without a new workload failure,
+  test-oracle impact or independently human-authored implementation.  Any
+  upstream code and tests must be produced independently under QEMU's live
+  provenance policy.
+
 Rejected and research-only findings
 ------------------------------------
 

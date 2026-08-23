@@ -197,6 +197,43 @@ active high and low level reassertion, every interrupt group, reserved bits,
 output-latch retention, persistent external input levels across reset and
 live migration with asserted events.
 
+AUX mini-UART reference evidence
+--------------------------------
+
+`BCM2711 ARM Peripherals
+<https://datasheets.raspberrypi.com/bcm2711/bcm2711-peripherals.pdf>`__,
+section 2.2, describes the AUX mini UART as 16550-like but not 16550
+compatible.  Unsupported 16550 bits are ignored and read as zero.  In the
+modem registers, ``MCR`` bit 1 is the active-low RTS control with reset value
+zero, while ``MSR`` bit 4 is the inverse of the CTS input with reset value one.
+The upstream Linux BCM2835 AUX 8250 driver likewise documents RTS as the only
+MCR flag and writes that register during normal serial initialization.
+
+A non-writing Pi 400 capture on 2026-08-23 found that the running Raspberry
+Pi OS kernel had disabled the shared block: ``AUX_ENABLES``, ``IER``, ``IIR``,
+``MCR``, ``LSR``, ``MSR`` and ``CNTL`` all read zero.  That is useful evidence
+of runtime clock and block gating, which QEMU does not yet model; it is not a
+power-on-reset oracle.  The capture itself made no AUX register writes.
+
+Against unmodified current QEMU master
+``eea8fe61b8be8f3016e522e6af24924a0266ca95``, a direct qtest sequence read
+startup ``IER=0xc0`` and ``IRQ=0``, enabled the always-ready transmit
+interrupt to obtain ``IER=0xc2`` and ``IRQ=1``, and requested a cold reset
+through the Pi watchdog.  After reset the same stale ``IER=0xc2`` and
+``IRQ=1`` remained.  The fork restores ``IER=0xc0``, ``IRQ=0`` and ``MCR=0``.
+The reusable ``scripts/pi4/repro-aux-reset.py`` research aid exits 1 with
+current upstream and 0 with this fork.
+
+Before fork commit ``4f78fe1e54``, each pinned Linux 7.2 diagnostic boot
+logged one unsupported ``AUX_MU_MCR_REG`` write in addition to three PL011
+messages.  After the change, both boards retain all PCIe, VL805, MSI,
+USB-storage, GENET and Pi 400 keyboard checks, and only the three PL011
+messages remain.  The complete focused gate passes 34 Pi 4B qtests, five Pi
+400 qtests, all three offline functional boots and all eight lab-tool tests.
+The AUX qtest covers reserved-bit masking, RTS and CTS register values, GIC
+interrupt assertion and cold-reset deassertion, reuse after reset and migrated
+RTS-control state.
+
 DWC2 reset reference evidence
 -----------------------------
 
@@ -255,7 +292,7 @@ board model logged ``SET_CLOCK_STATE`` as not implemented and
 ``GET_DOMAIN_STATE`` and ``NOTIFY_REBOOT`` as unhandled.  With the change,
 both Linux boots retained the complete PCIe, VL805, MSI, USB-storage, GENET
 and Pi 400 keyboard acceptance checks, and those three property messages
-disappeared.  Four unrelated serial messages remain in each diagnostic log.
+disappeared.  Three unrelated PL011 messages remain in each diagnostic log.
 The complete 33-subtest Pi 4B and five-subtest Pi 400 qtest targets passed;
 the Pi 4B tests also cover invalid IDs, reset defaults, a response stalled by
 a full mailbox, and migration of changed clock and domain state.
