@@ -12,6 +12,8 @@
 #include "hw/arm/bcm2835_peripherals.h"
 #include "hw/sd/sdhci.h"
 #include "hw/gpio/bcm2838_gpio.h"
+#include "hw/misc/bcm2838_rng200.h"
+#include "hw/misc/bcm2838_thermal.h"
 #include "hw/net/bcm2838_genet.h"
 #include "hw/pci-host/bcm2711.h"
 
@@ -76,6 +78,8 @@ struct BCM2838PeripheralState {
 
     SDHCIState emmc2;
     BCM2838GpioState gpio;
+    BCM2838Rng200State rng200;
+    BCM2838ThermalState thermal;
     BCM2838GenetState genet;
     BCM2711PcieHostState pcie;
 

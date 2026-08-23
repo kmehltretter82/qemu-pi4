@@ -50,6 +50,38 @@
 #define SPI0_CS_INTD              (1U << 9)
 #define SPI0_CS_TA                (1U << 7)
 
+#define RASPI4_RNG200_BASE        0xfe104000
+#define RASPI4_RNG200_CTRL        (RASPI4_RNG200_BASE + 0x00)
+#define RASPI4_RNG200_SOFT_RESET  (RASPI4_RNG200_BASE + 0x04)
+#define RASPI4_RNG200_TOTAL_COUNT (RASPI4_RNG200_BASE + 0x0c)
+#define RASPI4_RNG200_TOTAL_LIMIT (RASPI4_RNG200_BASE + 0x10)
+#define RASPI4_RNG200_REVISION    (RASPI4_RNG200_BASE + 0x14)
+#define RASPI4_RNG200_INT_STATUS  (RASPI4_RNG200_BASE + 0x18)
+#define RASPI4_RNG200_INT_ENABLE  (RASPI4_RNG200_BASE + 0x1c)
+#define RASPI4_RNG200_FIFO_DATA   (RASPI4_RNG200_BASE + 0x20)
+#define RASPI4_RNG200_FIFO_COUNT  (RASPI4_RNG200_BASE + 0x24)
+#define RASPI4_RNG200_GIC_IRQ     125
+#define RNG200_CTRL_ENABLE        (1U << 0)
+#define RNG200_CTRL_RING12        (1U << 12)
+#define RNG200_CTRL_RATE_1MHZ     (3U << 13)
+#define RNG200_INT_TOTAL_LIMIT    (1U << 0)
+#define RNG200_INT_FIFO_FULL      (1U << 2)
+#define RNG200_INT_FIFO_UNDERRUN  (1U << 4)
+#define RNG200_INT_STARTUP        (1U << 17)
+#define RNG200_FIFO_THRESHOLD     (16U << 8)
+#define RNG200_FIFO_FULL          (1U << 30)
+#define RNG200_FIFO_EMPTY         (1U << 31)
+#define RNG200_REFILL_8MHZ_NS     4000
+#define RNG200_REFILL_1MHZ_NS     32000
+
+#define RASPI4_THERMAL_STATUS     0xfd5d2200
+#define RASPI4_THERMAL_QOM_PATH   "/machine/soc/peripherals/thermal"
+#define THERMAL_STATUS_VALID      ((1U << 16) | (1U << 10))
+#define THERMAL_DEFAULT_RAW       770
+#define THERMAL_DEFAULT_MC        35050
+#define THERMAL_TEST_RAW          760
+#define THERMAL_TEST_MC           39920
+
 #define RASPI4_GENET_BASE             0xfd580000
 #define RASPI4_GENET_REV              (RASPI4_GENET_BASE + 0x0000)
 #define RASPI4_GENET_INTRL2_0         (RASPI4_GENET_BASE + 0x0200)
@@ -209,6 +241,8 @@
 static int genet_test_socket = -1;
 #endif
 static bool pcie_has_edu;
+
+static void rng200_refill_words(unsigned int words);
 
 static bool qom_bus_has_sd_card(const char *path)
 {
@@ -1066,7 +1100,7 @@ static void test_pcie_vl805_multisegment_event_ring(void)
 }
 
 #ifndef _WIN32
-static void pcie_wait_for_migration(QTestState *qts)
+static void raspi4b_wait_for_migration(QTestState *qts)
 {
     int64_t deadline = g_get_monotonic_time() + 30 * G_TIME_SPAN_SECOND;
 
@@ -1128,7 +1162,7 @@ static void test_pcie_vl805_multisegment_migration(void)
 
     qtest_qmp_assert_success(source,
         "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
-    pcie_wait_for_migration(source);
+    raspi4b_wait_for_migration(source);
 
     if (pcie_has_edu) {
         g_string_append(cmd_line,
@@ -1142,7 +1176,7 @@ static void test_pcie_vl805_multisegment_migration(void)
     g_string_append_printf(cmd_line, " -incoming %s", uri);
     destination = qtest_init(cmd_line->str);
     close(net_sockets[1]);
-    pcie_wait_for_migration(destination);
+    raspi4b_wait_for_migration(destination);
 
     /* The next event must use the migrated segment and producer index. */
     g_assert_cmphex(qtest_readq(destination,
@@ -1153,6 +1187,102 @@ static void test_pcie_vl805_multisegment_migration(void)
     g_assert_false(qtest_readl(destination,
                               RASPI4_PCIE_VL805_CPU_BAR +
                               VL805_XHCI_USBSTS) & VL805_XHCI_USBSTS_HCE);
+
+    qtest_quit(destination);
+    close(net_sockets[0]);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+static void test_rng200_and_thermal_migration(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autoptr(GString) cmd_line = g_string_new("-machine raspi4b");
+    QTestState *source = global_qtest;
+    QTestState *destination;
+    uint32_t source_word;
+    uint32_t destination_word;
+    QDict *response;
+    int net_sockets[2];
+    int ret;
+
+    writel(RASPI4_RNG200_TOTAL_LIMIT, 64);
+    writel(RASPI4_RNG200_INT_ENABLE, RNG200_INT_STARTUP);
+    writel(RASPI4_RNG200_CTRL,
+           RNG200_CTRL_RATE_1MHZ | RNG200_CTRL_ENABLE);
+    rng200_refill_words(4);
+    g_assert_cmphex(readl(RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_THRESHOLD | 4);
+    g_assert_cmphex(readl(RASPI4_RNG200_TOTAL_COUNT), ==, 128);
+
+    response = qtest_qmp(source,
+        "{ 'execute': 'qom-set', 'arguments': { 'path': %s, "
+        "'property': 'temperature', 'value': %d } }",
+        RASPI4_THERMAL_QOM_PATH, THERMAL_TEST_MC);
+    g_assert(qdict_haskey(response, "return"));
+    qobject_unref(response);
+
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("raspi4b-rng-migration-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    raspi4b_wait_for_migration(source);
+
+    if (pcie_has_edu) {
+        g_string_append(cmd_line,
+                        " -device edu,id=edu0,bus=pcie.1,addr=1,"
+                        "dma_mask=0xffffffffffffffff");
+    }
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
+    g_assert_cmpint(ret, !=, -1);
+    g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
+                           net_sockets[1]);
+    g_string_append_printf(cmd_line, " -incoming %s", uri);
+    destination = qtest_init(cmd_line->str);
+    close(net_sockets[1]);
+    raspi4b_wait_for_migration(destination);
+
+    g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_CTRL), ==,
+                    RNG200_CTRL_RATE_1MHZ | RNG200_CTRL_ENABLE);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_TOTAL_COUNT), ==,
+                    128);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_TOTAL_LIMIT), ==,
+                    64);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_INT_ENABLE), ==,
+                    RNG200_INT_STARTUP);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_THRESHOLD | 4);
+    response = qtest_qmp(destination,
+        "{ 'execute': 'qom-get', 'arguments': { 'path': %s, "
+        "'property': 'temperature' } }", RASPI4_THERMAL_QOM_PATH);
+    g_assert(qdict_haskey(response, "return"));
+    g_assert_cmpint(qdict_get_int(response, "return"), ==, THERMAL_TEST_MC);
+    qobject_unref(response);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_THERMAL_STATUS), ==,
+                    THERMAL_STATUS_VALID | THERMAL_TEST_RAW);
+
+    /* The FIFO payload itself, not just its count, must migrate. */
+    source_word = qtest_readl(source, RASPI4_RNG200_FIFO_DATA);
+    destination_word = qtest_readl(destination, RASPI4_RNG200_FIFO_DATA);
+    g_assert_cmphex(destination_word, ==, source_word);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_THRESHOLD | 3);
+
+    /* The pending one-word refill deadline must migrate too. */
+    qtest_qmp_assert_success(destination, "{ 'execute': 'cont' }");
+    qtest_clock_step_next(destination);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_THRESHOLD | 4);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_TOTAL_COUNT), ==,
+                    160);
 
     qtest_quit(destination);
     close(net_sockets[0]);
@@ -1372,6 +1502,140 @@ static void test_spi0_interrupt(void)
     g_assert_true(get_irq(RASPI4_SPI0_GIC_IRQ));
     writel(RASPI4_SPI0_CS, 0);
     g_assert_false(get_irq(RASPI4_SPI0_GIC_IRQ));
+}
+
+static void rng200_refill_words(unsigned int words)
+{
+    for (unsigned int i = 0; i < words; i++) {
+        qtest_clock_step(global_qtest, RNG200_REFILL_1MHZ_NS);
+    }
+}
+
+static void test_rng200_fifo_and_interrupts(void)
+{
+    uint32_t last_word = 0;
+
+    g_assert_cmphex(readl(RASPI4_RNG200_CTRL), ==, 0);
+    g_assert_cmphex(readl(RASPI4_RNG200_REVISION), ==, 0x00040001);
+    g_assert_cmphex(readl(RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_EMPTY | RNG200_FIFO_THRESHOLD);
+
+    /* Empty reads return the stale data latch and record an underrun. */
+    g_assert_cmphex(readl(RASPI4_RNG200_FIFO_DATA), ==, 0);
+    g_assert_true(readl(RASPI4_RNG200_INT_STATUS) &
+                  RNG200_INT_FIFO_UNDERRUN);
+    writel(RASPI4_RNG200_INT_STATUS, RNG200_INT_FIFO_UNDERRUN);
+
+    writel(RASPI4_RNG200_TOTAL_LIMIT, 64);
+    writel(RASPI4_RNG200_INT_ENABLE, RNG200_INT_TOTAL_LIMIT);
+    writel(RASPI4_RNG200_CTRL,
+           RNG200_CTRL_RATE_1MHZ | RNG200_CTRL_ENABLE);
+
+    rng200_refill_words(1);
+    g_assert_cmphex(readl(RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_THRESHOLD | 1);
+    g_assert_cmphex(readl(RASPI4_RNG200_TOTAL_COUNT), ==, 32);
+    g_assert_true(readl(RASPI4_RNG200_INT_STATUS) & RNG200_INT_STARTUP);
+    g_assert_false(get_irq(RASPI4_RNG200_GIC_IRQ));
+
+    rng200_refill_words(1);
+    g_assert_cmphex(readl(RASPI4_RNG200_TOTAL_COUNT), ==, 64);
+    g_assert_true(readl(RASPI4_RNG200_INT_STATUS) &
+                  RNG200_INT_TOTAL_LIMIT);
+    g_assert_true(get_irq(RASPI4_RNG200_GIC_IRQ));
+    writel(RASPI4_RNG200_INT_STATUS, RNG200_INT_TOTAL_LIMIT);
+    g_assert_false(get_irq(RASPI4_RNG200_GIC_IRQ));
+
+    rng200_refill_words(14);
+    g_assert_cmphex(readl(RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_FULL | RNG200_FIFO_THRESHOLD | 16);
+    g_assert_true(readl(RASPI4_RNG200_INT_STATUS) & RNG200_INT_FIFO_FULL);
+    writel(RASPI4_RNG200_INT_ENABLE, RNG200_INT_FIFO_FULL);
+    g_assert_true(get_irq(RASPI4_RNG200_GIC_IRQ));
+    writel(RASPI4_RNG200_INT_STATUS, RNG200_INT_FIFO_FULL);
+    g_assert_false(get_irq(RASPI4_RNG200_GIC_IRQ));
+
+    for (unsigned int i = 0; i < 16; i++) {
+        last_word = readl(RASPI4_RNG200_FIFO_DATA);
+    }
+    g_assert_cmphex(readl(RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_EMPTY | RNG200_FIFO_THRESHOLD);
+    g_assert_cmphex(readl(RASPI4_RNG200_FIFO_DATA), ==, last_word);
+    g_assert_true(readl(RASPI4_RNG200_INT_STATUS) &
+                  RNG200_INT_FIFO_UNDERRUN);
+
+    writel(RASPI4_RNG200_SOFT_RESET, 1);
+    g_assert_cmphex(readl(RASPI4_RNG200_CTRL), ==, 0);
+    g_assert_cmphex(readl(RASPI4_RNG200_TOTAL_COUNT), ==, 0);
+    g_assert_cmphex(readl(RASPI4_RNG200_INT_STATUS), ==, 0);
+    g_assert_cmphex(readl(RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_EMPTY | RNG200_FIFO_THRESHOLD);
+}
+
+static void test_rng200_rate_and_enable_mask(void)
+{
+    /* Any of the 13 ring-generator bits enables output. */
+    writel(RASPI4_RNG200_CTRL, RNG200_CTRL_RING12);
+    qtest_clock_step(global_qtest, RNG200_REFILL_8MHZ_NS - 1);
+    g_assert_cmphex(readl(RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_EMPTY | RNG200_FIFO_THRESHOLD);
+    qtest_clock_step(global_qtest, 1);
+    g_assert_cmphex(readl(RASPI4_RNG200_FIFO_COUNT), ==,
+                    RNG200_FIFO_THRESHOLD | 1);
+    g_assert_cmphex(readl(RASPI4_RNG200_TOTAL_COUNT), ==, 32);
+}
+
+static int64_t thermal_qom_get_temperature(void)
+{
+    QDict *response;
+    int64_t temperature;
+
+    response = qmp("{ 'execute': 'qom-get', 'arguments': { 'path': %s, "
+                   "'property': 'temperature' } }",
+                   RASPI4_THERMAL_QOM_PATH);
+    g_assert(qdict_haskey(response, "return"));
+    temperature = qdict_get_int(response, "return");
+    qobject_unref(response);
+    return temperature;
+}
+
+static void thermal_qom_set_temperature(int64_t temperature)
+{
+    QDict *response;
+
+    response = qmp("{ 'execute': 'qom-set', 'arguments': { 'path': %s, "
+                   "'property': 'temperature', 'value': %" PRId64 " } }",
+                   RASPI4_THERMAL_QOM_PATH, temperature);
+    g_assert(qdict_haskey(response, "return"));
+    qobject_unref(response);
+}
+
+static void test_thermal_temperature(void)
+{
+    g_assert_cmphex(readl(RASPI4_THERMAL_STATUS), ==,
+                    THERMAL_STATUS_VALID | THERMAL_DEFAULT_RAW);
+    g_assert_cmpint(thermal_qom_get_temperature(), ==, THERMAL_DEFAULT_MC);
+
+    thermal_qom_set_temperature(THERMAL_TEST_MC);
+    g_assert_cmpint(thermal_qom_get_temperature(), ==, THERMAL_TEST_MC);
+    g_assert_cmphex(readl(RASPI4_THERMAL_STATUS), ==,
+                    THERMAL_STATUS_VALID | THERMAL_TEST_RAW);
+
+    {
+        QDict *response = qmp(
+            "{ 'execute': 'qom-set', 'arguments': { 'path': %s, "
+            "'property': 'temperature', 'value': 500000 } }",
+            RASPI4_THERMAL_QOM_PATH);
+
+        g_assert(qdict_haskey(response, "error"));
+        qobject_unref(response);
+    }
+    g_assert_cmpint(thermal_qom_get_temperature(), ==, THERMAL_TEST_MC);
+
+    /* The guest-visible AVS status register is read-only. */
+    writel(RASPI4_THERMAL_STATUS, 0);
+    g_assert_cmphex(readl(RASPI4_THERMAL_STATUS), ==,
+                    THERMAL_STATUS_VALID | THERMAL_TEST_RAW);
 }
 
 static void test_sd_card_on_emmc2(void)
@@ -1734,6 +1998,16 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/interrupts/system_timer",
                      test_system_timer_interrupts);
     raspi4b_add_test("/raspi4b/interrupts/spi0", test_spi0_interrupt);
+    raspi4b_add_test("/raspi4b/rng200/fifo_and_interrupts",
+                     test_rng200_fifo_and_interrupts);
+    raspi4b_add_test("/raspi4b/rng200/rate_and_enable_mask",
+                     test_rng200_rate_and_enable_mask);
+#ifndef _WIN32
+    raspi4b_add_test("/raspi4b/migration/rng200_and_thermal",
+                     test_rng200_and_thermal_migration);
+#endif
+    raspi4b_add_test("/raspi4b/thermal/temperature",
+                     test_thermal_temperature);
     raspi4b_add_test("/raspi4b/sd/card_on_emmc2", test_sd_card_on_emmc2);
     raspi4b_add_test("/raspi4b/firmware_gpio", test_firmware_gpio);
     raspi4b_add_test("/raspi4b/firmware_dma_channels",

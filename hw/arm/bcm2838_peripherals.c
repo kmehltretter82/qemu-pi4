@@ -67,6 +67,13 @@ static void bcm2838_peripherals_init(Object *obj)
     /* GPIO */
     object_initialize_child(obj, "gpio", &s->gpio, TYPE_BCM2838_GPIO);
 
+    /* RNG200 random number generator */
+    object_initialize_child(obj, "rng200", &s->rng200, TYPE_BCM2838_RNG200);
+
+    /* AVS thermal monitor */
+    object_initialize_child(obj, "thermal", &s->thermal,
+                            TYPE_BCM2838_THERMAL);
+
     /* GENET v5 Ethernet controller */
     object_initialize_child(obj, "genet", &s->genet, TYPE_BCM2838_GENET);
 
@@ -228,6 +235,22 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(
         &s_base->peri_mr, GPIO_OFFSET,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpio), 0));
+
+    /* RNG200 random number generator */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->rng200), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s_base->peri_mr, RNG200_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->rng200), 0));
+
+    /* The AVS thermal monitor is in the BCM2711 lower-peripheral window. */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->thermal), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s->peri_low_mr, AVS_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->thermal), 0));
 
     /* PCIe host registers are in the BCM2711 lower-peripheral window. */
     object_property_set_link(

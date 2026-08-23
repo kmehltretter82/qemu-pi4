@@ -59,6 +59,7 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define ARMCTRL_0_SBM_OFFSET    (ARM_OFFSET + 0x800)
 #define PM_OFFSET               0x100000 /* Power Management */
 #define CPRMAN_OFFSET           0x101000 /* Clock Management */
+#define RNG200_OFFSET           0x104000
 #define GPIO_OFFSET             0x200000
 #define UART0_OFFSET            0x201000 /* PL011 */
 #define MMCI0_OFFSET            0x202000 /* Legacy MMC */
@@ -73,6 +74,7 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define PCIE_RC_OFFSET          0x1500000
 #define GENET_OFFSET            0x1580000
 #define GENET_SIZE              0x10000
+#define AVS_OFFSET              0x15d2000
 #define SMI_OFFSET              0x600000
 #define BSC1_OFFSET             0x804000 /* BSC1 I2C/TWI */
 #define BSC2_OFFSET             0x805000 /* BSC2 I2C/TWI */
