@@ -9,6 +9,7 @@
 #include "hw/misc/bcm2835_mbox_defs.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_regs.h"
+#include "hw/usb/dwc2-regs.h"
 #include "libqtest-single.h"
 #include "qemu/bswap.h"
 #include "qemu/iov.h"
@@ -42,6 +43,10 @@
 #define RASPI4_SYSTIMER_CLO       (RASPI4_SYSTIMER_BASE + 0x04)
 #define RASPI4_SYSTIMER_COMPARE_0 (RASPI4_SYSTIMER_BASE + 0x0c)
 #define RASPI4_SYSTIMER_GIC_IRQ_0 64
+
+#define RASPI4_DWC2_BASE          0xfe980000
+#define RASPI4_DWC2_REG(_reg)     (RASPI4_DWC2_BASE + (_reg))
+#define RASPI4_DWC2_GIC_IRQ       73
 
 #define RASPI4_SPI0_BASE          0xfe204000
 #define RASPI4_SPI0_CS            RASPI4_SPI0_BASE
@@ -1560,6 +1565,61 @@ static void test_spi0_interrupt(void)
     g_assert_false(get_irq(RASPI4_SPI0_GIC_IRQ));
 }
 
+static void test_dwc2_reset_and_fifo_flush(void)
+{
+    const uint32_t gahbcfg = GAHBCFG_DMA_EN | GAHBCFG_GLBL_INTR_EN;
+    const uint32_t gusbcfg = GUSBCFG_FORCEHOSTMODE |
+                             (5 << GUSBCFG_USBTRDTIM_SHIFT);
+    const uint32_t gnptxfsiz = (768 << FIFOSIZE_DEPTH_SHIFT) | 256;
+    const uint32_t hptxfsiz = (256 << FIFOSIZE_DEPTH_SHIFT) | 1024;
+    const uint32_t hcfg = HCFG_DESCDMA | HCFG_FSLSSUPP;
+    const uint32_t hcchar = HCCHAR_CHENA | 64;
+
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(GRSTCTL)), ==,
+                    GRSTCTL_AHBIDLE);
+
+    writel(RASPI4_DWC2_REG(GAHBCFG), gahbcfg);
+    writel(RASPI4_DWC2_REG(GUSBCFG), gusbcfg);
+    writel(RASPI4_DWC2_REG(GNPTXFSIZ), gnptxfsiz);
+    writel(RASPI4_DWC2_REG(HPTXFSIZ), hptxfsiz);
+    writel(RASPI4_DWC2_REG(HCFG), hcfg);
+    writel(RASPI4_DWC2_REG(HAINTMSK), 1);
+    writel(RASPI4_DWC2_REG(HCINTMSK(0)), HCINTMSK_XFERCOMPL);
+    writel(RASPI4_DWC2_REG(HCCHAR(0)), hcchar);
+
+    /* A pending status bit proves that core reset clears masks, not status. */
+    g_assert_true(readl(RASPI4_DWC2_REG(GINTSTS)) & GINTSTS_PTXFEMP);
+    writel(RASPI4_DWC2_REG(GINTMSK), GINTSTS_PTXFEMP);
+    g_assert_true(get_irq(RASPI4_DWC2_GIC_IRQ));
+
+    writel(RASPI4_DWC2_REG(GRSTCTL),
+           readl(RASPI4_DWC2_REG(GRSTCTL)) | GRSTCTL_CSFTRST);
+
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(GRSTCTL)), ==,
+                    GRSTCTL_AHBIDLE);
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(GINTMSK)), ==, 0);
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(HAINTMSK)), ==, 0);
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(HCINTMSK(0))), ==, 0);
+    g_assert_false(readl(RASPI4_DWC2_REG(HCCHAR(0))) & HCCHAR_CHENA);
+    g_assert_false(get_irq(RASPI4_DWC2_GIC_IRQ));
+    g_assert_true(readl(RASPI4_DWC2_REG(GINTSTS)) & GINTSTS_PTXFEMP);
+
+    /* Configuration registers survive a core soft reset. */
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(GAHBCFG)), ==, gahbcfg);
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(GUSBCFG)), ==, gusbcfg);
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(GNPTXFSIZ)), ==, gnptxfsiz);
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(HPTXFSIZ)), ==, hptxfsiz);
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(HCFG)), ==, hcfg);
+
+    writel(RASPI4_DWC2_REG(GRSTCTL),
+           GRSTCTL_TXFNUM(0x10) | GRSTCTL_TXFFLSH);
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(GRSTCTL)), ==,
+                    GRSTCTL_AHBIDLE | GRSTCTL_TXFNUM(0x10));
+    writel(RASPI4_DWC2_REG(GRSTCTL), GRSTCTL_RXFFLSH);
+    g_assert_cmphex(readl(RASPI4_DWC2_REG(GRSTCTL)), ==,
+                    GRSTCTL_AHBIDLE);
+}
+
 static void gpio_set_input(unsigned int pin, int level)
 {
     qtest_set_irq_in(global_qtest, RASPI4_GPIO_QOM_PATH, NULL, pin, level);
@@ -2163,6 +2223,8 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/interrupts/system_timer",
                      test_system_timer_interrupts);
     raspi4b_add_test("/raspi4b/interrupts/spi0", test_spi0_interrupt);
+    raspi4b_add_test("/raspi4b/dwc2/reset_and_fifo_flush",
+                     test_dwc2_reset_and_fifo_flush);
     raspi4b_add_test("/raspi4b/gpio/events_and_interrupts",
                      test_gpio_events_and_interrupts);
     raspi4b_add_test("/raspi4b/rng200/fifo_and_interrupts",

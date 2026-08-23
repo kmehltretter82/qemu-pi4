@@ -697,6 +697,59 @@ static uint64_t dwc2_glbreg_read(void *ptr, hwaddr addr, int index,
     return val;
 }
 
+static void dwc2_stop_transfers(DWC2State *s)
+{
+    int i;
+
+    timer_del(s->frame_timer);
+    qemu_bh_cancel(s->async_bh);
+
+    for (i = 0; i < DWC2_NB_CHAN; i++) {
+        DWC2Packet *p = &s->packet[i];
+
+        if (p->async == DWC2_ASYNC_INFLIGHT) {
+            usb_cancel_packet(&p->packet);
+            usb_packet_cleanup(&p->packet);
+        }
+        p->async = DWC2_ASYNC_NONE;
+        p->needs_service = false;
+        s->hcchar(i) &= ~(HCCHAR_CHENA | HCCHAR_CHDIS);
+    }
+
+    s->next_chan = 0;
+    s->working = false;
+}
+
+static void dwc2_core_soft_reset(DWC2State *s)
+{
+    int i;
+
+    /*
+     * CSFTRST leaves configuration and interrupt status registers intact,
+     * but resets the internal state machines, terminates transfers and
+     * clears the interrupt masks.
+     */
+    dwc2_bus_stop(s);
+    dwc2_stop_transfers(s);
+
+    s->gintmsk = 0;
+    s->haintmsk = 0;
+    for (i = 0; i < DWC2_NB_CHAN; i++) {
+        s->hcintmsk(i) = 0;
+    }
+
+    s->grxstsr = 0;
+    s->grxstsp = 0;
+    s->frame_number = 0;
+    s->hfnum = 0;
+
+    if (s->uport.dev && s->uport.dev->attached) {
+        dwc2_bus_start(s);
+    } else {
+        s->sof_time = 0;
+    }
+}
+
 static void dwc2_glbreg_write(void *ptr, hwaddr addr, int index, uint64_t val,
                               unsigned size)
 {
@@ -732,43 +785,27 @@ static void dwc2_glbreg_write(void *ptr, hwaddr addr, int index, uint64_t val,
         }
         break;
     case GRSTCTL:
-        val |= GRSTCTL_AHBIDLE;
-        val &= ~GRSTCTL_DMAREQ;
-        if (!(old & GRSTCTL_TXFFLSH) && (val & GRSTCTL_TXFFLSH)) {
-                /* TODO - TX fifo flush */
-            qemu_log_mask(LOG_UNIMP, "%s: Tx FIFO flush not implemented\n",
-                          __func__);
+        if (val & GRSTCTL_CSFTRST) {
+            dwc2_core_soft_reset(s);
+            iflg = 1;
+        } else if (val & GRSTCTL_FRMCNTRRST) {
+            s->frame_number = 0;
+            s->hfnum = 0;
+            if (s->uport.dev && s->uport.dev->attached) {
+                dwc2_bus_start(s);
+            }
         }
-        if (!(old & GRSTCTL_RXFFLSH) && (val & GRSTCTL_RXFFLSH)) {
-                /* TODO - RX fifo flush */
-            qemu_log_mask(LOG_UNIMP, "%s: Rx FIFO flush not implemented\n",
-                          __func__);
+
+        /*
+         * The DMA model has no separately observable FIFO or device-mode
+         * token queue.  Completing their flush commands therefore has no
+         * additional payload state to discard.  All action bits self-clear.
+         */
+        if (val & GRSTCTL_RXFFLSH) {
+            s->grxstsr = 0;
+            s->grxstsp = 0;
         }
-        if (!(old & GRSTCTL_IN_TKNQ_FLSH) && (val & GRSTCTL_IN_TKNQ_FLSH)) {
-                /* TODO - device IN token queue flush */
-            qemu_log_mask(LOG_UNIMP, "%s: Token queue flush not implemented\n",
-                          __func__);
-        }
-        if (!(old & GRSTCTL_FRMCNTRRST) && (val & GRSTCTL_FRMCNTRRST)) {
-                /* TODO - host frame counter reset */
-            qemu_log_mask(LOG_UNIMP,
-                          "%s: Frame counter reset not implemented\n",
-                          __func__);
-        }
-        if (!(old & GRSTCTL_HSFTRST) && (val & GRSTCTL_HSFTRST)) {
-                /* TODO - host soft reset */
-            qemu_log_mask(LOG_UNIMP, "%s: Host soft reset not implemented\n",
-                          __func__);
-        }
-        if (!(old & GRSTCTL_CSFTRST) && (val & GRSTCTL_CSFTRST)) {
-                /* TODO - core soft reset */
-            qemu_log_mask(LOG_UNIMP, "%s: Core soft reset not implemented\n",
-                          __func__);
-        }
-        /* don't allow clearing of self-clearing bits */
-        val |= old & (GRSTCTL_TXFFLSH | GRSTCTL_RXFFLSH |
-                      GRSTCTL_IN_TKNQ_FLSH | GRSTCTL_FRMCNTRRST |
-                      GRSTCTL_HSFTRST | GRSTCTL_CSFTRST);
+        val = GRSTCTL_AHBIDLE | (val & GRSTCTL_TXFNUM_MASK);
         break;
     case GINTSTS:
         /* clear the write-1-to-clear bits */
@@ -1230,7 +1267,6 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
 {
     DWC2Class *c = DWC2_USB_GET_CLASS(obj);
     DWC2State *s = DWC2_USB(obj);
-    int i;
 
     trace_usb_dwc2_reset_enter();
 
@@ -1238,8 +1274,7 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
         c->parent_phases.enter(obj, type);
     }
 
-    timer_del(s->frame_timer);
-    qemu_bh_cancel(s->async_bh);
+    dwc2_stop_transfers(s);
 
     if (s->uport.dev && s->uport.dev->attached) {
         usb_detach(&s->uport);
@@ -1304,10 +1339,6 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
     s->fi = USB_FRMINTVL - 1;
     s->next_chan = 0;
     s->working = false;
-
-    for (i = 0; i < DWC2_NB_CHAN; i++) {
-        s->packet[i].needs_service = false;
-    }
 }
 
 static void dwc2_reset_hold(Object *obj, ResetType type)
