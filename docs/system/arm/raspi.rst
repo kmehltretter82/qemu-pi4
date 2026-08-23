@@ -37,7 +37,8 @@ Implemented devices
  * DMA controller
  * Clock and reset controller (CPRMAN)
  * System Timer
- * GPIO controller
+ * GPIO controller, including all 58 input/output lines, edge and level event
+   detection, and the three bank interrupts plus the all-bank interrupt
  * Serial ports (BCM2835 AUX - 16550 based - and PL011)
  * Frame Buffer
  * Arasan eMMC2 SD/MMC host controller and external SD card
@@ -135,6 +136,31 @@ The model implements the BCM2711 GENET v5 register layout, the external MDIO
 PHY, link state, descriptor DMA, interrupts, scatter-gather transmission and
 checksum offload.  Upstream Linux can acquire a DHCP lease through it.  MIB
 counters, wake-on-LAN and hardware receive filtering are not yet modeled.
+
+GPIO
+----
+
+The BCM2711 GPIO model exposes all 58 pins as QEMU input and output lines.
+``GPSET`` and ``GPCLR`` update an output latch even while a pin is configured
+as an input; the retained value takes effect when the pin becomes an output.
+``GPLEV`` reports the external level for inputs and the latch level for
+outputs.
+
+The model implements the two ``GPEDS`` event-status registers and all six
+rising, falling, high, low, asynchronous-rising and asynchronous-falling
+detector pairs.  Event status is write-one-to-clear.  An active high or low
+condition immediately restores its status bit, matching the level-detector
+contract.  The QEMU GPIO interface conveys logical level transitions rather
+than sub-clock pulse widths, so synchronous and asynchronous edge detectors
+have the same transition behavior; clock-sampling and glitch-filter timing
+are not modeled.
+
+The three bank interrupts cover GPIOs 0--27, 28--45 and 46--57 and are wired
+to GIC SPIs 113, 114 and 115.  SPI 116 is asserted whenever any bank has an
+event.  Detector configuration, event status and output latches reset to
+their hardware defaults, while externally driven input levels persist across
+a controller reset.  All GPIO state and asserted interrupts are restored by
+live migration.
 
 Random number and thermal sensors
 ---------------------------------

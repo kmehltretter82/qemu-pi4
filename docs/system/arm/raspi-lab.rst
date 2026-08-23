@@ -162,6 +162,34 @@ On 2026-08-23, the pinned upstream Linux 7.2 acceptance image passed on both
 same boots also retained all PCIe, VL805, USB-storage, MSI, GENET, and Pi 400
 keyboard acceptance gates.
 
+GPIO reference evidence
+-----------------------
+
+The GPIO event model follows `BCM2711 ARM Peripherals
+<https://datasheets.raspberrypi.com/bcm2711/bcm2711-peripherals.pdf>`__,
+sections 5.1 and 5.2.  The document defines 58 GPIOs in three interrupt banks,
+three bank interrupt lines plus a fourth all-bank line, write-one-to-clear
+event status, synchronous and asynchronous edge detection, and persistent
+high and low level events.
+
+A non-writing Pi 400 capture on 2026-08-23 read the event-status and detector
+registers at offsets ``0x40``, ``0x44``, ``0x4c``, ``0x50``, ``0x58``,
+``0x5c``, ``0x64``, ``0x68``, ``0x70``, ``0x74``, ``0x7c``, ``0x80``,
+``0x88`` and ``0x8c`` from the GPIO base at ``0xfe200000``.  Every register
+was zero in the firmware-configured idle state.  This confirms safe access
+and the observed idle state only; the specification and qtests establish the
+active event semantics.
+
+Before fork commit ``9185e01891``, a pinned Linux 7.2 diagnostic boot with
+``-d unimp,guest_errors`` produced 14 ``bcm2838-gpio`` messages for exactly
+those event-register accesses.  After the change, the same Pi 4B boot
+produced no GPIO unimplemented messages.  The complete 31-subtest Pi 4 qtest
+target and the Linux acceptance boots for both ``raspi4b`` and ``raspi400``
+then passed.  The qtests cover both edge polarities, both edge-detector modes,
+active high and low level reassertion, every interrupt group, reserved bits,
+output-latch retention, persistent external input levels across reset and
+live migration with asserted events.
+
 Capture and compare a full Linux system
 ---------------------------------------
 

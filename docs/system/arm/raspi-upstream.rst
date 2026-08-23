@@ -421,6 +421,46 @@ QP4-UP-024: repeated qtest system reset can hang on macOS
   GitLab and qemu-devel for Darwin signal/reset duplicates, retain exact
   commands and thread stacks, and have the user manually validate the result.
 
+QP4-UP-025: BCM2711 GPIO event registers and interrupts are unimplemented
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: known limitation; E1 register-contract evidence, with no
+  demonstrated E2 or E3 failure
+:Fork commit: ``9185e0189123713e70007bad774679b50026ac5e``
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Contract: `BCM2711 ARM Peripherals
+  <https://datasheets.raspberrypi.com/bcm2711/bcm2711-peripherals.pdf>`__
+  section 5.1 defines three bank interrupt lines and a fourth line shared by
+  all GPIO event bits.  Section 5.2 tables 76 through 89 define the two
+  write-one-to-clear event-status registers and six read/write edge and level
+  detector pairs.
+:Observed issue: Current upstream explicitly treats all 14 registers as
+  unimplemented, exposes no external pin inputs or GPIO interrupt outputs,
+  and does not connect GPIO SPIs 113 through 116 to the GIC.  Against the
+  unmodified current-master binary, the minimal qtest sequence
+  ``writel 0xfe20004c 0x00000001`` followed by
+  ``readl 0xfe20004c`` returned ``0`` instead of the written read/write
+  ``GPREN0`` bit.  The fork returned ``1``.  A Linux 7.2 boot on the same
+  upstream binary logged all 14 unimplemented accesses during normal pinctrl
+  initialization; only the unrelated unsupported L2 interrupt-controller DT
+  node was disabled so the kernel could reach this probe.
+:Why known limitation: The accepted 2024 GPIO implementation deliberately
+  marked these cases ``Not implemented``, so this is not a regression.
+  `QEMU issue 2591
+  <https://gitlab.com/qemu-project/qemu/-/work_items/2591>`__ already records
+  the same Linux register-access log.  A new issue with only that evidence
+  would be duplicative even though the register behavior violates the
+  documented device contract.
+:Fork change: Model all 58 pin inputs, output-latch behavior, synchronous and
+  asynchronous edge detection, high and low level detection, status and four
+  IRQ outputs, GIC routing, reset and migration.  Focused tests cover each
+  detector class, interrupt bank and state transition.
+:Before sending: Do not open a duplicate issue.  If upstream maintainers want
+  the missing functionality, a human must independently implement it under
+  QEMU's current provenance policy, reference issue 2591, include focused
+  register/IRQ/reset/migration tests, and address migration compatibility for
+  the existing machine type.
+
 Rejected and research-only findings
 ------------------------------------
 

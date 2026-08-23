@@ -22,6 +22,11 @@ revision, fixed RAM size, device tree and resulting machine identity differ.
 The model includes the BCM2711 GENET v5 Ethernet controller and external PHY.
 The pinned upstream Linux lab validates link, DHCP, transmit and receive DMA.
 
+The BCM2711 GPIO controller exposes all 58 pin inputs and outputs, implements
+edge and level event detection, and routes its three bank interrupts plus the
+all-bank interrupt to the GIC.  Qtests cover the event registers, interrupt
+grouping, reset and live migration.
+
 Both boards expose the BCM2711 PCIe root complex and the fixed VIA VL805 xHCI
 controller used for their external USB ports.  The model includes private PCI
 DMA, MSI, multi-segment xHCI event rings, the VIA four-port USB 2 hub, and the
@@ -71,7 +76,8 @@ machine list contains only ``none``, ``raspi400`` and ``raspi4b``, runs the Pi
 4 qtests, and boots a SHA-256-pinned Raspberry Pi Linux kernel on both board
 models.  The boots check machine identity, usable physical RAM, PCIe/VL805,
 the board-specific USB topology, an external USB-storage transfer, and GENET
-DHCP.  The separate Linux 7.2 lab adds xHCI MSI and rebind recovery checks.
+DHCP.  The qtests also exercise GPIO event delivery and migration.  The
+separate Linux 7.2 lab adds xHCI MSI and rebind recovery checks.
 
 Asset download is deliberately separate from test execution.  From a
 configured focused build directory, populate the content-addressed cache once
