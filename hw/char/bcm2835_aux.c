@@ -13,7 +13,7 @@
  *
  * At present only the core UART functions (data path for tx/rx) are
  * implemented. The following features/registers are unimplemented:
- *  - Line/modem control
+ *  - Line control
  *  - Scratch register
  *  - Extra control
  *  - Baudrate
@@ -21,6 +21,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "chardev/char-serial.h"
 #include "hw/char/bcm2835_aux.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -47,6 +48,10 @@
 #define RX_INT  0x1
 #define TX_INT  0x2
 
+/* supported bits in the modem control and status registers */
+#define MCR_RTS  0x2
+#define MSR_CTS  0x10
+
 static void bcm2835_aux_update(BCM2835AuxState *s)
 {
     /* signal an interrupt if either:
@@ -63,10 +68,26 @@ static void bcm2835_aux_update(BCM2835AuxState *s)
     qemu_set_irq(s->irq, s->iir != 0);
 }
 
+static void bcm2835_aux_update_rts(BCM2835AuxState *s)
+{
+    int flags;
+
+    if (qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_GET_TIOCM, &flags)) {
+        return;
+    }
+
+    flags &= ~CHR_TIOCM_RTS;
+    if (s->mcr & MCR_RTS) {
+        flags |= CHR_TIOCM_RTS;
+    }
+    qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_SET_TIOCM, &flags);
+}
+
 static uint64_t bcm2835_aux_read(void *opaque, hwaddr offset, unsigned size)
 {
     BCM2835AuxState *s = opaque;
     uint32_t c, res;
+    int flags;
 
     switch (offset) {
     case AUX_IRQ:
@@ -113,8 +134,7 @@ static uint64_t bcm2835_aux_read(void *opaque, hwaddr offset, unsigned size)
         return 0;
 
     case AUX_MU_MCR_REG:
-        qemu_log_mask(LOG_UNIMP, "%s: AUX_MU_MCR_REG unsupported\n", __func__);
-        return 0;
+        return s->mcr;
 
     case AUX_MU_LSR_REG:
         res = 0x60; /* tx idle, empty */
@@ -124,8 +144,11 @@ static uint64_t bcm2835_aux_read(void *opaque, hwaddr offset, unsigned size)
         return res;
 
     case AUX_MU_MSR_REG:
-        qemu_log_mask(LOG_UNIMP, "%s: AUX_MU_MSR_REG unsupported\n", __func__);
-        return 0;
+        if (qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_GET_TIOCM,
+                              &flags) == 0) {
+            return (flags & CHR_TIOCM_CTS) ? MSR_CTS : 0;
+        }
+        return MSR_CTS;
 
     case AUX_MU_SCRATCH:
         qemu_log_mask(LOG_UNIMP, "%s: AUX_MU_SCRATCH unsupported\n", __func__);
@@ -185,7 +208,9 @@ static void bcm2835_aux_write(void *opaque, hwaddr offset, uint64_t value,
 
     case AUX_MU_IIR_REG:
         if (value & 0x2) {
+            s->read_pos = 0;
             s->read_count = 0;
+            qemu_chr_fe_accept_input(&s->chr);
         }
         break;
 
@@ -194,7 +219,8 @@ static void bcm2835_aux_write(void *opaque, hwaddr offset, uint64_t value,
         break;
 
     case AUX_MU_MCR_REG:
-        qemu_log_mask(LOG_UNIMP, "%s: AUX_MU_MCR_REG unsupported\n", __func__);
+        s->mcr = value & MCR_RTS;
+        bcm2835_aux_update_rts(s);
         break;
 
     case AUX_MU_SCRATCH:
@@ -258,10 +284,20 @@ static const MemoryRegionOps bcm2835_aux_ops = {
     .valid.max_access_size = 4,
 };
 
+static int bcm2835_aux_post_load(void *opaque, int version_id)
+{
+    BCM2835AuxState *s = opaque;
+
+    bcm2835_aux_update(s);
+    bcm2835_aux_update_rts(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_bcm2835_aux = {
     .name = TYPE_BCM2835_AUX,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = bcm2835_aux_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(read_fifo, BCM2835AuxState,
                             BCM2835_AUX_RX_FIFO_LEN),
@@ -269,6 +305,7 @@ static const VMStateDescription vmstate_bcm2835_aux = {
         VMSTATE_UINT8(read_count, BCM2835AuxState),
         VMSTATE_UINT8(ier, BCM2835AuxState),
         VMSTATE_UINT8(iir, BCM2835AuxState),
+        VMSTATE_UINT8_V(mcr, BCM2835AuxState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -292,6 +329,21 @@ static void bcm2835_aux_realize(DeviceState *dev, Error **errp)
                              bcm2835_aux_receive, NULL, NULL, s, NULL, true);
 }
 
+static void bcm2835_aux_reset(DeviceState *dev)
+{
+    BCM2835AuxState *s = BCM2835_AUX(dev);
+
+    memset(s->read_fifo, 0, sizeof(s->read_fifo));
+    s->read_pos = 0;
+    s->read_count = 0;
+    s->ier = 0;
+    s->iir = 0;
+    s->mcr = 0;
+    bcm2835_aux_update(s);
+    bcm2835_aux_update_rts(s);
+    qemu_chr_fe_accept_input(&s->chr);
+}
+
 static const Property bcm2835_aux_props[] = {
     DEFINE_PROP_CHR("chardev", BCM2835AuxState, chr),
 };
@@ -301,6 +353,7 @@ static void bcm2835_aux_class_init(ObjectClass *oc, const void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = bcm2835_aux_realize;
+    device_class_set_legacy_reset(dc, bcm2835_aux_reset);
     dc->vmsd = &vmstate_bcm2835_aux;
     set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
     device_class_set_props(dc, bcm2835_aux_props);

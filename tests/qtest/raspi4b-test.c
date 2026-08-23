@@ -55,6 +55,17 @@
 #define SPI0_CS_INTD              (1U << 9)
 #define SPI0_CS_TA                (1U << 7)
 
+#define RASPI4_AUX_BASE           0xfe215000
+#define RASPI4_AUX_IRQ            (RASPI4_AUX_BASE + 0x00)
+#define RASPI4_AUX_MU_IER         (RASPI4_AUX_BASE + 0x44)
+#define RASPI4_AUX_MU_MCR         (RASPI4_AUX_BASE + 0x50)
+#define RASPI4_AUX_MU_MSR         (RASPI4_AUX_BASE + 0x58)
+#define RASPI4_AUX_GIC_IRQ        93
+#define AUX_IER_FIFO_ENABLED      0xc0
+#define AUX_IER_TX_INT            (1U << 1)
+#define AUX_MCR_RTS               (1U << 1)
+#define AUX_MSR_CTS               (1U << 4)
+
 #define RASPI4_GPIO_BASE          0xfe200000
 #define RASPI4_GPIO_GPFSEL5       (RASPI4_GPIO_BASE + 0x14)
 #define RASPI4_GPIO_GPSET1        (RASPI4_GPIO_BASE + 0x20)
@@ -603,6 +614,41 @@ static void raspi4b_watchdog_reset(void)
            RASPI4_PM_PASSWORD | RASPI4_PM_RSTC_FULL);
     qtest_clock_step(global_qtest, NANOSECONDS_PER_SECOND);
     qtest_qmp_eventwait(global_qtest, "RESET");
+}
+
+static void test_aux_uart_modem_and_reset(void)
+{
+    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==,
+                    AUX_IER_FIFO_ENABLED);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MCR), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MSR), ==, AUX_MSR_CTS);
+    g_assert_false(get_irq(RASPI4_AUX_GIC_IRQ));
+
+    writel(RASPI4_AUX_MU_MCR, UINT32_MAX);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MCR), ==, AUX_MCR_RTS);
+    writel(RASPI4_AUX_MU_MCR, 1);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MCR), ==, 0);
+    writel(RASPI4_AUX_MU_MCR, AUX_MCR_RTS);
+
+    writel(RASPI4_AUX_MU_IER, AUX_IER_TX_INT);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==,
+                    AUX_IER_FIFO_ENABLED | AUX_IER_TX_INT);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, 1);
+    g_assert_true(get_irq(RASPI4_AUX_GIC_IRQ));
+
+    raspi4b_watchdog_reset();
+    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==,
+                    AUX_IER_FIFO_ENABLED);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MCR), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MSR), ==, AUX_MSR_CTS);
+    g_assert_false(get_irq(RASPI4_AUX_GIC_IRQ));
+
+    writel(RASPI4_AUX_MU_IER, AUX_IER_TX_INT);
+    g_assert_true(get_irq(RASPI4_AUX_GIC_IRQ));
+    writel(RASPI4_AUX_MU_IER, 0);
+    g_assert_false(get_irq(RASPI4_AUX_GIC_IRQ));
 }
 
 static void pcie_edu_dma(uint64_t src, uint64_t dst, size_t size,
@@ -1288,6 +1334,7 @@ static void test_soc_peripheral_migration(void)
                            G_N_ELEMENTS(clock_off), sizeof(clock_off));
     property_request_qtest(source, RPI_FWREQ_SET_DOMAIN_STATE, domain_on,
                            G_N_ELEMENTS(domain_on), sizeof(domain_on));
+    writel(RASPI4_AUX_MU_MCR, AUX_MCR_RTS);
 
     qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
     tmpdir = g_dir_make_tmp("raspi4b-soc-migration-XXXXXX", &error);
@@ -1351,6 +1398,8 @@ static void test_soc_peripheral_migration(void)
     qobject_unref(response);
     g_assert_cmphex(qtest_readl(destination, RASPI4_THERMAL_STATUS), ==,
                     THERMAL_STATUS_VALID | THERMAL_TEST_RAW);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_MU_MCR), ==,
+                    AUX_MCR_RTS);
 
     property_request_qtest(destination, RPI_FWREQ_GET_CLOCK_STATE, get_clock,
                            G_N_ELEMENTS(get_clock), sizeof(get_clock));
@@ -2380,6 +2429,8 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/interrupts/system_timer",
                      test_system_timer_interrupts);
     raspi4b_add_test("/raspi4b/interrupts/spi0", test_spi0_interrupt);
+    raspi4b_add_test("/raspi4b/aux/modem_and_reset",
+                     test_aux_uart_modem_and_reset);
     raspi4b_add_test("/raspi4b/dwc2/reset_and_fifo_flush",
                      test_dwc2_reset_and_fifo_flush);
     raspi4b_add_test("/raspi4b/gpio/events_and_interrupts",
