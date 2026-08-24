@@ -17,10 +17,11 @@ usage()
 Usage: $0 [--qemu PATH] [--artifacts DIR] [--machine MODEL] [--append TEXT]
 
 Boot the Linux artifacts produced by build-linux.sh on raspi4b or raspi400.
-The test initramfs prints hardware state, verifies data transfers to a
-disposable USB mass-storage device, exercises GENET using DHCP, reports a
-success marker, and powers the guest off.  QEMU_SYSTEM_AARCH64 and
-PI4_LINUX_ARTIFACTS_DIR provide the same settings through the environment.
+The test initramfs prints hardware state, checks native VC4 DRM registration,
+verifies data transfers to a disposable USB mass-storage device, exercises
+GENET using DHCP, reports a success marker, and powers the guest off.
+QEMU_SYSTEM_AARCH64 and PI4_LINUX_ARTIFACTS_DIR provide the same settings
+through the environment.
 EOF
 }
 
@@ -132,5 +133,12 @@ fi
 if ! grep -Fq \
     'PI4-LAB: HDMI0 DDC reads a valid 128-byte EDID' "$qemu_log"; then
     echo "BCM2711 HDMI DVP/DDC/EDID acceptance checks were not run" >&2
+    exit 1
+fi
+
+if ! grep -Fq 'PI4-LAB: VC4 DRM card0 registered' "$qemu_log" ||
+   ! grep -Fq \
+       'PI4-LAB: VC4 DRM framebuffer is 1280x800 RGB565' "$qemu_log"; then
+    echo "BCM2711 native VC4 DRM acceptance checks were not run" >&2
     exit 1
 fi

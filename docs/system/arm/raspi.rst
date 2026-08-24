@@ -42,8 +42,10 @@ Implemented devices
  * Both BCM2711 PWM controllers, with FIFO and DMA-paced stereo playback
  * BCM2711 always-on edge-latched L2 interrupt controller, with independently
    masked CPU and PCI banks
+ * BCM2711 HVS, HDMI0 pixel valve and HDMI0 transmitter, sufficient for a
+   native Linux VC4 DRM scanout to a QEMU display
  * BCM2711 HDMI DVP clock/reset controller and both HDMI DDC I2C controllers,
-   with a virtual EDID monitor on HDMI0
+   with a connected virtual EDID monitor on HDMI0
  * System Timer
  * GPIO controller, including all 58 input/output lines, edge and level event
    detection, and the three bank interrupts plus the all-bank interrupt
@@ -80,7 +82,9 @@ Missing devices
 
  * V3D 4.2 graphics accelerator (its MMIO range is an unimplemented
    placeholder)
- * BCM2711 HVS, pixel-valve and HDMI-transmitter display pipeline
+ * Remaining native-display features: HVS scaling, multi-plane composition and
+   tiled formats; pixel valves other than HDMI0's; HDMI1; dynamic hotplug, CEC
+   and HDMI audio data
  * Remaining BCM2711 PCIe controller-event behavior
  * Consumer-control key-event production for the Pi 400 keyboard's second HID
    interface; its identity, descriptors, enumeration and migration already
@@ -344,15 +348,45 @@ events, masking, clearing a held-high source, reset and migration.
 
 The node remains present in supplied Pi 4-family device trees, and the pinned
 upstream Linux 7.2 image registers its ``irq_brcmstb_l2`` driver on both
-``raspi4b`` and ``raspi400``.  The unsupported VC4, HVS, pixel-valve, HDMI
-transmitter and V3D nodes are removed from the guest tree.  DVP and HDMI DDC
-are modeled separately below, but no HDMI or CEC source is wired to this
-interrupt controller yet.  The AON model therefore provides the interrupt
-foundation for later HDMI work, but does not by itself provide display or CEC
-emulation.
+``raspi4b`` and ``raspi400``.  HDMI0 uses the controller as the parent for its
+hotplug interrupt descriptions, but the transmitter has a fixed connected
+state and does not generate connect, disconnect or CEC edges.  The controller
+therefore supplies the Linux-visible interrupt topology without claiming
+dynamic hotplug or CEC emulation.
 
-HDMI DVP clocks, resets and DDC
--------------------------------
+Native HDMI0 scanout, DVP clocks and DDC
+----------------------------------------
+
+The native display path exposes the HVS at ARM physical address
+``0xfe400000``, HDMI0 pixel valve 2 at ``0xfe20a000`` and the HDMI0
+transmitter register banks beginning at ``0xfef00200``.  Their upstream
+device-tree nodes remain visible, while the other four pixel valves, HDMI1
+and V3D stay hidden.
+
+The HVS consumes the channel display list programmed by the Linux VC4 driver
+and redirects a supported primary plane to QEMU's existing Raspberry Pi
+framebuffer console.  The implemented subset is a top-left, full-screen,
+unity-size, linear single plane in RGB565, RGB888 or RGBA8888 format with the
+channel orders used by Linux.  The display-list RAM, channel controls and
+active-list pointers are guest visible and migrate.  An unsupported primary
+plane leaves the previous scanout unchanged.  If more planes follow a
+supported primary plane, multi-plane composition is reported as unimplemented
+and only that first plane is displayed.
+
+Pixel valve 2 retains its programmed register state and supplies the
+write-one-to-clear VFP-start interrupt used by Linux.  While both video-enable
+bits are set, it schedules one event every 16,666,667 virtual nanoseconds and
+wires the resulting IRQ to GIC SPI 101.  This is a fixed approximately 60 Hz
+functional vblank source rather than timing derived from the programmed mode.
+The HVS IRQ is wired to GIC SPI 97, although HVS-generated interrupt events
+are not yet modeled.
+
+The HDMI0 model exposes all register banks described by the BCM2711 device
+tree and implements the hotplug, FIFO, packet-status and scheduler responses
+needed by the Linux HDMI driver.  It starts connected and consumes HDMI0's
+DVP clock-enable and reset signals.  Most transmitter registers are retained
+control state rather than a signal-level HDMI encoder; there is no TMDS,
+blanking-interval, audio-packet or physical-monitor model.
 
 The HDMI DVP clock/reset controller is mapped at ARM physical address
 ``0xfef00000``.  It exposes six software-reset bits and two active-low HDMI
@@ -381,26 +415,44 @@ EDID captured from the project's physical monitor.  Linux 7.2 binds
 and 128-byte read through ``/dev/i2c-*``, which exercises four hardware-sized
 chunks and validates the EDID header and checksum.
 
-DVP and DDC register state, an open I2C transaction and the attached EDID
-cursor migrate.  Reset closes an active transaction and returns each DDC
-engine to auto-I2C ownership.  Focused qtests cover register masks, reset,
-ownership, ACK/NACK behavior, malformed-length cleanup, chunked EDID access
-and migration in the middle of a repeated-start session.
+DVP, HDMI-transmitter, HVS, pixel-valve and DDC register state, the vblank
+deadline, an open I2C transaction and the attached EDID cursor migrate.  Reset
+closes an active DDC transaction and returns each engine to auto-I2C
+ownership.  Focused qtests cover register masks, reset, ownership, ACK/NACK
+behavior, malformed-length cleanup, chunked EDID access, vblank IRQ timing and
+migration with an active display pipeline.
 
-This is the display service plane, not a native scanout implementation.  The
-combined hardware DTF encodings and ten-bit I2C addressing are not modeled.
-The HVS, pixel valves, HDMI transmitters, HPD, CEC and V3D remain absent, and
-their device-tree nodes stay hidden.  Reading EDID therefore does not create a
-DRM connector or an HDMI picture; visible output still uses the existing
-firmware-configured framebuffer.
+The pinned upstream Linux 7.2 image binds HVS, HDMI0, TXP and pixel valve 2,
+registers ``/dev/dri/card0`` and creates a 1280x800 RGB565 ``/dev/fb0`` on
+both machines.  The acceptance init checks the connector, preferred mode and
+framebuffer geometry.  A separate end-to-end gate writes deterministic red,
+green, blue and white bands, takes a QMP screendump and validates pixels from
+each band::
+
+  scripts/pi4/test-display.py --qemu build/qemu-system-aarch64 \
+      --machine raspi4b
+  scripts/pi4/test-display.py --qemu build/qemu-system-aarch64 \
+      --machine raspi400
+
+This is native Linux-programmed scanout, but it remains a deliberately small
+display-pipeline subset.  Scaling, arbitrary plane positions, composition,
+tiled and compressed formats, mode-derived timings, HDMI1, dynamic HPD, CEC,
+HDMI audio data and V3D are not modeled.  The DDC controller also omits the
+combined hardware DTF encodings and ten-bit I2C addressing.
 
 Firmware clock and power state
 ------------------------------
 
-The VideoCore property interface stores the enable state reported by
-``GET_CLOCK_STATE`` and changed by ``SET_CLOCK_STATE``.  Known clocks start
-enabled, preserving the behavior of the earlier stateless implementation;
-invalid clock IDs report the firmware's not-present bit.
+The VideoCore property interface reports the BCM2711 firmware clock inventory
+captured through ``/dev/vcio`` on the project's Pi 400.  ``GET_CLOCKS``
+discovers IDs 1 through 15; the display clock ID 16 is absent.  Current,
+minimum and maximum rates use the captured per-clock profile rather than a
+single generic fallback.  ``SET_CLOCK_RATE`` retains the requested rate,
+clamps it to that clock's captured range and returns the resulting rate.
+
+The interface also stores the enable state reported by ``GET_CLOCK_STATE``
+and changed by ``SET_CLOCK_STATE``.  Known clocks start enabled for guest
+compatibility; invalid clock IDs report the firmware's not-present bit.
 
 ``GET_DOMAIN_STATE`` and ``SET_DOMAIN_STATE`` similarly track the 23 firmware
 power-domain IDs.  The initial enabled set is video scaler, VPU1, USB,
@@ -408,10 +460,10 @@ transposer and ARM, matching the state captured from the project's Pi 400
 after a normal Linux boot.  ``NOTIFY_REBOOT`` is accepted as an explicit
 no-op because QEMU has no VideoCore firmware execution state to quiesce.
 
-Clock and domain state resets with the machine and migrates with the VM.  A
-machine reset also discards a property response stalled behind a full ARM
-mailbox and lowers its child interrupt, so a request from the new boot cannot
-be blocked by the previous one.
+Clock rates, clock state and domain state reset with the machine and migrate
+with the VM.  A machine reset also discards a property response stalled behind
+a full ARM mailbox and lowers its child interrupt, so a request from the new
+boot cannot be blocked by the previous one.
 
 This is a control-plane compatibility model, not functional clock or power
 gating.  Turning off the ARM clock does not stop a vCPU, and turning off a

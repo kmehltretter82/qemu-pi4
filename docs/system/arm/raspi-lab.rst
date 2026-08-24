@@ -74,11 +74,13 @@ QEMU exits cleanly, the guest prints ``PI4-LAB: upstream Linux boot
 successful``, and Linux reports that it registered the BCM2711 AON L2
 interrupt controller.  The initramfs also requires the ``brcm2711-dvp`` and
 both ``brcmstb-i2c`` platform drivers, finds HDMI0 by its adapter identity,
-and validates a complete 128-byte EDID through Linux's ``I2C_RDWR`` path.  The
-guest requires two successful target-range sector reads in consecutive
-polling intervals before starting the storage integrity checks; seeing the
-block device's ``/dev`` node alone is not sufficient because Linux can
-publish it while disk initialization is still in progress.
+and validates a complete 128-byte EDID through Linux's ``I2C_RDWR`` path.  It
+also requires VC4 DRM to register ``card0``, report a connected HDMI-A-1 with
+the preferred 1280x800 mode, enable scanout and create a 1280x800 RGB565
+framebuffer.  The guest requires two successful target-range sector reads in
+consecutive polling intervals before starting the storage integrity checks;
+seeing the block device's ``/dev`` node alone is not sufficient because Linux
+can publish it while disk initialization is still in progress.
 
 The initramfs verifies that upstream Linux selected ``iproc-rng200``, obtains
 64 bytes through ``/dev/hwrng``, and reports the modeled 35050-millidegree
@@ -99,6 +101,21 @@ Linux can print a failed ``SYNCHRONIZE CACHE`` command while the deliberate
 driver unbind tears down the USB transport.  The test flushes and closes its
 own transfer before unbinding, then proves that the bytes survived after the
 device returns; this disconnect-time message does not by itself fail the lab.
+
+The normal runner proves the Linux display-device contracts even though it
+uses ``-nographic``.  To prove visible pixels as well, run the dedicated gate
+for each board model::
+
+  scripts/pi4/test-display.py \
+      --qemu build/qemu-system-aarch64 --machine raspi4b
+  scripts/pi4/test-display.py \
+      --qemu build/qemu-system-aarch64 --machine raspi400
+
+The guest fills ``/dev/fb0`` with four deterministic RGB565 bands.  The gate
+waits for all Linux acceptance checks, requests a QMP screendump and validates
+red, green, blue and white samples at three different scanlines.  This
+distinguishes a merely bound DRM driver from an HVS path that actually reaches
+QEMU's display surface.
 
 The same kernel and unmodified upstream Pi 4 DTB can also mount a normal
 Linux root filesystem from the emulated external SD card.  Attach the image
@@ -199,8 +216,8 @@ proved bank-local software events, dual-bank physical events, mask and clear
 behavior, held-high edge handling, watchdog reset and migration with asserted
 outputs.
 
-HDMI DVP and DDC reference evidence
------------------------------------
+Native display, HDMI DVP and DDC reference evidence
+----------------------------------------------------
 
 A read-only Pi 400 capture on 2026-08-24 used Raspberry Pi OS kernel
 ``6.18.39+rpt-rpi-v8``.  Linux had bound ``brcm2711-dvp`` to
@@ -232,6 +249,28 @@ successfully performed a pointer write followed by four 32-byte read chunks
 and validated the standard EDID header and checksum.  Focused qtests also
 cover DVP and DDC reset, ownership, ACK/NACK, malformed-command cleanup and
 live migration with a repeated-start session left open.
+
+The native scanout milestone intentionally uses the virtual HDMI0 monitor
+rather than pretending the disconnected physical capture supplied a display
+contract.  On both machine models the same pinned Linux image bound HVS,
+HDMI0, TXP and pixel valve 2, registered VC4 DRM, selected the virtual
+monitor's 1280x800 mode and created an RGB565 framebuffer.  The pixel gate
+then verified the framebuffer's four color bands in a QMP screendump.
+
+Focused qtests cover HVS display-list memory and channel state, the pixel
+valve's masked write-one-to-clear vblank interrupt and stable frame deadline,
+HDMI0 hotplug/FIFO/packet/scheduler responses, DVP-driven transmitter reset,
+system reset and migration while the pixel-valve timer and DDC repeated-start
+session are active.  No raw HVS, pixel-valve or HDMI-transmitter register
+writes were made on the physical Pi for this milestone.  The implemented
+register subset is justified by the upstream Linux driver path and virtual
+display contract, not claimed as a complete BCM2711 hardware reproduction.
+
+On 2026-08-24 the complete Pi-focused gate passed all eight qtest binaries and
+all 81 subtests: seven display, four CPRMAN, seven DMA, ten I2S, nine PWM,
+three I2C, five Pi 400 and 36 Pi 4B tests.  Both boards then passed the full
+Linux USB-storage/GENET/DRM acceptance boot and the separate visible-pixel
+gate.
 
 GPIO reference evidence
 -----------------------
@@ -382,6 +421,35 @@ A same-state ``SET_CLOCK_STATE`` request kept V3D clock ID 5 disabled, and a
 following query confirmed the state.  These are runtime observations after
 Linux boot, not firmware-reset defaults; the fork keeps all known clocks
 initially enabled to preserve its prior guest-visible behavior.
+
+A bounded follow-up on 2026-08-24 queried ``GET_CLOCKS`` and the current,
+minimum and maximum rate of every candidate ID.  Discovery returned exactly
+the parent/ID pairs zero/1 through zero/15; ID 16 was absent.  Rates below are
+in MHz and are the raw integer responses divided by one million::
+
+  ID  clock       current  minimum  maximum
+   1  EMMC            250      250      250
+   2  UART             48        0     1000
+   3  ARM            1800      600     1800
+   4  CORE            200      200      500
+   5  V3D             250      250      500
+   6  H264            250      250      500
+   7  ISP             250      250      500
+   8  SDRAM           400      400      400
+   9  PIXEL             0        0     2400
+  10  PWM               0        0      500
+  11  HEVC            250      250      500
+  12  EMMC2             0        0      500
+  13  M2MC            120        0      600
+  14  PIXEL_BVB        75       75      324
+  15  VEC               0        0      108
+  16  DISP              0        0        0  (not present)
+
+The fork uses those exact integer values for its per-clock firmware profile.
+Clock-rate writes are retained, clamped to the captured range, reset to the
+captured current values and migrated.  This makes normal Linux clock
+discovery work without converting the runtime snapshot into a claim about
+firmware-reset sequencing or functional device clock gating.
 
 Firmware domain IDs 4, 5, 7, 20 and 23 reported enabled; IDs 0 through 24
 otherwise reported disabled.  Those enabled IDs correspond to video scaler,

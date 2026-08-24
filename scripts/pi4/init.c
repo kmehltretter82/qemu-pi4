@@ -12,16 +12,19 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/fb.h>
 #include <linux/fs.h>
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -43,6 +46,11 @@
 #define HDMI_DDC_ADAPTER "fef04500.i2c"
 #define HDMI_EDID_ADDRESS 0x50
 #define HDMI_EDID_LENGTH 128
+#define DRM_CARD_PATH "/dev/dri/card0"
+#define DRM_CONNECTOR_PATH "/sys/class/drm/card0-HDMI-A-1"
+#define FRAMEBUFFER_PATH "/dev/fb0"
+#define DISPLAY_WIDTH 1280
+#define DISPLAY_HEIGHT 800
 
 static void mount_fs(const char *source, const char *target,
                      const char *filesystem)
@@ -113,6 +121,100 @@ static int value_equals(const char *path, const char *expected)
 
     return !read_value(path, value, sizeof(value)) &&
            !strcmp(value, expected);
+}
+
+static int file_has_line(const char *path, const char *expected)
+{
+    char line[128];
+    FILE *file = fopen(path, "r");
+
+    if (!file) {
+        return 0;
+    }
+    while (fgets(line, sizeof(line), file)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!strcmp(line, expected)) {
+            fclose(file);
+            return 1;
+        }
+    }
+    fclose(file);
+    return 0;
+}
+
+static int framebuffer_mode_matches(void)
+{
+    struct fb_fix_screeninfo fix;
+    struct fb_var_screeninfo var;
+    int fd = open(FRAMEBUFFER_PATH, O_RDWR);
+
+    if (fd < 0) {
+        return 0;
+    }
+    if (ioctl(fd, FBIOGET_FSCREENINFO, &fix) ||
+        ioctl(fd, FBIOGET_VSCREENINFO, &var)) {
+        close(fd);
+        return 0;
+    }
+    close(fd);
+
+    printf("PI4-LAB: fb0 mode %ux%u virtual %ux%u, %u bpp, pitch %u\n",
+           var.xres, var.yres, var.xres_virtual, var.yres_virtual,
+           var.bits_per_pixel, fix.line_length);
+    return var.xres == DISPLAY_WIDTH && var.yres == DISPLAY_HEIGHT &&
+           var.xres_virtual >= var.xres && var.yres_virtual >= var.yres &&
+           var.bits_per_pixel == 16 &&
+           fix.line_length >= var.xres * sizeof(uint16_t);
+}
+
+static int write_framebuffer_pattern(void)
+{
+    static const uint16_t colors[] = {
+        0xf800, /* red */
+        0x07e0, /* green */
+        0x001f, /* blue */
+        0xffff, /* white */
+    };
+    struct fb_fix_screeninfo fix;
+    struct fb_var_screeninfo var;
+    uint8_t *mapping;
+    size_t length;
+    int fd = open(FRAMEBUFFER_PATH, O_RDWR | O_SYNC);
+
+    if (fd < 0) {
+        return -1;
+    }
+    if (ioctl(fd, FBIOGET_FSCREENINFO, &fix) ||
+        ioctl(fd, FBIOGET_VSCREENINFO, &var) ||
+        var.xres != DISPLAY_WIDTH || var.yres != DISPLAY_HEIGHT ||
+        var.bits_per_pixel != 16 ||
+        fix.line_length < var.xres * sizeof(uint16_t)) {
+        close(fd);
+        return -1;
+    }
+
+    length = (size_t)fix.line_length * var.yres_virtual;
+    mapping = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapping == MAP_FAILED) {
+        close(fd);
+        return -1;
+    }
+
+    for (uint32_t y = 0; y < var.yres; y++) {
+        uint16_t *row = (uint16_t *)(mapping + y * fix.line_length);
+
+        for (uint32_t x = 0; x < var.xres; x++) {
+            row[x] = colors[(x * 4U) / var.xres];
+        }
+    }
+
+    msync(mapping, length, MS_SYNC);
+    munmap(mapping, length);
+    close(fd);
+
+    /* Let QEMU's display refresh timer consume the dirty guest pages. */
+    usleep(500000);
+    return 0;
 }
 
 static int pci_identity_present(const char *bdf, const char *vendor,
@@ -863,6 +965,7 @@ int main(void)
     unsigned long interrupts_before_rebind;
     int failures = 0;
     int pi400;
+    int display_test;
     int storage_ready = 0;
     int storage_test;
     int vl805_ready;
@@ -886,6 +989,21 @@ int main(void)
 
     pi400 = model_is_pi400();
     storage_test = cmdline_has_word("pi4lab.usb_storage=1");
+    display_test = cmdline_has_word("pi4lab.display_test=1");
+    report_check("VC4 DRM card0 registered",
+                 wait_for_path(DRM_CARD_PATH, 1), &failures);
+    report_check("HDMI-A-1 connector reports connected",
+                 !value_equals(DRM_CONNECTOR_PATH "/status", "connected"),
+                 &failures);
+    report_check("HDMI-A-1 advertises preferred 1280x800 mode",
+                 !file_has_line(DRM_CONNECTOR_PATH "/modes", "1280x800"),
+                 &failures);
+    report_check("HDMI-A-1 has an active scanout",
+                 !value_equals(DRM_CONNECTOR_PATH "/enabled", "enabled"),
+                 &failures);
+    report_check("VC4 DRM framebuffer is 1280x800 RGB565",
+                 wait_for_path(FRAMEBUFFER_PATH, 1) ||
+                 !framebuffer_mode_matches(), &failures);
     report_check("BCM2711 HDMI DVP clock/reset driver",
                  !platform_driver_bound("fef00000.clock", "brcm2711-dvp"),
                  &failures);
@@ -1012,6 +1130,11 @@ int main(void)
 
     dump_file("/proc/interrupts");
 
+    if (display_test) {
+        report_check("VC4 scanout deterministic RGB565 pattern ready",
+                     write_framebuffer_pattern(), &failures);
+    }
+
     if (failures) {
         printf("\nPI4-LAB: acceptance failed (%d check%s)\n", failures,
                failures == 1 ? "" : "s");
@@ -1020,7 +1143,7 @@ int main(void)
     }
     fflush(NULL);
     sync();
-    sleep(1);
+    sleep(display_test ? 5 : 1);
 
     if (reboot(RB_AUTOBOOT)) {
         fprintf(stderr, "pi4-lab: reboot failed: %s\n", strerror(errno));

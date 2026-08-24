@@ -167,6 +167,19 @@ class ShellScriptTests(unittest.TestCase):
         "(/soc/interrupt-controller@7ef00100, parent irq: 14)"
     )
     DDC_CHECKED = "PI4-LAB: HDMI0 DDC reads a valid 128-byte EDID ok"
+    DRM_CARD_CHECKED = "PI4-LAB: VC4 DRM card0 registered ok"
+    DRM_FB_CHECKED = (
+        "PI4-LAB: VC4 DRM framebuffer is 1280x800 RGB565 ok"
+    )
+
+    def successful_linux_output(self):
+        return "\n".join((
+            self.LINUX_SUCCESS,
+            self.AON_REGISTERED,
+            self.DDC_CHECKED,
+            self.DRM_CARD_CHECKED,
+            self.DRM_FB_CHECKED,
+        ))
 
     def test_shell_scripts_parse(self):
         subprocess.run([
@@ -216,8 +229,7 @@ class ShellScriptTests(unittest.TestCase):
                       result.stderr)
 
     def test_linux_runner_accepts_success_marker(self):
-        result = self.run_linux_with_fake_qemu(
-            f"{self.LINUX_SUCCESS}\n{self.AON_REGISTERED}\n{self.DDC_CHECKED}")
+        result = self.run_linux_with_fake_qemu(self.successful_linux_output())
 
         self.assertEqual(result.returncode, 0)
 
@@ -229,9 +241,17 @@ class ShellScriptTests(unittest.TestCase):
         self.assertIn("DVP/DDC/EDID acceptance checks were not run",
                       result.stderr)
 
+    def test_linux_runner_requires_native_display_checks(self):
+        result = self.run_linux_with_fake_qemu(
+            f"{self.LINUX_SUCCESS}\n{self.AON_REGISTERED}\n{self.DDC_CHECKED}")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("native VC4 DRM acceptance checks were not run",
+                      result.stderr)
+
     def test_linux_runner_propagates_qemu_failure(self):
         result = self.run_linux_with_fake_qemu(
-            f"{self.LINUX_SUCCESS}\n{self.AON_REGISTERED}\n{self.DDC_CHECKED}",
+            self.successful_linux_output(),
             qemu_status=7)
 
         self.assertEqual(result.returncode, 1)

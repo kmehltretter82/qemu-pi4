@@ -147,19 +147,21 @@ PI4_NINJA_TARGETS = qemu-system-aarch64 \
 	tests/qtest/raspi4b-test \
 	tests/qtest/qos-test
 
-# raspi4b-test repeatedly allocates a 2 GiB guest.  Meson's random malloc
-# perturbation physically dirties each allocation and can make the host kill
-# QEMU for memory pressure; keep perturbation on for every other test.
+# raspi4b-test and bcm2711-display-test repeatedly allocate a 2 GiB guest.
+# Meson's random malloc perturbation physically dirties each allocation and
+# can make the host kill QEMU for memory pressure; serialize those tests with
+# perturbation disabled and keep it enabled for every other test.
 .PHONY: check-pi4
 check-pi4:
 	+$(MAKE) $(PI4_NINJA_TARGETS)
 	@$(PYTHON) "$(SRC_PATH)/scripts/check-pi4-machines.py" \
 		"$(BUILD_DIR)/qemu-system-aarch64"
 	@env MALLOC_PERTURB_=0 $(MESON) test --no-rebuild --print-errorlogs \
-		qemu:qtest-aarch64/raspi4b-test
+		--num-processes 1 \
+		qemu:qtest-aarch64/raspi4b-test \
+		qemu:qtest-aarch64/bcm2711-display-test
 	@$(MESON) test --no-rebuild --print-errorlogs \
 		qemu:test-qgraph \
-		qemu:qtest-aarch64/bcm2711-display-test \
 		qemu:qtest-aarch64/bcm2835-cprman-test \
 		qemu:qtest-aarch64/bcm2835-dma-test \
 		qemu:qtest-aarch64/bcm2835-i2c-test \
