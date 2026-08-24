@@ -4,6 +4,11 @@
 bcm2835_i2s_audio_rate(uint64_t bit_clock, unsigned int frame_bits, uint64_t rate) "bit-clock=%" PRIu64 "Hz frame=%u bits rate=%" PRIu64 "Hz"
 bcm2835_i2s_frame_period(int64_t now, uint32_t frames, unsigned int tx_before, unsigned int tx_after, unsigned int rx_before, unsigned int rx_after) "time=%" PRId64 "ns frames=%" PRIu32 " tx=%u->%u rx=%u->%u"
 
+# bcm2835_pwm.c
+bcm2835_pwm_audio_rate(unsigned int instance, uint64_t clock, uint32_t range, uint64_t rate) "pwm%u clock=%" PRIu64 "Hz range=%" PRIu32 " rate=%" PRIu64 "Hz"
+bcm2835_pwm_output(unsigned int instance, unsigned int channel, uint32_t old_freq, uint32_t new_freq, uint32_t old_duty, uint32_t new_duty) "pwm%u channel=%u freq=%" PRIu32 "->%" PRIu32 "Hz duty=%" PRIu32 "->%" PRIu32
+bcm2835_pwm_period(unsigned int instance, int64_t now, uint32_t periods, unsigned int before, unsigned int after) "pwm%u time=%" PRId64 "ns periods=%" PRIu32 " fifo=%u->%u"
+
 # cs4231.c
 cs4231_mem_readl_dreg(uint32_t reg, uint32_t ret) "read dreg %d: 0x%02x"
 cs4231_mem_readl_reg(uint32_t reg, uint32_t ret) "read reg %d: 0x%08x"
