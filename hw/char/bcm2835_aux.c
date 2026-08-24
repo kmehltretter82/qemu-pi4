@@ -14,7 +14,6 @@
  * At present only the core UART functions (data path for tx/rx) are
  * implemented. The following features/registers are unimplemented:
  *  - Line control
- *  - Scratch register
  *  - Extra control
  *  - Baudrate
  *  - SPI interfaces
@@ -51,6 +50,14 @@
 /* supported bits in the modem control and status registers */
 #define MCR_RTS  0x2
 #define MSR_CTS  0x10
+
+/* Mini UART bit in the shared enable register. */
+#define ENABLE_UART 0x1
+
+static bool bcm2835_aux_uart_enabled(BCM2835AuxState *s)
+{
+    return s->enables & ENABLE_UART;
+}
 
 static void bcm2835_aux_update(BCM2835AuxState *s)
 {
@@ -89,12 +96,18 @@ static uint64_t bcm2835_aux_read(void *opaque, hwaddr offset, unsigned size)
     uint32_t c, res;
     int flags;
 
+    /* The disabled mini UART's register bank reads as zero. */
+    if (!bcm2835_aux_uart_enabled(s) &&
+        offset >= AUX_MU_IO_REG && offset <= AUX_MU_BAUD_REG) {
+        return 0;
+    }
+
     switch (offset) {
     case AUX_IRQ:
         return s->iir != 0;
 
     case AUX_ENABLES:
-        return 1; /* mini UART permanently enabled */
+        return s->enables;
 
     case AUX_MU_IO_REG:
         /* "DLAB bit set means access baudrate register" is NYI */
@@ -111,7 +124,7 @@ static uint64_t bcm2835_aux_read(void *opaque, hwaddr offset, unsigned size)
 
     case AUX_MU_IER_REG:
         /* "DLAB bit set means access baudrate register" is NYI */
-        return 0xc0 | s->ier; /* FIFO enables always read 1 */
+        return s->ier;
 
     case AUX_MU_IIR_REG:
         res = 0xc0; /* FIFO enables */
@@ -151,8 +164,7 @@ static uint64_t bcm2835_aux_read(void *opaque, hwaddr offset, unsigned size)
         return MSR_CTS;
 
     case AUX_MU_SCRATCH:
-        qemu_log_mask(LOG_UNIMP, "%s: AUX_MU_SCRATCH unsupported\n", __func__);
-        return 0;
+        return s->scratch;
 
     case AUX_MU_CNTL_REG:
         return 0x3; /* tx, rx enabled */
@@ -182,18 +194,22 @@ static void bcm2835_aux_write(void *opaque, hwaddr offset, uint64_t value,
 {
     BCM2835AuxState *s = opaque;
     unsigned char ch;
+    bool uart_was_enabled;
 
     switch (offset) {
     case AUX_ENABLES:
-        if (value != 1) {
-            qemu_log_mask(LOG_UNIMP, "%s: unsupported attempt to enable SPI"
-                                     " or disable UART: 0x%"PRIx64"\n",
-                          __func__, value);
+        uart_was_enabled = bcm2835_aux_uart_enabled(s);
+        s->enables = (uint8_t)value;
+        if (!uart_was_enabled && bcm2835_aux_uart_enabled(s)) {
+            qemu_chr_fe_accept_input(&s->chr);
         }
         break;
 
     case AUX_MU_IO_REG:
         /* "DLAB bit set means access baudrate register" is NYI */
+        if (!bcm2835_aux_uart_enabled(s)) {
+            break;
+        }
         ch = value;
         /* XXX this blocks entire thread. Rewrite to use
          * qemu_chr_fe_write and background I/O callbacks */
@@ -224,7 +240,7 @@ static void bcm2835_aux_write(void *opaque, hwaddr offset, uint64_t value,
         break;
 
     case AUX_MU_SCRATCH:
-        qemu_log_mask(LOG_UNIMP, "%s: AUX_MU_SCRATCH unsupported\n", __func__);
+        s->scratch = (uint8_t)value;
         break;
 
     case AUX_MU_CNTL_REG:
@@ -247,6 +263,9 @@ static int bcm2835_aux_can_receive(void *opaque)
 {
     BCM2835AuxState *s = opaque;
 
+    if (!bcm2835_aux_uart_enabled(s)) {
+        return 0;
+    }
     return BCM2835_AUX_RX_FIFO_LEN - s->read_count;
 }
 
@@ -269,8 +288,13 @@ static void bcm2835_aux_put_fifo(void *opaque, uint8_t value)
 
 static void bcm2835_aux_receive(void *opaque, const uint8_t *buf, int size)
 {
+    BCM2835AuxState *s = opaque;
+
+    if (!bcm2835_aux_uart_enabled(s)) {
+        return;
+    }
     for (int i = 0; i < size; i++) {
-        bcm2835_aux_put_fifo(opaque, buf[i]);
+        bcm2835_aux_put_fifo(s, buf[i]);
     }
 }
 
@@ -288,14 +312,21 @@ static int bcm2835_aux_post_load(void *opaque, int version_id)
 {
     BCM2835AuxState *s = opaque;
 
+    if (version_id < 3) {
+        /* Older versions modeled the mini UART as permanently enabled. */
+        s->enables = ENABLE_UART;
+    }
     bcm2835_aux_update(s);
     bcm2835_aux_update_rts(s);
+    if (bcm2835_aux_uart_enabled(s)) {
+        qemu_chr_fe_accept_input(&s->chr);
+    }
     return 0;
 }
 
 static const VMStateDescription vmstate_bcm2835_aux = {
     .name = TYPE_BCM2835_AUX,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = bcm2835_aux_post_load,
     .fields = (const VMStateField[]) {
@@ -306,6 +337,8 @@ static const VMStateDescription vmstate_bcm2835_aux = {
         VMSTATE_UINT8(ier, BCM2835AuxState),
         VMSTATE_UINT8(iir, BCM2835AuxState),
         VMSTATE_UINT8_V(mcr, BCM2835AuxState, 2),
+        VMSTATE_UINT8_V(enables, BCM2835AuxState, 3),
+        VMSTATE_UINT8_V(scratch, BCM2835AuxState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -339,6 +372,8 @@ static void bcm2835_aux_reset(DeviceState *dev)
     s->ier = 0;
     s->iir = 0;
     s->mcr = 0;
+    s->enables = 0;
+    s->scratch = 0;
     bcm2835_aux_update(s);
     bcm2835_aux_update_rts(s);
     qemu_chr_fe_accept_input(&s->chr);

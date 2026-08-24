@@ -57,11 +57,13 @@
 
 #define RASPI4_AUX_BASE           0xfe215000
 #define RASPI4_AUX_IRQ            (RASPI4_AUX_BASE + 0x00)
+#define RASPI4_AUX_ENABLES        (RASPI4_AUX_BASE + 0x04)
 #define RASPI4_AUX_MU_IER         (RASPI4_AUX_BASE + 0x44)
 #define RASPI4_AUX_MU_MCR         (RASPI4_AUX_BASE + 0x50)
 #define RASPI4_AUX_MU_MSR         (RASPI4_AUX_BASE + 0x58)
+#define RASPI4_AUX_MU_SCRATCH     (RASPI4_AUX_BASE + 0x5c)
 #define RASPI4_AUX_GIC_IRQ        93
-#define AUX_IER_FIFO_ENABLED      0xc0
+#define AUX_ENABLE_UART           (1U << 0)
 #define AUX_IER_TX_INT            (1U << 1)
 #define AUX_MCR_RTS               (1U << 1)
 #define AUX_MSR_CTS               (1U << 4)
@@ -618,33 +620,59 @@ static void raspi4b_watchdog_reset(void)
 
 static void test_aux_uart_modem_and_reset(void)
 {
-    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==,
-                    AUX_IER_FIFO_ENABLED);
+    g_assert_cmphex(readl(RASPI4_AUX_ENABLES), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==, 0);
     g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, 0);
     g_assert_cmphex(readl(RASPI4_AUX_MU_MCR), ==, 0);
-    g_assert_cmphex(readl(RASPI4_AUX_MU_MSR), ==, AUX_MSR_CTS);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MSR), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_SCRATCH), ==, 0);
     g_assert_false(get_irq(RASPI4_AUX_GIC_IRQ));
 
+    /* Pi 400 silicon retains and reads back the whole low byte. */
+    writel(RASPI4_AUX_ENABLES, UINT32_MAX);
+    g_assert_cmphex(readl(RASPI4_AUX_ENABLES), ==, UINT8_MAX);
+    writel(RASPI4_AUX_ENABLES, 0);
+
+    /*
+     * Pi 400 control writes are retained while disabled, but the UART bank
+     * reads as zero.  Its interrupt status and GIC line are not gated.
+     */
     writel(RASPI4_AUX_MU_MCR, UINT32_MAX);
+    writel(RASPI4_AUX_MU_IER, AUX_IER_TX_INT);
+    writel(RASPI4_AUX_MU_SCRATCH, 0x1a5);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MCR), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_SCRATCH), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, 1);
+    g_assert_true(get_irq(RASPI4_AUX_GIC_IRQ));
+
+    writel(RASPI4_AUX_ENABLES, AUX_ENABLE_UART);
+    g_assert_cmphex(readl(RASPI4_AUX_ENABLES), ==, AUX_ENABLE_UART);
     g_assert_cmphex(readl(RASPI4_AUX_MU_MCR), ==, AUX_MCR_RTS);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==, AUX_IER_TX_INT);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MSR), ==, AUX_MSR_CTS);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_SCRATCH), ==, 0xa5);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, 1);
+    g_assert_true(get_irq(RASPI4_AUX_GIC_IRQ));
+
     writel(RASPI4_AUX_MU_MCR, 1);
     g_assert_cmphex(readl(RASPI4_AUX_MU_MCR), ==, 0);
     writel(RASPI4_AUX_MU_MCR, AUX_MCR_RTS);
 
-    writel(RASPI4_AUX_MU_IER, AUX_IER_TX_INT);
-    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==,
-                    AUX_IER_FIFO_ENABLED | AUX_IER_TX_INT);
-    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, 1);
-    g_assert_true(get_irq(RASPI4_AUX_GIC_IRQ));
-
     raspi4b_watchdog_reset();
-    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==,
-                    AUX_IER_FIFO_ENABLED);
+    g_assert_cmphex(readl(RASPI4_AUX_ENABLES), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==, 0);
     g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, 0);
     g_assert_cmphex(readl(RASPI4_AUX_MU_MCR), ==, 0);
-    g_assert_cmphex(readl(RASPI4_AUX_MU_MSR), ==, AUX_MSR_CTS);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MSR), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_SCRATCH), ==, 0);
     g_assert_false(get_irq(RASPI4_AUX_GIC_IRQ));
 
+    writel(RASPI4_AUX_ENABLES, AUX_ENABLE_UART);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_IER), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MCR), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_MSR), ==, AUX_MSR_CTS);
+    g_assert_cmphex(readl(RASPI4_AUX_MU_SCRATCH), ==, 0);
     writel(RASPI4_AUX_MU_IER, AUX_IER_TX_INT);
     g_assert_true(get_irq(RASPI4_AUX_GIC_IRQ));
     writel(RASPI4_AUX_MU_IER, 0);
@@ -1334,7 +1362,10 @@ static void test_soc_peripheral_migration(void)
                            G_N_ELEMENTS(clock_off), sizeof(clock_off));
     property_request_qtest(source, RPI_FWREQ_SET_DOMAIN_STATE, domain_on,
                            G_N_ELEMENTS(domain_on), sizeof(domain_on));
+    writel(RASPI4_AUX_ENABLES, AUX_ENABLE_UART);
     writel(RASPI4_AUX_MU_MCR, AUX_MCR_RTS);
+    writel(RASPI4_AUX_MU_SCRATCH, 0xa5);
+    writel(RASPI4_AUX_ENABLES, 0);
 
     qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
     tmpdir = g_dir_make_tmp("raspi4b-soc-migration-XXXXXX", &error);
@@ -1398,8 +1429,14 @@ static void test_soc_peripheral_migration(void)
     qobject_unref(response);
     g_assert_cmphex(qtest_readl(destination, RASPI4_THERMAL_STATUS), ==,
                     THERMAL_STATUS_VALID | THERMAL_TEST_RAW);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_ENABLES), ==, 0);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_MU_MCR), ==, 0);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_MU_SCRATCH), ==, 0);
+    qtest_writel(destination, RASPI4_AUX_ENABLES, AUX_ENABLE_UART);
     g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_MU_MCR), ==,
                     AUX_MCR_RTS);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_MU_SCRATCH), ==,
+                    0xa5);
 
     property_request_qtest(destination, RPI_FWREQ_GET_CLOCK_STATE, get_clock,
                            G_N_ELEMENTS(get_clock), sizeof(get_clock));

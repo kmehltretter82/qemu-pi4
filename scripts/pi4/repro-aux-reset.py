@@ -7,9 +7,11 @@ against an unmodified QEMU build and this fork separately:
 
     python3 scripts/pi4/repro-aux-reset.py /path/to/qemu-system-aarch64
 
-Exit status 1 means the AUX interrupt-enable or interrupt state did not return
-to its QEMU startup value after a guest-requested cold reset.  MCR values are
-also printed so the fork's RTS register support can be compared directly.
+Exit status 1 means the AUX enable, interrupt-enable, or interrupt state did
+not return to its QEMU startup value after a guest-requested cold reset.  The
+script explicitly enables the mini UART before comparing its internal state,
+so it works with both QEMU's historical always-enabled model and models which
+implement the hardware enable gate.  MCR values are printed as extra context.
 """
 
 import subprocess
@@ -18,6 +20,7 @@ import sys
 
 AUX_BASE = 0xFE215000
 AUX_IRQ = AUX_BASE + 0x00
+AUX_ENABLES = AUX_BASE + 0x04
 AUX_MU_IER = AUX_BASE + 0x44
 AUX_MU_MCR = AUX_BASE + 0x50
 PM_RSTC = 0xFE10001C
@@ -77,34 +80,53 @@ def main() -> int:
         return int(command(f"readl 0x{address:x}").split()[1], 16)
 
     try:
-        initial = (readl(AUX_MU_IER), readl(AUX_IRQ), readl(AUX_MU_MCR))
+        startup_enable = readl(AUX_ENABLES)
+        writel(AUX_ENABLES, 1)
+        baseline_enable = readl(AUX_ENABLES)
+        baseline = (readl(AUX_MU_IER), readl(AUX_IRQ), readl(AUX_MU_MCR))
 
         writel(AUX_MU_IER, TX_INTERRUPT_ENABLE)
         writel(AUX_MU_MCR, 0xFFFFFFFF)
+        armed_enable = readl(AUX_ENABLES)
         armed = (readl(AUX_MU_IER), readl(AUX_IRQ), readl(AUX_MU_MCR))
 
         writel(PM_WDOG, PM_PASSWORD | PM_WDOG_ONE_SECOND)
         writel(PM_RSTC, PM_PASSWORD | PM_RSTC_FULL)
         command("clock_step 1000000000")
-        post_reset = (readl(AUX_MU_IER), readl(AUX_IRQ), readl(AUX_MU_MCR))
+        post_reset_enable = readl(AUX_ENABLES)
+        gated = (readl(AUX_MU_IER), readl(AUX_IRQ), readl(AUX_MU_MCR))
+        writel(AUX_ENABLES, 1)
+        restored_enable = readl(AUX_ENABLES)
+        restored = (readl(AUX_MU_IER), readl(AUX_IRQ), readl(AUX_MU_MCR))
 
-        print("                 IER IRQ MCR")
+        print(f"startup EN:     0x{startup_enable:02x}")
+        print("                 EN IER IRQ MCR")
         print(
-            f"initial:    0x{initial[0]:02x}  "
-            f"{initial[1]}  0x{initial[2]:02x}"
+            f"baseline:   0x{baseline_enable:02x} 0x{baseline[0]:02x}  "
+            f"{baseline[1]}  0x{baseline[2]:02x}"
         )
-        print(f"armed:      0x{armed[0]:02x}  {armed[1]}  0x{armed[2]:02x}")
         print(
-            f"post-reset: 0x{post_reset[0]:02x}  "
-            f"{post_reset[1]}  0x{post_reset[2]:02x}"
+            f"armed:      0x{armed_enable:02x} 0x{armed[0]:02x}  "
+            f"{armed[1]}  0x{armed[2]:02x}"
         )
-        expected_initial = (0xC0, 0, 0)
-        expected_armed_prefix = (0xC2, 1)
-        expected_post_reset = (0xC0, 0, 0)
+        print(
+            f"post-reset: 0x{post_reset_enable:02x} 0x{gated[0]:02x}  "
+            f"{gated[1]}  0x{gated[2]:02x}"
+        )
+        print(
+            f"re-enabled: 0x{restored_enable:02x} 0x{restored[0]:02x}  "
+            f"{restored[1]}  0x{restored[2]:02x}"
+        )
+        expected_armed_ier = baseline[0] | TX_INTERRUPT_ENABLE
+        expected_gated = baseline if post_reset_enable & 1 else (0, 0, 0)
         passed = (
-            initial == expected_initial
-            and armed[:2] == expected_armed_prefix
-            and post_reset == expected_post_reset
+            baseline_enable & 1
+            and baseline[1:] == (0, 0)
+            and armed[:2] == (expected_armed_ier, 1)
+            and post_reset_enable == startup_enable
+            and gated == expected_gated
+            and restored_enable & 1
+            and restored == baseline
         )
         return 0 if passed else 1
     finally:
