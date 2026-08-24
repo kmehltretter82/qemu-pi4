@@ -534,6 +534,37 @@ controller register interface remains unimplemented because its programming
 protocol is not publicly documented; this functional identity support does
 not claim a Linux nvmem-accessible OTP controller.
 
+The firmware ``GET_BOARD_MODEL`` tag returns zero on the Pi 4 family; the
+``GET_BOARD_REVISION`` value is the useful board discriminator.  This matches
+the Pi 400 capture and avoids inventing a model number that the firmware does
+not provide.
+
+Firmware property buffers
+-------------------------
+
+The property mailbox parser validates the complete top-level header, every tag
+header, four-byte padding and the terminating end tag before dispatching a
+request.  It rejects malformed requests with the documented partial-response
+code ``0x80000001`` and bounds the total request below 1 MiB so a guest cannot
+turn a property MMIO write into an unbounded host walk.  Supported responses
+report their full desired length while writes are truncated to the guest's
+declared value buffer.  Unknown and deliberately unimplemented tags leave the
+tag response bit clear.  The command-line tag keeps the Pi firmware's
+all-or-nothing short-buffer behavior as a documented compatibility exception.
+
+Framebuffer palette Test/Set requests require the published 24..1032-byte
+value area, validate ``offset + length`` as one interval within 256 entries,
+and stage all colors before a Set changes the emulated palette.  Invalid or
+truncated requests therefore do not partially modify palette memory.
+
+The project's Pi 400 probes show that short responses are tag-specific in the
+real firmware: some tags truncate, some preserve the request, and some return
+an error without touching the buffer.  The fork follows the published safe
+mailbox contract rather than reproducing firmware padding overruns.  One
+remaining fidelity limitation is tracked as :doc:`raspi-upstream` item
+``QP4-UP-037``: framebuffer Get/Set grouping is not yet separated from the
+generic in-order tag walker.
+
 Firmware clock and power state
 ------------------------------
 

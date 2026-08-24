@@ -192,21 +192,81 @@ QP4-UP-007: self-linked BCM2835 DMA control blocks can hang the emulator
 QP4-UP-008: malformed property-mailbox tags can make the parser lose progress
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:Classification: bug candidate
-:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Classification: bug candidate; E1 host forward-progress failure
+:Upstream source checked: ``2be159078ea26feac4c9c9902acf8906f1a05c2a``
+:Environment: Native arm64 macOS build of unmodified QEMU master, using
+  ``qemu-system-aarch64-unsigned`` with ``-machine raspi4b -accel qtest``.
+:Contract: A guest-controlled MMIO request must not make the emulator lose
+  forward progress merely because the request is malformed.  The published
+  property format also requires a complete tag header, padded value area and
+  end tag before a response is produced.
 :Observed issue: The parser advances by a guest-supplied value-buffer size;
-  crafted zero or overflowing sizes may wrap or fail to advance.
-:Before sending: Add a bounded-memory qtest proving termination and safe
-  rejection of malformed requests.
+  with the exact value ``0xfffffff4`` the old 32-bit cursor increment wraps to
+  zero.  The final qtest MMIO write then never returns within the two-second
+  harness deadline.  The same request against the fork returns the mailbox
+  address, top-level response ``0x80000001`` and a clear tag response word.
+:Reproducer: ``scripts/pi4/repro-property-parser.py``.  On 2026-08-24 the
+  clean-master run timed out, while the fork run printed::
+
+    mailbox response: 0x00001008
+    buffer status:   0x80000001
+    tag status:      0x00000000
+
+  The script is an AI-derived local research aid and is not eligible for an
+  upstream submission.
+:Pi 400 evidence: The malformed request was intentionally not sent to the
+  live VideoCore firmware; it would be a denial-of-service probe rather than a
+  useful hardware-fidelity oracle.
+:Before sending: The user must personally inspect and rerun a minimal,
+  human-validated reproducer on current master, confirm the exact source and
+  host-safety contract, search for an existing report, and disclose assisted
+  discovery.  Any upstream patch must be independently produced by a human.
 
 QP4-UP-009: framebuffer palette tag has an interval bounds-check gap
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:Classification: bug candidate
-:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
-:Observed issue: Palette start and end ranges are checked independently,
-  rather than validating the complete interval before copying entries.
-:Before sending: Confirm firmware reachability and add a malformed-tag test.
+:Classification: bug candidate; E1 guest-controlled out-of-interval write
+:Upstream source checked: ``2be159078ea26feac4c9c9902acf8906f1a05c2a``
+:Contract: The published `framebuffer palette interface
+  <https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface>`__
+  requires a 24..1032-byte value buffer, an offset/length interval within 256
+  entries, and says palette changes must not be partially applied.
+:Observed issue: A clean-master qtest sends offset 254, length 4 and four
+  complete colors.  Upstream reports a successful tag response but writes the
+  third color to entry 256, immediately beyond the 256-entry palette.  The
+  fork returns the documented invalid response and leaves the sentinel at
+  entry 256 unchanged.  The focused observation is
+  ``scripts/pi4/repro-property-contracts.py QEMU palette``.
+:Pi 400 evidence: ``GET_PALETTE`` succeeds, but both an in-range and an
+  out-of-range ``SET_PALETTE`` request through ``/dev/vcio`` are rejected with
+  global ``0x80000001`` on the project's KMS/headless Pi 400.  The firmware
+  therefore does not expose a usable tag-level palette oracle in this setup.
+:Fork change: Validate the complete interval and request length before reading
+  colors, stage the values, and apply them only after validation.  The qtest
+  covers boundary entries, invalid intervals, short buffers and atomicity.
+:Before sending: The user must personally rerun the clean-master reproducer,
+  verify the source and firmware contract, search for duplicates, and disclose
+  assisted discovery.  Do not submit this fork's AI-derived code or tests;
+  any upstream fix must be independently implemented by a human.
+
+QP4-UP-037: framebuffer property tags are processed in guest order
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate; E1 contract mismatch pending independent
+  specification review
+:Upstream source checked: ``2be159078ea26feac4c9c9902acf8906f1a05c2a``
+:Contract: The published framebuffer section says all tags in one operation
+  are processed together, Get tags are processed after all Set tags, and Test
+  tags must not be mixed with Get/Set tags.
+:Observed issue: A complete request containing ``GET_DEPTH`` followed by
+  ``SET_DEPTH(32)`` returns the initial depth (16) for the Get tag and 32 for
+  the Set tag on both clean upstream and the fork.  The source switch handles
+  tags strictly in buffer order.  The focused observation is
+  ``scripts/pi4/repro-property-contracts.py QEMU framebuffer-order``.
+:Disposition: This is tracked separately from the malformed-buffer and
+  palette safety fixes.  It needs a human review of the firmware contract,
+  especially for all framebuffer Set/Test/Palette combinations, before the
+  fork changes its response ordering or an upstream report is considered.
 
 QP4-UP-010: framebuffer migration restores geometry without post-load checks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
