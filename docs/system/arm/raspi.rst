@@ -125,27 +125,38 @@ Ports ``1.1`` through ``1.3`` are free on both machines.  Port ``1.4`` is also
 free on ``raspi4b`` but contains the integrated keyboard on ``raspi400``.
 Remove ``snapshot=on`` only when writes to the host image should persist.
 
-Mini UART modem control and reset
----------------------------------
+Mini UART enable, modem control and reset
+-----------------------------------------
 
 The BCM2835 AUX mini UART is 16550-like rather than a complete 16550.  The
-model implements the device's one modem-control output and one modem-status
-input: ``AUX_MU_MCR`` bit 1 controls active-low RTS, and ``AUX_MU_MSR`` bit 4
-reports active-low CTS.  Unsupported bits are ignored and read as zero.  When
-the selected QEMU character backend supports serial modem controls, RTS and
-CTS are passed through its ``TIOCM`` interface; otherwise CTS retains the
-documented reset status.
+model retains the low byte written to ``AUX_ENABLES`` and uses bit 0 as the
+mini-UART gate.  The gate resets clear.  While it is clear the mini-UART
+register bank reads as zero, outgoing data bytes are discarded and incoming
+character-backend data is paused.  Implemented control writes are retained,
+and interrupt status and the GIC input remain live, matching the Pi 400
+behavior measured by this project.  Enabling the UART exposes the retained
+state and resumes backend input.  Enable bits 1 and 2 read back, but the two
+auxiliary SPI controllers are not implemented.
+
+``AUX_MU_IER`` exposes only its two supported interrupt-enable bits; the FIFO
+status bits are reported by ``AUX_MU_IIR`` instead.  The 8-bit scratch
+register is read/write.  The model also implements the device's one
+modem-control output and one modem-status input: ``AUX_MU_MCR`` bit 1 controls
+active-low RTS, and ``AUX_MU_MSR`` bit 4 reports active-low CTS.  Unsupported
+bits are ignored and read as zero.  When the selected QEMU character backend
+supports serial modem controls, RTS and CTS are passed through its ``TIOCM``
+interface; otherwise CTS retains the documented reset status.
 
 A cold reset discards received FIFO data, clears the interrupt enable and
-derived interrupt state, lowers the GIC input, resets RTS control, and lets a
-previously back-pressured character backend send input again.  The FIFO,
-interrupt and RTS-control state migrates with the VM, and post-load processing
-reconstructs the IRQ and external RTS output.
+derived interrupt state, lowers the GIC input, clears ``AUX_ENABLES`` and the
+scratch register, resets RTS control, and leaves character input paused until
+the UART is enabled again.  The FIFO, enable, interrupt, scratch and
+RTS-control state migrates with the VM, and post-load processing reconstructs
+the IRQ and external RTS output.
 
-Line control, the scratch and baud registers, automatic flow control and the
-two auxiliary SPI controllers remain unimplemented.  The shared auxiliary
-enable and extra-control registers also retain the earlier simplified
-always-enabled and transmit/receive-enabled behavior; GPIO pin-mux timing is
+Line control, the baud register, automatic flow control and the two auxiliary
+SPI controllers remain unimplemented.  The extra-control register retains the
+earlier simplified transmit/receive-enabled behavior; GPIO pin-mux timing is
 not modeled.
 
 DWC2 core reset

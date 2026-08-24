@@ -72,7 +72,7 @@ QP4-UP-002: incomplete Raspberry Pi Kconfig dependencies
   configure-and-build gate is broader evidence, not yet a minimal test.
 
 QP4-UP-003: BCM2835 I2C interrupt remains asserted after status clear
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :Classification: bug candidate
 :Fork commit: ``da9bb396578ff5fa846c20159fe9abac84b70724``
@@ -588,7 +588,8 @@ QP4-UP-029: BCM2835 AUX UART interrupt state survives a system reset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :Classification: bug candidate; E1, with no demonstrated E2 or E3 failure
-:Fork commit: ``4f78fe1e54f5ea625a1298821df563f8d2a90b57``
+:Fork commits: ``4f78fe1e54f5ea625a1298821df563f8d2a90b57`` and
+  ``5962ba96dbd4200e070427d3b8bccfb09e0cc77c``
 :Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
 :Environment: ``qemu-system-aarch64`` 11.1.50
   (``v11.1.0-453-geea8fe61b8``), native arm64 build on macOS 14.8.7,
@@ -597,28 +598,31 @@ QP4-UP-029: BCM2835 AUX UART interrupt state survives a system reset
   restoring the initial state corresponding to the start of QEMU.  The AUX
   UART is a sysbus device, but current upstream registers no reset method for
   it.
-:Observed issue: A direct qtest run observed the startup values ``IER=0xc0``
-  and ``AUX_IRQ=0``, enabled the model's always-ready transmit interrupt to
-  obtain ``IER=0xc2`` and ``AUX_IRQ=1``, and requested an ordinary cold reset
-  through the emulated Pi watchdog.  Unmodified current master still returned
-  ``IER=0xc2`` and ``AUX_IRQ=1`` after reset; the fork returned the initial
-  ``IER=0xc0`` and ``AUX_IRQ=0`` and accepted a new interrupt cycle.
+:Observed issue: A direct qtest run observed upstream startup
+  ``AUX_ENABLES=1``, ``IER=0xc0`` and ``AUX_IRQ=0``, enabled the model's
+  always-ready transmit interrupt to obtain ``IER=0xc2`` and ``AUX_IRQ=1``,
+  and requested an ordinary cold reset through the emulated Pi watchdog.
+  Unmodified current master still returned the armed values after reset.  The
+  fork resets ``AUX_ENABLES`` to zero, so the gated UART bank reads zero; after
+  re-enabling it, ``IER=0``, ``AUX_IRQ=0`` and ``MCR=0`` confirm clean internal
+  state and a new interrupt cycle succeeds.
 :History and impact: The missing reset method dates to the device's initial
   2016 commit ``97398d900ca`` and is not a regression.  GitLab, qemu-devel,
-  source-history and recent-commit searches on 2026-08-23 found no exact
-  duplicate.  The reproducer is synthetic, and no maintained guest or
-  external test suite is currently known to fail, so the evidence stops at
-  E1.
+  source-history and recent-commit searches, refreshed on 2026-08-24, found no
+  exact duplicate.  The reproducer is synthetic, and no maintained guest or
+  external test suite is currently known to fail, so the evidence stops at E1.
 :Reproducer: ``scripts/pi4/repro-aux-reset.py`` speaks the qtest protocol
-  directly and has no dependency on fork-only devices.  On 2026-08-23 it
-  exited 1 with the current-upstream state above and 0 with the fork.  It is
-  an AI-derived local research artifact and is not eligible for upstream
+  directly and has no dependency on fork-only devices.  It explicitly enables
+  the UART before comparing internal state, accommodating both upstream's
+  always-enabled model and the fork's hardware gate.  On 2026-08-24 it exited
+  1 with the current-upstream state above and 0 with the fork.  It is an
+  AI-derived local research artifact and is not eligible for upstream
   submission.
 :Fork change: Add a device reset which clears FIFO contents and positions,
-  interrupt enable and derived state, the IRQ output and modem control.  The
-  qtest covers asserted GIC SPI 93 across reset, register defaults and reuse
-  after reset; migration post-load processing also reconstructs the derived
-  IRQ output.
+  interrupt enable and derived state, the IRQ output, shared enable, scratch
+  and modem control.  The qtest covers asserted GIC SPI 93 across reset,
+  gated and visible register defaults and reuse after reset; migration
+  post-load processing also reconstructs the derived IRQ output.
 :Before sending: The user must personally inspect and rerun a minimal auditable
   reproducer on current master, validate the source analysis, and disclose the
   automated assistance in any report.  Do not submit this fork's AI-derived
@@ -655,17 +659,110 @@ QP4-UP-030: BCM2835 AUX UART modem registers are incomplete
   missing-register observation would therefore add little.
 :Hardware evidence: A read-only Pi 400 runtime snapshot found
   ``AUX_ENABLES=0`` and zero in every sampled mini-UART register, including
-  MCR and MSR.  Linux had disabled the shared block, so this snapshot does not
-  override the documented reset values or establish active modem-line state.
+  MCR and MSR.  A subsequent controlled probe enabled the block and observed
+  the documented ``MCR=0`` and ``MSR=0x10`` defaults.  Writing all ones to MCR
+  then read back only ``0x2`` while MSR remained ``0x10``.  The probe restored
+  MCR and disabled the block before exiting.
 :Fork change: Store only the supported RTS bit, report CTS from a capable
   character backend with the documented reset fallback, propagate RTS through
   the backend's modem-control interface, reset the output and migrate its
-  control state.  Automatic flow control, GPIO pin muxing and shared-block
-  power gating remain outside this change.
+  control state.  Automatic flow control and GPIO pin muxing remain outside
+  this change.
 :Before sending: Do not open a duplicate issue without a new workload failure,
   test-oracle impact or independently human-authored implementation.  Any
   upstream code and tests must be produced independently under QEMU's live
   provenance policy.
+
+QP4-UP-031: BCM2835 AUX enable gate and scratch register are incomplete
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: known limitation; E1 register-contract and hardware
+  evidence, with no demonstrated E2 or E3 failure
+:Fork commit: ``5962ba96dbd4200e070427d3b8bccfb09e0cc77c``
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Environment: ``qemu-system-aarch64`` 11.1.50
+  (``v11.1.0-453-geea8fe61b8``), native arm64 build on macOS 14.8.7,
+  ``-machine raspi4b -accel qtest``; Raspberry Pi 400 revision 1.0 running
+  Linux 6.18.39 for the hardware comparison.
+:Contract: `BCM2711 ARM Peripherals
+  <https://datasheets.raspberrypi.com/bcm2711/bcm2711-peripherals.pdf>`__
+  sections 2.1.1 and 2.2 define a reset-clear, read/write ``AUX_ENABLES``
+  register, mini-UART enable bit 0 and an 8-bit read/write scratch register
+  with reset value zero.  The document says disabling a module prevents its
+  register access.
+:Observed issue: Current upstream hardwires ``AUX_ENABLES`` to one, logs and
+  ignores attempts to disable the UART or enable SPI, and explicitly logs the
+  scratch register as unimplemented.  The direct qtest aid observed startup
+  ``EN=1``, all-ones readback ``1`` and no effective disabled state or scratch
+  retention.
+:Why known limitation: The hardwired-enable comment, explicit unimplemented
+  scratch paths and source header make the reduced scope deliberate and date
+  to the initial 2016 model.  No maintained guest or external suite is known
+  to fail because of it.  Exact GitLab searches for ``AUX_ENABLES``,
+  ``AUX_MU_IER_REG`` and mini-UART scratch on 2026-08-24 found no separate
+  issue; the broad Raspberry Pi OS report in QEMU issue 2591 does not show an
+  enable-gate or scratch failure.
+:Hardware evidence: The Pi 400 runtime state had ``AUX_ENABLES=0`` and
+  zero-valued reads from the mini-UART bank, consistent with the documented
+  reset-clear gate but not itself a reset capture.  All-ones enable readback
+  was ``0xff`` on this silicon, though only bits 0:2 are defined.  Writes of
+  ``IER=2``, ``MCR=0xffffffff`` and ``SCRATCH=0x1a5``
+  while disabled read as zero but were exposed as ``2``, ``2`` and ``0xa5``
+  after enabling.  The defined AUX interrupt bit and GIC interrupt ID 125
+  remained live while register reads were gated.  This narrows the manual's
+  broad no-access statement: implemented control writes are retained on the
+  tested silicon.
+:Reproducer: ``scripts/pi4/repro-aux-enable.py`` speaks qtest directly.  On
+  2026-08-24 it exited 1 with current upstream and 0 with the fork.  It is an
+  AI-derived local research artifact and is not eligible for upstream
+  submission.
+:Fork change: Store the Pi 400-observed low byte of ``AUX_ENABLES``, reset the
+  gate clear, return zero for disabled mini-UART-bank reads, pause character
+  input and discard output data while disabled, retain implemented control
+  writes and interrupt signalling, and implement the 8-bit scratch register.
+  Enable and scratch state migrate with the VM.  The two SPI blocks remain
+  unimplemented.
+:Before sending: Do not open a standalone issue without a concrete workload
+  or test-oracle consequence, or independently human-authored implementation
+  work.  A future report must distinguish defined register bits from observed
+  reserved-bit readback and must follow :doc:`raspi-upstream-criteria`.
+
+QP4-UP-032: BCM2835 AUX IER reports FIFO bits belonging to IIR
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate; E1, with no demonstrated E2 or E3 failure
+:Fork commit: ``5962ba96dbd4200e070427d3b8bccfb09e0cc77c``
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Environment: ``qemu-system-aarch64`` 11.1.50
+  (``v11.1.0-453-geea8fe61b8``), native arm64 build on macOS 14.8.7,
+  ``-machine raspi4b -accel qtest``; the Pi 400 environment is as above.
+:Contract: `BCM2711 ARM Peripherals
+  <https://datasheets.raspberrypi.com/bcm2711/bcm2711-peripherals.pdf>`__
+  section 2.2 defines only IER bits 1:0 and reserves bits 7:2.  The FIFO-enable
+  status belongs to IIR bits 7:6.  The known documentation error swapping the
+  TX and RX IER descriptions does not affect this distinction.
+:Observed issue: Current upstream returns ``0xc0 | s->ier`` for IER, with a
+  source comment claiming its FIFO enables always read one.  A fresh qtest
+  observed ``IER=0xc0`` at startup and ``0xc2`` after enabling TX interrupts.
+  With the real mini UART enabled, the Pi 400 returned ``IER=0`` initially and
+  ``2`` after the same write; its idle IIR value was ``0xc3``.  The fork now
+  returns only the two supported IER bits while retaining the existing IIR
+  FIFO status.
+:History and impact: The mistaken IER return dates to initial device commit
+  ``97398d900ca`` and is not a regression.  The exact GitLab and source-history
+  searches above found no duplicate.  The reproducer is synthetic, and no
+  maintained guest or external test suite is known to fail, so the evidence
+  stops at E1.
+:Reproducer: ``scripts/pi4/repro-aux-enable.py`` provides the direct comparison
+  and exits 1 with current upstream and 0 with the fork.  It is AI-derived and
+  local-only, not an upstream submission artifact.
+:Fork change: Return only stored IER bits 1:0 and test IER independently from
+  the ``0xc0`` FIFO status in IIR.
+:Before sending: The user must personally inspect and rerun a minimal auditable
+  reproducer on current master, validate the source and hardware analysis, and
+  disclose the automated assistance in any report.  Do not submit this fork's
+  AI-derived code or test upstream; any patch must be independently produced
+  by a human under QEMU's live provenance policy.
 
 Rejected and research-only findings
 ------------------------------------

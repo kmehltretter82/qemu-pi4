@@ -203,26 +203,57 @@ AUX mini-UART reference evidence
 `BCM2711 ARM Peripherals
 <https://datasheets.raspberrypi.com/bcm2711/bcm2711-peripherals.pdf>`__,
 section 2.2, describes the AUX mini UART as 16550-like but not 16550
-compatible.  Unsupported 16550 bits are ignored and read as zero.  In the
-modem registers, ``MCR`` bit 1 is the active-low RTS control with reset value
-zero, while ``MSR`` bit 4 is the inverse of the CTS input with reset value one.
-The upstream Linux BCM2835 AUX 8250 driver likewise documents RTS as the only
-MCR flag and writes that register during normal serial initialization.
+compatible.  ``AUX_ENABLES`` resets to zero and its three defined low bits
+enable the mini UART and two SPI blocks.  ``IER`` contains only the two low
+interrupt-enable bits; its upper bits are reserved, while ``IIR`` bits 7:6
+report FIFO status.  The scratch register is 8-bit read/write and resets to
+zero.  In the modem registers, ``MCR`` bit 1 is the active-low RTS control
+with reset value zero, while ``MSR`` bit 4 is the inverse of the CTS input
+with reset value one.  The maintained Linux BCM2835 AUX 8250 driver likewise
+documents RTS as the only MCR flag and writes that register during ordinary
+serial initialization.  The known BCM2835 documentation error which swaps
+the RX and TX IER descriptions is unrelated; QEMU already uses the corrected
+bit assignments.
 
 A non-writing Pi 400 capture on 2026-08-23 found that the running Raspberry
 Pi OS kernel had disabled the shared block: ``AUX_ENABLES``, ``IER``, ``IIR``,
 ``MCR``, ``LSR``, ``MSR`` and ``CNTL`` all read zero.  That is useful evidence
-of runtime clock and block gating, which QEMU does not yet model; it is not a
-power-on-reset oracle.  The capture itself made no AUX register writes.
+of runtime block gating, but is not by itself a power-on-reset oracle.
+
+Controlled, reversible probes on 2026-08-23 and 2026-08-24 then established
+the active behavior.  Enabling the mini UART exposed ``IER=0``, ``IIR=0xc3``,
+``LCR=3``, ``MCR=0``, ``LSR=0x60``, ``MSR=0x10``, ``SCRATCH=0``, ``CNTL=3``,
+``STAT=0x34a`` and ``BAUD=0x21d``.  Writing all ones to ``AUX_ENABLES`` read
+back ``0xff`` on this Pi 400; only bits 0:2 are architecturally defined, so
+the fork records the low-byte silicon behavior without assigning meaning to
+the other retained bits.
+
+The broad manual statement that a disabled module has no register access does
+not fully describe this silicon.  With ``AUX_ENABLES=0``, writes of ``IER=2``,
+``MCR=0xffffffff`` and ``SCRATCH=0x1a5`` all read back as zero, but enabling
+the UART exposed the retained values ``2``, ``2`` and ``0xa5``.  The pending
+TX interrupt was not gated: the defined UART bit in ``AUX_IRQ`` was set and
+GIC interrupt ID 125 was pending even while the UART bank read zero.  The raw
+``AUX_IRQ`` value also contained reserved bit 31; the model deliberately uses
+only the defined UART bit.  The probe cleared IER, MCR, scratch and GIC pending
+state, restored ``AUX_ENABLES=0``, and verified zero AUX and GIC status before
+exiting.
 
 Against unmodified current QEMU master
-``eea8fe61b8be8f3016e522e6af24924a0266ca95``, a direct qtest sequence read
-startup ``IER=0xc0`` and ``IRQ=0``, enabled the always-ready transmit
-interrupt to obtain ``IER=0xc2`` and ``IRQ=1``, and requested a cold reset
-through the Pi watchdog.  After reset the same stale ``IER=0xc2`` and
-``IRQ=1`` remained.  The fork restores ``IER=0xc0``, ``IRQ=0`` and ``MCR=0``.
-The reusable ``scripts/pi4/repro-aux-reset.py`` research aid exits 1 with
-current upstream and 0 with this fork.
+``eea8fe61b8be8f3016e522e6af24924a0266ca95`` on 2026-08-24,
+``scripts/pi4/repro-aux-enable.py`` observed startup ``EN=1, IER=0xc0``, an
+all-ones enable readback of ``1``, no effective disable, and no MCR, MSR or
+scratch state.  The fork observed startup ``EN=0, IER=0``, low-byte readback
+``0xff``, gated reads with live interrupt status, and the retained register
+values above.  The aid exits 1 with current upstream and 0 with the fork.
+
+The reset aid explicitly enables the UART before taking its internal
+baseline, so ``scripts/pi4/repro-aux-reset.py`` compares both model styles
+fairly.  Current upstream started with ``EN=1, IER=0xc0, IRQ=0``, armed
+``IER=0xc2, IRQ=1`` and retained that armed state across a watchdog cold
+reset.  The fork started with ``EN=0``, exposed ``IER=0, IRQ=0`` after enable,
+reset the gate and internal state, and exposed the same clean values after
+re-enable.  This aid also exits 1 with upstream and 0 with the fork.
 
 Before fork commit ``4f78fe1e54``, each pinned Linux 7.2 diagnostic boot
 logged one unsupported ``AUX_MU_MCR_REG`` write in addition to three PL011
@@ -230,9 +261,20 @@ messages.  After the change, both boards retain all PCIe, VL805, MSI,
 USB-storage, GENET and Pi 400 keyboard checks, and only the three PL011
 messages remain.  The complete focused gate passes 34 Pi 4B qtests, five Pi
 400 qtests, all three offline functional boots and all eight lab-tool tests.
-The AUX qtest covers reserved-bit masking, RTS and CTS register values, GIC
-interrupt assertion and cold-reset deassertion, reuse after reset and migrated
-RTS-control state.
+The 2026-08-24 enable-gate, IER and scratch change repeated both pinned Linux
+boots with the same result: each diagnostic log contained exactly those three
+PL011 messages and no AUX, unimplemented or guest-error message.
+The remaining PL011 diagnostics are intentional generic-QEMU compatibility
+messages.  `Upstream commit 907b8d56351b
+<https://gitlab.com/qemu-project/qemu/-/commit/907b8d56351b1ba6c97953edaca6a08f02fa2048>`__
+documents that Linux earlycon relies on firmware having enabled the UART and
+that QEMU accepts the bytes while logging the dubious disabled write.  They
+are not evidence of a Pi machine failure.
+
+The AUX qtest covers reset-low enable state, observed low-byte readback,
+disabled-bank reads and retained writes, IER/IIR separation, scratch masking,
+RTS and CTS values, interrupt assertion while disabled, cold-reset
+deassertion, reuse after reset, and migration of hidden control state.
 
 DWC2 reset reference evidence
 -----------------------------
