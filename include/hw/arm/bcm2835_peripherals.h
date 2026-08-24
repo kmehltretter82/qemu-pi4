@@ -16,6 +16,7 @@
 #include "hw/char/pl011.h"
 #include "hw/char/bcm2835_aux.h"
 #include "hw/audio/bcm2835_i2s.h"
+#include "hw/audio/bcm2835_pwm.h"
 #include "hw/display/bcm2835_fb.h"
 #include "hw/dma/bcm2835_dma.h"
 #include "hw/core/or-irq.h"
@@ -62,6 +63,7 @@ struct BCMSocPeripheralBaseState {
     SDHCIState sdhci;
     BCM2835SDHostState sdhost;
     BCM2835I2SState i2s;
+    BCM2835PWMState pwm0;
     BCM2835SPIState spi[1];
     BCM2835I2CState i2c[3];
     OrIRQState orgated_i2c_irq;

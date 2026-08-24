@@ -117,6 +117,9 @@ static void raspi_peripherals_base_init(Object *obj)
     /* PCM / I2S */
     object_initialize_child(obj, "i2s", &s->i2s, TYPE_BCM2835_I2S);
 
+    /* PWM0 */
+    object_initialize_child(obj, "pwm0", &s->pwm0, TYPE_BCM2835_PWM);
+
     /* Mphi */
     object_initialize_child(obj, "mphi", &s->mphi, TYPE_BCM2835_MPHI);
 
@@ -198,6 +201,8 @@ void bcm_soc_peripherals_common_realize(DeviceState *dev, Error **errp)
                           qdev_get_clock_out(DEVICE(&s->cprman), "uart-out"));
     qdev_connect_clock_in(DEVICE(&s->i2s), "pcm-in",
                           qdev_get_clock_out(DEVICE(&s->cprman), "pcm-out"));
+    qdev_connect_clock_in(DEVICE(&s->pwm0), "pwm-in",
+                          qdev_get_clock_out(DEVICE(&s->cprman), "pwm-out"));
 
     memory_region_add_subregion(&s->peri_mr, ARMCTRL_IC_OFFSET,
                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->ic), 0));
@@ -366,6 +371,16 @@ void bcm_soc_peripherals_common_realize(DeviceState *dev, Error **errp)
         qdev_get_gpio_in_named(DEVICE(&s->dma), "dreq", 2));
     qdev_connect_gpio_out_named(DEVICE(&s->i2s), "dreq", 1,
         qdev_get_gpio_in_named(DEVICE(&s->dma), "dreq", 3));
+
+    /* PWM0 */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->pwm0), errp)) {
+        return;
+    }
+
+    memory_region_add_subregion(&s->peri_mr, PWM0_OFFSET,
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pwm0), 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->pwm0), "dreq", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->dma), "dreq", 5));
 
     /* Mphi */
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->mphi), errp)) {

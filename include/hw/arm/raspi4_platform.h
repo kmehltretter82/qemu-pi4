@@ -66,6 +66,8 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define I2S_OFFSET              0x203000 /* PCM */
 #define SPI0_OFFSET             0x204000 /* SPI master */
 #define BSC0_OFFSET             0x205000 /* BSC0 I2C/TWI */
+#define PWM0_OFFSET             0x20c000
+#define PWM1_OFFSET             0x20c800
 #define OTP_OFFSET              0x20f000
 #define BSC_SL_OFFSET           0x214000 /* SPI slave (bootrom) */
 #define AUX_OFFSET              0x215000 /* AUX: UART1/SPI1/SPI2 */

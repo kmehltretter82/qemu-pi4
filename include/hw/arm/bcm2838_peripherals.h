@@ -85,6 +85,7 @@ struct BCM2838PeripheralState {
     BCM2838ThermalState thermal;
     BCM2838GenetState genet;
     BCM2711PcieHostState pcie;
+    BCM2835PWMState pwm1;
 
     OrIRQState mmc_irq_orgate;
     OrIRQState dma_7_8_irq_orgate;

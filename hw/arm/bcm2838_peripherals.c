@@ -55,6 +55,20 @@ static void bcm2838_peripherals_init(Object *obj)
                              &error_abort);
     object_property_set_uint(OBJECT(&s_base->cprman), "xosc-freq-hz",
                              54000000, &error_abort);
+    object_property_set_uint(OBJECT(&s_base->pwm0), "fifo-depth", 64,
+                             &error_abort);
+
+    /* BCM2711 adds PWM1 and increases both PWM FIFOs to 64 words. */
+    object_initialize_child(obj, "pwm1", &s->pwm1, TYPE_BCM2835_PWM);
+    object_property_set_uint(OBJECT(&s->pwm1), "fifo-depth", 64,
+                             &error_abort);
+    object_property_set_uint(OBJECT(&s->pwm1), "instance-id", 1,
+                             &error_abort);
+    object_property_set_bool(OBJECT(&s->pwm1), "audio-output", true,
+                             &error_abort);
+    qdev_connect_clock_in(DEVICE(&s->pwm1), "pwm-in",
+                          qdev_get_clock_out(DEVICE(&s_base->cprman),
+                                             "pwm-out"));
 
     /* Lower memory region for peripheral devices (exported to the Soc) */
     memory_region_init(&s->peri_low_mr, obj, "bcm2838-peripherals",
@@ -115,12 +129,27 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     MemoryRegion *mphi_mr;
     BCM2838PeripheralState *s = BCM2838_PERIPHERALS(dev);
     BCMSocPeripheralBaseState *s_base = BCM_SOC_PERIPHERALS_BASE(dev);
+    Error *err = NULL;
     int n;
 
     object_property_set_uint(OBJECT(&s_base->property), "dma-channels",
                              BCM2838_DMA_CHANNEL_MASK, &error_abort);
 
-    bcm_soc_peripherals_common_realize(dev, errp);
+    bcm_soc_peripherals_common_realize(dev, &err);
+    if (err) {
+        error_propagate(errp, err);
+        return;
+    }
+
+    /* PWM1 uses the BCM2711 reset selection for DMA request 1. */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->pwm1), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s_base->peri_mr, PWM1_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pwm1), 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->pwm1), "dreq", 0,
+        qdev_get_gpio_in_named(DEVICE(&s_base->dma), "dreq", 1));
 
     /* Map lower peripherals into the GPU address space */
     memory_region_init_alias(&s->peri_low_mr_alias, OBJECT(s),
