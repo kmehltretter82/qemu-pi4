@@ -166,6 +166,7 @@ class ShellScriptTests(unittest.TestCase):
         "irq_brcmstb_l2: registered L2 intc "
         "(/soc/interrupt-controller@7ef00100, parent irq: 14)"
     )
+    DDC_CHECKED = "PI4-LAB: HDMI0 DDC reads a valid 128-byte EDID ok"
 
     def test_shell_scripts_parse(self):
         subprocess.run([
@@ -216,13 +217,22 @@ class ShellScriptTests(unittest.TestCase):
 
     def test_linux_runner_accepts_success_marker(self):
         result = self.run_linux_with_fake_qemu(
-            f"{self.LINUX_SUCCESS}\n{self.AON_REGISTERED}")
+            f"{self.LINUX_SUCCESS}\n{self.AON_REGISTERED}\n{self.DDC_CHECKED}")
 
         self.assertEqual(result.returncode, 0)
 
+    def test_linux_runner_requires_display_foundation_checks(self):
+        result = self.run_linux_with_fake_qemu(
+            f"{self.LINUX_SUCCESS}\n{self.AON_REGISTERED}")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("DVP/DDC/EDID acceptance checks were not run",
+                      result.stderr)
+
     def test_linux_runner_propagates_qemu_failure(self):
         result = self.run_linux_with_fake_qemu(
-            f"{self.LINUX_SUCCESS}\n{self.AON_REGISTERED}", qemu_status=7)
+            f"{self.LINUX_SUCCESS}\n{self.AON_REGISTERED}\n{self.DDC_CHECKED}",
+            qemu_status=7)
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("QEMU exited before completing", result.stderr)

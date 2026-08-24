@@ -128,3 +128,9 @@ if ! grep -Fq \
     echo "BCM2711 AON L2 interrupt controller was not registered" >&2
     exit 1
 fi
+
+if ! grep -Fq \
+    'PI4-LAB: HDMI0 DDC reads a valid 128-byte EDID' "$qemu_log"; then
+    echo "BCM2711 HDMI DVP/DDC/EDID acceptance checks were not run" >&2
+    exit 1
+fi

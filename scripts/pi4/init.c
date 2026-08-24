@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/fs.h>
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -38,6 +40,9 @@
 #define HWRNG_SAMPLE_SIZE 64
 #define SYSFS_WAIT_ATTEMPTS 100
 #define SYSFS_WAIT_US 100000
+#define HDMI_DDC_ADAPTER "fef04500.i2c"
+#define HDMI_EDID_ADDRESS 0x50
+#define HDMI_EDID_LENGTH 128
 
 static void mount_fs(const char *source, const char *target,
                      const char *filesystem)
@@ -662,6 +667,118 @@ static int model_is_pi400(void)
            !strcmp(model, "Raspberry Pi 400");
 }
 
+static int platform_driver_bound(const char *device, const char *driver)
+{
+    char path[PATH_MAX];
+    char resolved[PATH_MAX];
+    const char *basename;
+
+    snprintf(path, sizeof(path), "/sys/bus/platform/devices/%s/driver",
+             device);
+    if (!realpath(path, resolved)) {
+        return 0;
+    }
+    basename = strrchr(resolved, '/');
+    basename = basename ? basename + 1 : resolved;
+    return !strcmp(basename, driver);
+}
+
+static int find_i2c_device(const char *adapter_name, char *device_path,
+                           size_t device_path_size)
+{
+    struct dirent *entry;
+    DIR *directory = opendir("/sys/bus/i2c/devices");
+
+    if (!directory) {
+        return -1;
+    }
+    while ((entry = readdir(directory))) {
+        char name_path[PATH_MAX];
+
+        if (strncmp(entry->d_name, "i2c-", 4)) {
+            continue;
+        }
+        snprintf(name_path, sizeof(name_path),
+                 "/sys/bus/i2c/devices/%s/name", entry->d_name);
+        if (!value_equals(name_path, adapter_name)) {
+            continue;
+        }
+        snprintf(device_path, device_path_size, "/dev/%s", entry->d_name);
+        closedir(directory);
+        return 0;
+    }
+    closedir(directory);
+    return -1;
+}
+
+static int verify_hdmi_edid(void)
+{
+    static const unsigned char header[] = {
+        0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
+    };
+    struct i2c_rdwr_ioctl_data transfer;
+    struct i2c_msg messages[2];
+    unsigned char offset = 0;
+    unsigned char edid[HDMI_EDID_LENGTH];
+    char device_path[PATH_MAX];
+    unsigned int checksum = 0;
+    int result;
+    int fd;
+
+    if (find_i2c_device(HDMI_DDC_ADAPTER, device_path,
+                        sizeof(device_path))) {
+        printf("PI4-LAB: HDMI0 DDC adapter %s was not found\n",
+               HDMI_DDC_ADAPTER);
+        return -1;
+    }
+    printf("PI4-LAB: HDMI0 DDC adapter device: %s\n", device_path);
+    fd = open(device_path, O_RDWR);
+    if (fd < 0) {
+        printf("PI4-LAB: cannot open HDMI0 DDC adapter: %s\n",
+               strerror(errno));
+        return -1;
+    }
+
+    messages[0].addr = HDMI_EDID_ADDRESS;
+    messages[0].flags = 0;
+    messages[0].len = sizeof(offset);
+    messages[0].buf = &offset;
+    messages[1].addr = HDMI_EDID_ADDRESS;
+    messages[1].flags = I2C_M_RD;
+    messages[1].len = sizeof(edid);
+    messages[1].buf = edid;
+    transfer.msgs = messages;
+    transfer.nmsgs = 2;
+
+    result = ioctl(fd, I2C_RDWR, &transfer);
+    if (result != 2) {
+        int saved_errno = errno;
+
+        close(fd);
+        printf("PI4-LAB: HDMI0 EDID I2C_RDWR returned %d: %s\n",
+               result, strerror(saved_errno));
+        return -1;
+    }
+    close(fd);
+
+    if (memcmp(edid, header, sizeof(header))) {
+        printf("PI4-LAB: HDMI0 EDID header is"
+               " %02x %02x %02x %02x %02x %02x %02x %02x\n",
+               edid[0], edid[1], edid[2], edid[3],
+               edid[4], edid[5], edid[6], edid[7]);
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof(edid); i++) {
+        checksum += edid[i];
+    }
+    if (checksum & 0xff) {
+        printf("PI4-LAB: HDMI0 EDID checksum is 0x%02x\n",
+               checksum & 0xff);
+        return -1;
+    }
+    return 0;
+}
+
 static void report_check(const char *name, int failed, int *failures)
 {
     printf("PI4-LAB: %-48s %s\n", name, failed ? "FAIL" : "ok");
@@ -769,6 +886,17 @@ int main(void)
 
     pi400 = model_is_pi400();
     storage_test = cmdline_has_word("pi4lab.usb_storage=1");
+    report_check("BCM2711 HDMI DVP clock/reset driver",
+                 !platform_driver_bound("fef00000.clock", "brcm2711-dvp"),
+                 &failures);
+    report_check("BCM2711 HDMI DDC0 controller and driver",
+                 !platform_driver_bound("fef04500.i2c", "brcmstb-i2c"),
+                 &failures);
+    report_check("BCM2711 HDMI DDC1 controller and driver",
+                 !platform_driver_bound("fef09500.i2c", "brcmstb-i2c"),
+                 &failures);
+    report_check("HDMI0 DDC reads a valid 128-byte EDID",
+                 verify_hdmi_edid(), &failures);
     report_check("RNG200 selected and /dev/hwrng supplies 64 bytes",
                  verify_hwrng(), &failures);
     if (!cpu_thermal_temperature(&temperature)) {
