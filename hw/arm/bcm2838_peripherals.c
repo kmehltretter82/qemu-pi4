@@ -104,6 +104,15 @@ static void bcm2838_peripherals_init(Object *obj)
     object_initialize_child(obj, "aon-intr", &s->aon_intr,
                             TYPE_BCM2838_AON_INTR);
 
+    /* BCM2711 HDMI service-plane clocks, resets and DDC buses. */
+    object_initialize_child(obj, "dvp", &s->dvp, TYPE_BCM2711_DVP);
+    object_initialize_child(obj, "hdmi0-i2c", &s->hdmi_i2c[0],
+                            TYPE_BCM2711_HDMI_I2C);
+    object_initialize_child(obj, "hdmi1-i2c", &s->hdmi_i2c[1],
+                            TYPE_BCM2711_HDMI_I2C);
+    object_initialize_child(obj, "hdmi0-edid", &s->hdmi0_edid, TYPE_I2CDDC);
+    qdev_prop_set_uint8(DEVICE(&s->hdmi0_edid), "address", 0x50);
+
     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhci",
                                    OBJECT(&s_base->sdhci.sdbus));
     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhost",
@@ -281,6 +290,35 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(
         &s_base->peri_mr, AON_INTR_OFFSET,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->aon_intr), 0));
+
+    /* HDMI DVP clock and reset controller. */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->dvp), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s_base->peri_mr, DVP_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->dvp), 0));
+
+    /* Both HDMI DDC engines; the default display is attached to HDMI0. */
+    for (n = 0; n < ARRAY_SIZE(s->hdmi_i2c); n++) {
+        hwaddr bsc_offset = n ? HDMI1_DDC_OFFSET : HDMI0_DDC_OFFSET;
+        hwaddr auto_offset = n ? HDMI1_AUTO_I2C_OFFSET :
+                                 HDMI0_AUTO_I2C_OFFSET;
+
+        if (!sysbus_realize(SYS_BUS_DEVICE(&s->hdmi_i2c[n]), errp)) {
+            return;
+        }
+        memory_region_add_subregion(
+            &s_base->peri_mr, bsc_offset,
+            sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi_i2c[n]), 0));
+        memory_region_add_subregion(
+            &s_base->peri_mr, auto_offset,
+            sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi_i2c[n]), 1));
+    }
+    if (!qdev_realize(DEVICE(&s->hdmi0_edid),
+                      BUS(s->hdmi_i2c[0].bus), errp)) {
+        return;
+    }
 
     /* RNG200 random number generator */
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->rng200), errp)) {

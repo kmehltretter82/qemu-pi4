@@ -12,7 +12,10 @@
 #include "hw/arm/bcm2835_peripherals.h"
 #include "hw/sd/sdhci.h"
 #include "hw/gpio/bcm2838_gpio.h"
+#include "hw/i2c/bcm2711_hdmi_i2c.h"
 #include "hw/intc/bcm2838_aon_intr.h"
+#include "hw/display/i2c-ddc.h"
+#include "hw/misc/bcm2711_dvp.h"
 #include "hw/misc/bcm2838_rng200.h"
 #include "hw/misc/bcm2838_thermal.h"
 #include "hw/net/bcm2838_genet.h"
@@ -88,6 +91,9 @@ struct BCM2838PeripheralState {
     BCM2838GenetState genet;
     BCM2711PcieHostState pcie;
     BCM2835PWMState pwm1;
+    BCM2711DVPState dvp;
+    BCM2711HDMII2CState hdmi_i2c[2];
+    I2CDDCState hdmi0_edid;
     BCM2838AonIntrState aon_intr;
 
     OrIRQState mmc_irq_orgate;

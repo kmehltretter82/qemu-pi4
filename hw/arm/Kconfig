@@ -372,6 +372,7 @@ config RASPI4
     select USB_XHCI_PCI
     select BCM2835_SPI
     select BCM2835_I2C
+    select DDC
     select BCM2838_GENET
     select PCI_EXPRESS_BCM2711
     select OR_IRQ
