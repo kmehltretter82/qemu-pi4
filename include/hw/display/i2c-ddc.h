@@ -23,6 +23,8 @@
 #include "hw/i2c/i2c.h"
 #include "qom/object.h"
 
+#define I2C_DDC_EDID_MAX_LENGTH 256
+
 /* A simple I2C slave which just returns the contents of its EDID blob. */
 struct I2CDDCState {
     /*< private >*/
@@ -31,7 +33,7 @@ struct I2CDDCState {
     bool firstbyte;
     uint8_t reg;
     qemu_edid_info edid_info;
-    uint8_t edid_blob[128];
+    uint8_t edid_blob[I2C_DDC_EDID_MAX_LENGTH];
 };
 
 

@@ -56,9 +56,11 @@ static int i2c_ddc_event(I2CSlave *i2c, enum i2c_event event)
 static uint8_t i2c_ddc_rx(I2CSlave *i2c)
 {
     I2CDDCState *s = I2CDDC(i2c);
+    size_t size = qemu_edid_size(s->edid_blob);
 
     int value;
-    value = s->edid_blob[s->reg % sizeof(s->edid_blob)];
+    assert(size > 0 && size <= sizeof(s->edid_blob));
+    value = s->edid_blob[s->reg % size];
     s->reg++;
     return value;
 }
@@ -78,11 +80,16 @@ static int i2c_ddc_tx(I2CSlave *i2c, uint8_t data)
     return 0;
 }
 
-static void i2c_ddc_init(Object *obj)
+static void i2c_ddc_realize(DeviceState *dev, Error **errp)
 {
-    I2CDDCState *s = I2CDDC(obj);
+    I2CDDCState *s = I2CDDC(dev);
+    size_t size = 128;
 
-    qemu_edid_generate(s->edid_blob, sizeof(s->edid_blob), &s->edid_info);
+    if (s->edid_info.is_hdmi || s->edid_info.has_audio) {
+        size = sizeof(s->edid_blob);
+    }
+    memset(s->edid_blob, 0, sizeof(s->edid_blob));
+    qemu_edid_generate(s->edid_blob, size, &s->edid_info);
 }
 
 static const VMStateDescription vmstate_i2c_ddc = {
@@ -97,6 +104,8 @@ static const VMStateDescription vmstate_i2c_ddc = {
 
 static const Property i2c_ddc_properties[] = {
     DEFINE_EDID_PROPERTIES(I2CDDCState, edid_info),
+    DEFINE_PROP_BOOL("hdmi", I2CDDCState, edid_info.is_hdmi, false),
+    DEFINE_PROP_BOOL("audio", I2CDDCState, edid_info.has_audio, false),
 };
 
 static void i2c_ddc_class_init(ObjectClass *oc, const void *data)
@@ -105,6 +114,7 @@ static void i2c_ddc_class_init(ObjectClass *oc, const void *data)
     I2CSlaveClass *isc = I2C_SLAVE_CLASS(oc);
 
     device_class_set_legacy_reset(dc, i2c_ddc_reset);
+    dc->realize = i2c_ddc_realize;
     dc->vmsd = &vmstate_i2c_ddc;
     device_class_set_props(dc, i2c_ddc_properties);
     isc->event = i2c_ddc_event;
@@ -116,7 +126,6 @@ static const TypeInfo i2c_ddc_info = {
     .name = TYPE_I2CDDC,
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(I2CDDCState),
-    .instance_init = i2c_ddc_init,
     .class_init = i2c_ddc_class_init
 };
 

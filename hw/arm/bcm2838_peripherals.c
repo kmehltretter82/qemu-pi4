@@ -118,6 +118,8 @@ static void bcm2838_peripherals_init(Object *obj)
                             TYPE_BCM2711_HDMI_I2C);
     object_initialize_child(obj, "hdmi0-edid", &s->hdmi0_edid, TYPE_I2CDDC);
     qdev_prop_set_uint8(DEVICE(&s->hdmi0_edid), "address", 0x50);
+    qdev_prop_set_bit(DEVICE(&s->hdmi0_edid), "hdmi", true);
+    qdev_prop_set_bit(DEVICE(&s->hdmi0_edid), "audio", true);
 
     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhci",
                                    OBJECT(&s_base->sdhci.sdbus));
@@ -323,6 +325,8 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->hdmi0), errp)) {
         return;
     }
+    qdev_connect_gpio_out_named(DEVICE(&s->hdmi0), "audio-dreq", 0,
+        qdev_get_gpio_in_named(DEVICE(&s_base->dma), "dreq", 10));
     memory_region_add_subregion(
         &s_base->peri_mr, HDMI0_CORE_OFFSET,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi0),

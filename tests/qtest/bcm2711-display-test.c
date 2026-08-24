@@ -51,6 +51,7 @@
 #define HDMI0_CORE_BASE             0xfef00700
 #define HDMI0_DVP_BASE              0xfef00300
 #define HDMI0_PHY_BASE              0xfef00f00
+#define HDMI_SHARED_HD_BASE         0xfef20000
 #define HDMI_FIFO_CTL               (HDMI0_CORE_BASE + 0x074)
 #define HDMI_RAM_PACKET_CONFIG      (HDMI0_CORE_BASE + 0x0bc)
 #define HDMI_RAM_PACKET_STATUS      (HDMI0_CORE_BASE + 0x0c4)
@@ -61,6 +62,42 @@
 #define HDMI_FIFO_WRITE_MASK        0xefff
 #define HDMI_SCHEDULER_MODE_HDMI    BIT(0)
 #define HDMI_SCHEDULER_HDMI_ACTIVE  BIT(1)
+#define HDMI_MAI_CTL                (HDMI_SHARED_HD_BASE + 0x010)
+#define HDMI_MAI_THR                (HDMI_SHARED_HD_BASE + 0x014)
+#define HDMI_MAI_FMT                (HDMI_SHARED_HD_BASE + 0x018)
+#define HDMI_MAI_DATA               (HDMI_SHARED_HD_BASE + 0x01c)
+#define HDMI_MAI_CTL_DLATE          BIT(15)
+#define HDMI_MAI_CTL_BUSY           BIT(14)
+#define HDMI_MAI_CTL_CHALIGN        BIT(13)
+#define HDMI_MAI_CTL_WHOLSMP        BIT(12)
+#define HDMI_MAI_CTL_FULL           BIT(11)
+#define HDMI_MAI_CTL_EMPTY          BIT(10)
+#define HDMI_MAI_CTL_FLUSH          BIT(9)
+#define HDMI_MAI_CTL_CHNUM_SHIFT    4
+#define HDMI_MAI_CTL_ENABLE         BIT(3)
+#define HDMI_MAI_CTL_ERRORE         BIT(2)
+#define HDMI_MAI_CTL_ERRORF         BIT(1)
+#define HDMI_MAI_CTL_RESET          BIT(0)
+#define HDMI_MAI_FMT_PCM            (2U << 16)
+#define HDMI_MAI_FMT_48000          (9U << 8)
+#define HDMI_MAI_FIRST_FRAME_NS     20833
+#define HDMI_MAI_FRAME_NS           20834
+#define HDMI_MAI_FIFO_WORDS         64
+#define HDMI0_QOM_PATH              "/machine/soc/peripherals/hdmi0"
+
+#define DMA5_BASE                   0xfe007500
+#define DMA_CS                      (DMA5_BASE + 0x00)
+#define DMA_ADDR                    (DMA5_BASE + 0x04)
+#define DMA_TXFR_LEN                (DMA5_BASE + 0x14)
+#define DMA_ACTIVE                  BIT(0)
+#define DMA_END                     BIT(1)
+#define DMA_ISHELD                  BIT(5)
+#define DMA_D_DREQ                 BIT(6)
+#define DMA_S_INC                   BIT(8)
+#define DMA_PERMAP(_n)              ((_n) << 16)
+#define DMA_CB                      0x1000
+#define DMA_SOURCE                  0x2000
+#define HDMI_MAI_DATA_BUS           0x7ef2001c
 
 #define HDMI0_AUTO_I2C_BASE         0xfef00b00
 #define HDMI0_DDC_BASE              0xfef04500
@@ -90,7 +127,16 @@
 
 #define EDID_ADDRESS_WRITE          0xa0
 #define EDID_ADDRESS_READ           0xa1
-#define EDID_LENGTH                 128
+#define EDID_BLOCK_LENGTH           128
+#define EDID_LENGTH                 (2 * EDID_BLOCK_LENGTH)
+#define EDID_EXTENSION_COUNT        126
+#define CTA_EXTENSION_TAG           0x02
+#define CTA_REVISION                0x03
+#define CTA_BASIC_AUDIO             BIT(6)
+#define CTA_DB_AUDIO                1
+#define CTA_DB_VIDEO                2
+#define CTA_DB_VENDOR               3
+#define CTA_DB_SPEAKER              4
 #define BSC_TRANSFER_LENGTH         32
 
 static QTestState *display_start(void)
@@ -239,6 +285,139 @@ static void test_hdmi_transmitter_registers_and_reset(void)
     qtest_quit(qts);
 }
 
+static void test_hdmi_mai_audio_fifo(void)
+{
+    QTestState *qts = display_start();
+    uint32_t control = (2U << HDMI_MAI_CTL_CHNUM_SHIFT) |
+                       HDMI_MAI_CTL_WHOLSMP |
+                       HDMI_MAI_CTL_CHALIGN |
+                       HDMI_MAI_CTL_ENABLE;
+    uint32_t threshold = (6U << 8) | 4;
+
+    qtest_irq_intercept_out_named(qts, HDMI0_QOM_PATH, "audio-dreq");
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    HDMI_MAI_CTL_EMPTY);
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_THR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_FMT), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /* DVP clock enable makes an enabled, formatted MAI stream run. */
+    qtest_writel(qts, DVP_MISC_CONFIG, 0);
+    qtest_writel(qts, HDMI_MAI_THR, threshold);
+    qtest_writel(qts, HDMI_MAI_FMT,
+                 HDMI_MAI_FMT_PCM | HDMI_MAI_FMT_48000);
+    qtest_writel(qts, HDMI_MAI_CTL, control);
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    control | HDMI_MAI_CTL_BUSY | HDMI_MAI_CTL_EMPTY);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    for (unsigned int word = 0; word < 6; word++) {
+        qtest_writel(qts, HDMI_MAI_DATA, (word + 1) << 4);
+    }
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    control | HDMI_MAI_CTL_BUSY);
+
+    qtest_clock_step(qts, HDMI_MAI_FRAME_NS);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, HDMI_MAI_FRAME_NS);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* The final complete frame drains, then the next frame underflows. */
+    qtest_clock_step(qts, HDMI_MAI_FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    control | HDMI_MAI_CTL_BUSY | HDMI_MAI_CTL_EMPTY);
+    qtest_clock_step(qts, HDMI_MAI_FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    control | HDMI_MAI_CTL_BUSY | HDMI_MAI_CTL_EMPTY |
+                    HDMI_MAI_CTL_DLATE | HDMI_MAI_CTL_ERRORE);
+    qtest_writel(qts, HDMI_MAI_CTL,
+                 control | HDMI_MAI_CTL_DLATE | HDMI_MAI_CTL_ERRORE);
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    control | HDMI_MAI_CTL_BUSY | HDMI_MAI_CTL_EMPTY);
+
+    /* Stop consumption, fill the FIFO and prove overflow and flush state. */
+    qtest_writel(qts, HDMI_MAI_CTL, 0);
+    for (unsigned int word = 0; word < HDMI_MAI_FIFO_WORDS; word++) {
+        qtest_writel(qts, HDMI_MAI_DATA, word << 4);
+    }
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    HDMI_MAI_CTL_FULL);
+    qtest_writel(qts, HDMI_MAI_DATA, 0x12345670);
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    HDMI_MAI_CTL_FULL | HDMI_MAI_CTL_ERRORF);
+    qtest_writel(qts, HDMI_MAI_CTL,
+                 HDMI_MAI_CTL_FLUSH | HDMI_MAI_CTL_ERRORF);
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    HDMI_MAI_CTL_EMPTY);
+
+    /* A late timer callback catches up every elapsed stereo frame. */
+    qtest_writel(qts, HDMI_MAI_CTL, control);
+    for (unsigned int word = 0; word < 8; word++) {
+        qtest_writel(qts, HDMI_MAI_DATA, word << 4);
+    }
+    qtest_clock_step(qts, 4 * HDMI_MAI_FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    control | HDMI_MAI_CTL_BUSY | HDMI_MAI_CTL_EMPTY);
+
+    qtest_writel(qts, HDMI_MAI_CTL, control | HDMI_MAI_CTL_RESET);
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    control | HDMI_MAI_CTL_BUSY | HDMI_MAI_CTL_EMPTY);
+    qtest_writel(qts, DVP_SW_INIT, BIT(0));
+    g_assert_cmphex(qtest_readl(qts, HDMI_MAI_CTL), ==,
+                    HDMI_MAI_CTL_EMPTY);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_quit(qts);
+}
+
+static void test_hdmi_mai_audio_dma(void)
+{
+    QTestState *qts = display_start();
+    const unsigned int words = 16;
+    uint32_t control = (2U << HDMI_MAI_CTL_CHNUM_SHIFT) |
+                       HDMI_MAI_CTL_WHOLSMP |
+                       HDMI_MAI_CTL_CHALIGN |
+                       HDMI_MAI_CTL_ENABLE;
+    uint32_t dma_cs;
+
+    qtest_writel(qts, DMA_CB,
+                 DMA_S_INC | DMA_D_DREQ | DMA_PERMAP(10));
+    qtest_writel(qts, DMA_CB + 4, DMA_SOURCE);
+    qtest_writel(qts, DMA_CB + 8, HDMI_MAI_DATA_BUS);
+    qtest_writel(qts, DMA_CB + 12, words * sizeof(uint32_t));
+    qtest_writel(qts, DMA_CB + 16, 0);
+    qtest_writel(qts, DMA_CB + 20, 0);
+    for (unsigned int word = 0; word < words; word++) {
+        qtest_writel(qts, DMA_SOURCE + word * sizeof(uint32_t),
+                     (word + 1) << 4);
+    }
+
+    qtest_writel(qts, DVP_MISC_CONFIG, 0);
+    qtest_writel(qts, HDMI_MAI_THR, (8U << 8) | 8);
+    qtest_writel(qts, HDMI_MAI_FMT,
+                 HDMI_MAI_FMT_PCM | HDMI_MAI_FMT_48000);
+    qtest_writel(qts, HDMI_MAI_CTL, control);
+    qtest_writel(qts, DMA_ADDR, DMA_CB);
+    qtest_writel(qts, DMA_CS, DMA_ACTIVE);
+
+    /* DREQ10 fills eight words, then holds the remaining source data. */
+    g_assert_cmphex(qtest_readl(qts, DMA_TXFR_LEN), ==,
+                    8 * sizeof(uint32_t));
+    dma_cs = qtest_readl(qts, DMA_CS);
+    g_assert_true(dma_cs & DMA_ACTIVE);
+    g_assert_true(dma_cs & DMA_ISHELD);
+
+    for (unsigned int frame = 1; frame <= 4; frame++) {
+        qtest_clock_step(qts, HDMI_MAI_FRAME_NS);
+        g_assert_cmphex(qtest_readl(qts, DMA_TXFR_LEN), ==,
+                        (8 - frame * 2) * sizeof(uint32_t));
+    }
+    dma_cs = qtest_readl(qts, DMA_CS);
+    g_assert_false(dma_cs & DMA_ACTIVE);
+    g_assert_true(dma_cs & DMA_END);
+    qtest_quit(qts);
+}
+
 static void ddc_release(QTestState *qts, uint64_t auto_i2c_base)
 {
     qtest_writel(qts, AUTO_I2C_CONTROL0(auto_i2c_base),
@@ -313,6 +492,26 @@ static void ddc_read_edid(QTestState *qts, uint8_t edid[EDID_LENGTH])
         }
         ddc_clear_command(qts, HDMI0_DDC_BASE);
     }
+}
+
+static const uint8_t *edid_cta_data_block(const uint8_t edid[EDID_LENGTH],
+                                          unsigned int tag)
+{
+    const uint8_t *cta = edid + EDID_BLOCK_LENGTH;
+    unsigned int end = cta[2];
+
+    g_assert_cmpuint(end, >, 4);
+    g_assert_cmpuint(end, <, EDID_BLOCK_LENGTH);
+    for (unsigned int offset = 4; offset < end; ) {
+        unsigned int length = cta[offset] & 0x1f;
+
+        g_assert_cmpuint(offset + length + 1, <=, end);
+        if (cta[offset] >> 5 == tag) {
+            return cta + offset;
+        }
+        offset += length + 1;
+    }
+    return NULL;
 }
 
 static void test_dvp_reset_and_controls(void)
@@ -431,17 +630,53 @@ static void test_ddc_edid(void)
     static const uint8_t edid_header[] = {
         0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
     };
+    static const uint8_t stereo_lpcm[] = { 0x09, 0x07, 0x07 };
+    static const uint8_t stereo_speakers[] = { 0x01, 0x00, 0x00 };
+    static const uint8_t hdmi_vsdb[] = {
+        0x03, 0x0c, 0x00, 0x10, 0x00, 0x00, 0x21,
+    };
     QTestState *qts = display_start();
+    const uint8_t *audio;
+    const uint8_t *speaker;
+    const uint8_t *video;
+    const uint8_t *vendor;
     uint8_t edid[EDID_LENGTH];
-    unsigned int checksum = 0;
 
     ddc_read_edid(qts, edid);
     g_assert_cmpmem(edid, sizeof(edid_header),
                     edid_header, sizeof(edid_header));
-    for (unsigned int i = 0; i < sizeof(edid); i++) {
-        checksum += edid[i];
+    g_assert_cmphex(edid[20], ==, 0xa2);
+    g_assert_cmphex(edid[EDID_EXTENSION_COUNT], ==, 1);
+    for (unsigned int block = 0; block < 2; block++) {
+        unsigned int checksum = 0;
+
+        for (unsigned int i = 0; i < EDID_BLOCK_LENGTH; i++) {
+            checksum += edid[block * EDID_BLOCK_LENGTH + i];
+        }
+        g_assert_cmphex(checksum & 0xff, ==, 0);
     }
-    g_assert_cmphex(checksum & 0xff, ==, 0);
+
+    g_assert_cmphex(edid[EDID_BLOCK_LENGTH], ==, CTA_EXTENSION_TAG);
+    g_assert_cmphex(edid[EDID_BLOCK_LENGTH + 1], ==, CTA_REVISION);
+    g_assert_true(edid[EDID_BLOCK_LENGTH + 3] & CTA_BASIC_AUDIO);
+
+    video = edid_cta_data_block(edid, CTA_DB_VIDEO);
+    audio = edid_cta_data_block(edid, CTA_DB_AUDIO);
+    speaker = edid_cta_data_block(edid, CTA_DB_SPEAKER);
+    vendor = edid_cta_data_block(edid, CTA_DB_VENDOR);
+    g_assert_nonnull(video);
+    g_assert_nonnull(audio);
+    g_assert_nonnull(speaker);
+    g_assert_nonnull(vendor);
+    g_assert_cmpuint(audio[0] & 0x1f, ==, sizeof(stereo_lpcm));
+    g_assert_cmpmem(audio + 1, sizeof(stereo_lpcm),
+                    stereo_lpcm, sizeof(stereo_lpcm));
+    g_assert_cmpuint(speaker[0] & 0x1f, ==, sizeof(stereo_speakers));
+    g_assert_cmpmem(speaker + 1, sizeof(stereo_speakers),
+                    stereo_speakers, sizeof(stereo_speakers));
+    g_assert_cmpuint(vendor[0] & 0x1f, ==, sizeof(hdmi_vsdb));
+    g_assert_cmpmem(vendor + 1, sizeof(hdmi_vsdb),
+                    hdmi_vsdb, sizeof(hdmi_vsdb));
     qtest_quit(qts);
 }
 
@@ -477,8 +712,14 @@ static void test_display_migration(void)
     QTestState *destination;
     uint8_t edid[EDID_LENGTH];
     uint32_t status;
+    int64_t mai_deadline_ns;
     const uint32_t hvs_control =
         HVS_DISPCTRL_ENABLE | (640U << 16) | 480;
+    const uint32_t mai_control =
+        (2U << HDMI_MAI_CTL_CHNUM_SHIFT) |
+        HDMI_MAI_CTL_WHOLSMP |
+        HDMI_MAI_CTL_CHALIGN |
+        HDMI_MAI_CTL_ENABLE;
     const int64_t pixelvalve_elapsed_ns = 5 * 1000 * 1000;
 
     ddc_read_edid(source, edid);
@@ -499,6 +740,35 @@ static void test_display_migration(void)
     qtest_writel(source, HDMI_SCHEDULER_CONTROL,
                  HDMI_SCHEDULER_MODE_HDMI);
     qtest_writel(source, HDMI0_PHY_BASE, 0x89abcdef);
+
+    /*
+     * Migrate a live stereo MAI stream with two frames queued and a DMA
+     * transfer held at the DREQ high-water mark.  The first sample after
+     * resume must consume two words and make DREQ10 refill exactly one frame.
+     */
+    qtest_writel(source, HDMI_MAI_THR, (4U << 8) | 4);
+    qtest_writel(source, HDMI_MAI_FMT,
+                 HDMI_MAI_FMT_PCM | HDMI_MAI_FMT_48000);
+    qtest_writel(source, HDMI_MAI_CTL, mai_control);
+    for (unsigned int word = 0; word < 4; word++) {
+        qtest_writel(source, HDMI_MAI_DATA, (word + 1) << 4);
+    }
+    qtest_writel(source, DMA_CB,
+                 DMA_S_INC | DMA_D_DREQ | DMA_PERMAP(10));
+    qtest_writel(source, DMA_CB + 4, DMA_SOURCE);
+    qtest_writel(source, DMA_CB + 8, HDMI_MAI_DATA_BUS);
+    qtest_writel(source, DMA_CB + 12, 4 * sizeof(uint32_t));
+    qtest_writel(source, DMA_CB + 16, 0);
+    qtest_writel(source, DMA_CB + 20, 0);
+    for (unsigned int word = 0; word < 4; word++) {
+        qtest_writel(source, DMA_SOURCE + word * sizeof(uint32_t),
+                     (word + 5) << 4);
+    }
+    qtest_writel(source, DMA_ADDR, DMA_CB);
+    qtest_writel(source, DMA_CS, DMA_ACTIVE);
+    g_assert_cmphex(qtest_readl(source, DMA_TXFR_LEN), ==,
+                    4 * sizeof(uint32_t));
+    g_assert_true(qtest_readl(source, DMA_CS) & DMA_ISHELD);
 
     /* Leave the EDID pointer and an open repeated-start transaction live. */
     ddc_set_pointer(source, HDMI0_DDC_BASE, 0x10, true);
@@ -542,13 +812,37 @@ static void test_display_migration(void)
                     HDMI_SCHEDULER_HDMI_ACTIVE);
     g_assert_cmphex(qtest_readl(destination, HDMI0_PHY_BASE), ==,
                     0x89abcdef);
+    g_assert_cmphex(qtest_readl(destination, HDMI_MAI_THR), ==,
+                    (4U << 8) | 4);
+    g_assert_cmphex(qtest_readl(destination, HDMI_MAI_FMT), ==,
+                    HDMI_MAI_FMT_PCM | HDMI_MAI_FMT_48000);
+    g_assert_cmphex(qtest_readl(destination, HDMI_MAI_CTL), ==,
+                    mai_control | HDMI_MAI_CTL_BUSY);
+    g_assert_cmphex(qtest_readl(destination, DMA_TXFR_LEN), ==,
+                    4 * sizeof(uint32_t));
+    g_assert_true(qtest_readl(destination, DMA_CS) & DMA_ISHELD);
 
     qtest_irq_intercept_out_named(destination, PIXELVALVE2_QOM_PATH,
                                   "sysbus-irq");
     g_assert_cmphex(qtest_readl(destination, PV_INTSTAT), ==, 0);
     g_assert_false(qtest_get_irq(destination, 0));
     qtest_qmp_assert_success(destination, "{ 'execute': 'cont' }");
-    g_assert_cmpint(qtest_clock_step_next(destination), >, 0);
+
+    /* The migrated MAI deadline precedes the pixel-valve vblank deadline. */
+    mai_deadline_ns = qtest_clock_step_next(destination);
+    g_assert_cmpint(mai_deadline_ns, ==,
+                    pixelvalve_elapsed_ns + HDMI_MAI_FIRST_FRAME_NS);
+    g_assert_cmphex(qtest_readl(destination, DMA_TXFR_LEN), ==,
+                    2 * sizeof(uint32_t));
+    g_assert_true(qtest_readl(destination, DMA_CS) & DMA_ISHELD);
+    g_assert_cmphex(qtest_readl(destination, HDMI_MAI_CTL), ==,
+                    mai_control | HDMI_MAI_CTL_BUSY);
+    g_assert_cmphex(qtest_readl(destination, PV_INTSTAT), ==, 0);
+
+    /* Stop MAI, then advance exactly to the migrated vblank deadline. */
+    qtest_writel(destination, HDMI_MAI_CTL, 0);
+    g_assert_cmpint(qtest_clock_set(destination, PV_FRAME_PERIOD_NS), ==,
+                    PV_FRAME_PERIOD_NS);
     g_assert_cmphex(qtest_readl(destination, PV_INTSTAT), ==,
                     PV_INT_VFP_START);
     g_assert_true(qtest_get_irq(destination, 0));
@@ -580,6 +874,10 @@ int main(int argc, char **argv)
                    test_pixelvalve_vblank_and_reset);
     qtest_add_func("/bcm2711/display/hdmi/transmitter",
                    test_hdmi_transmitter_registers_and_reset);
+    qtest_add_func("/bcm2711/display/hdmi/mai_audio_fifo",
+                   test_hdmi_mai_audio_fifo);
+    qtest_add_func("/bcm2711/display/hdmi/mai_audio_dma",
+                   test_hdmi_mai_audio_dma);
     qtest_add_func("/bcm2711/display/dvp", test_dvp_reset_and_controls);
     qtest_add_func("/bcm2711/display/ddc/registers_reset_and_nack",
                    test_ddc_registers_reset_and_nack);

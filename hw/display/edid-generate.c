@@ -60,6 +60,14 @@ typedef struct Timings {
     uint64_t clock;
 } Timings;
 
+enum {
+    CTA_DB_AUDIO = 1,
+    CTA_DB_VENDOR = 3,
+    CTA_DB_SPEAKER = 4,
+};
+
+#define CTA_BASIC_AUDIO (1U << 6)
+
 static void generate_timings(Timings *timings, uint32_t refresh_rate,
                              uint32_t xres, uint32_t yres)
 {
@@ -93,6 +101,49 @@ static void edid_ext_dta_mode(uint8_t *dta, uint8_t nr)
     dta[dta[2]] = nr;
     dta[2]++;
     dta[4]++;
+}
+
+static void edid_ext_dta_block(uint8_t *dta, uint8_t tag,
+                               const uint8_t *payload, size_t size)
+{
+    uint8_t offset = dta[2];
+
+    assert(size <= 0x1f);
+    assert(offset + size + 1 < 128);
+    dta[offset] = (tag << 5) | size;
+    memcpy(dta + offset + 1, payload, size);
+    dta[2] += size + 1;
+}
+
+static void edid_ext_dta_features(uint8_t *dta,
+                                  const qemu_edid_info *info)
+{
+    static const uint8_t stereo_lpcm[] = {
+        0x09, /* LPCM, two channels */
+        0x07, /* 32, 44.1 and 48 kHz */
+        0x07, /* 16, 20 and 24 bits */
+    };
+    static const uint8_t stereo_speakers[] = {
+        0x01, 0x00, 0x00, /* front left and front right */
+    };
+    static const uint8_t hdmi_vsdb[] = {
+        0x03, 0x0c, 0x00, /* HDMI Licensing Administrator OUI */
+        0x10, 0x00,       /* source physical address 1.0.0.0 */
+        0x00,             /* no deep-color or DVI-dual flags */
+        0x21,             /* 165 MHz maximum TMDS clock */
+    };
+
+    if (info->has_audio) {
+        dta[3] |= CTA_BASIC_AUDIO;
+        edid_ext_dta_block(dta, CTA_DB_AUDIO,
+                           stereo_lpcm, sizeof(stereo_lpcm));
+        edid_ext_dta_block(dta, CTA_DB_SPEAKER,
+                           stereo_speakers, sizeof(stereo_speakers));
+    }
+    if (info->is_hdmi) {
+        edid_ext_dta_block(dta, CTA_DB_VENDOR,
+                           hdmi_vsdb, sizeof(hdmi_vsdb));
+    }
 }
 
 static int edid_std_mode(uint8_t *mode, uint32_t xres, uint32_t yres)
@@ -466,8 +517,8 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
 
     /* =============== basic display parameters =============== */
 
-    /* video input: digital, 8bpc, displayport */
-    edid[20] = 0xa5;
+    /* video input: digital, 8bpc, HDMI-a or DisplayPort */
+    edid[20] = info->is_hdmi ? 0xa2 : 0xa5;
 
     /* screen size: undefined */
     edid[21] = width_mm / 10;
@@ -508,6 +559,9 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     edid_desc_xtra3_std(xtra3);
     desc = edid_desc_next(edid, dta, desc);
     edid_fill_modes(edid, xtra3, dta, info->maxx, info->maxy);
+    if (dta) {
+        edid_ext_dta_features(dta, info);
+    }
     /*
      * dta video data block is finished at thus point,
      * so dta descriptor offsets don't move any more.
