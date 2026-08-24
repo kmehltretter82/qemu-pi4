@@ -309,8 +309,8 @@ audio packets, and the physical Pi 400's disconnected ports supplied no
 monitor-derived audio comparison for this milestone.
 
 On 2026-08-24 the complete Pi-focused gate passed all eight qtest binaries and
-all 84 subtests: ten display, four CPRMAN, seven DMA, ten I2S, nine PWM,
-three I2C, five Pi 400 and 36 Pi 4B tests.  Both boards then passed the full
+all 85 subtests: ten display, four CPRMAN, seven DMA, ten I2S, nine PWM,
+three I2C, five Pi 400 and 37 Pi 4B tests.  Both boards then passed the full
 Linux USB-storage/GENET/DRM acceptance boot and the separate visible-pixel
 and HDMI-audio gates.
 
@@ -404,8 +404,8 @@ Before fork commit ``4f78fe1e54``, each pinned Linux 7.2 diagnostic boot
 logged one unsupported ``AUX_MU_MCR_REG`` write in addition to three PL011
 messages.  After the change, both boards retain all PCIe, VL805, MSI,
 USB-storage, GENET and Pi 400 keyboard checks, and only the three PL011
-messages remain.  The complete focused gate passes 36 Pi 4B qtests, five Pi
-400 qtests, all three offline functional boots and all 13 lab-tool tests.
+messages remain.  The complete focused gate passes 37 Pi 4B qtests, five Pi
+400 qtests, all three offline functional boots and all 15 lab-tool tests.
 The 2026-08-24 enable-gate, IER and scratch change repeated both pinned Linux
 boots with the same result: each diagnostic log contained exactly those three
 PL011 messages and no AUX, unimplemented or guest-error message.
@@ -517,6 +517,32 @@ The emulated state is intentionally shallow.  Property calls do not power-gate
 MMIO devices, stop vCPUs, or reproduce firmware sequencing and latency.  The
 hardware capture establishes useful IDs, state encoding and one runtime
 snapshot without claiming those deeper effects.
+
+OTP and board-identity reference evidence
+-----------------------------------------
+
+On 2026-08-24 a read-only ``vcgencmd otp_dump`` capture on the project's Pi
+400 confirmed that row 28 contains the low serial word, row 29 is its exact
+ones' complement and row 30 is ``0x00c03130``, the Pi 400 revision code.
+``/proc/cpuinfo`` and the device-tree ``serial-number`` reported the same
+Linux-visible serial, whose low 32 bits matched row 28.  The unique physical
+serial is deliberately omitted from this public evidence log.
+
+The `official Raspberry Pi OTP documentation
+<https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#otp-register-and-bit-definitions>`__
+assigns those same logical row numbers and assigns customer OTP to rows 36
+through 43.  Consequently QEMU's one-based helper, which stores logical row
+36 at array index 35, is not off by one.  The earlier outer-workspace B10
+hypothesis confused a public row number with its private C-array index and is
+rejected.
+
+The same documentation specifies an eight-byte ``GET_BOARD_SERIAL`` response
+whose most-significant 32 bits are zero.  The Pi 400's Linux-visible serial
+had a nonzero prefix, but that is not the mailbox response contract.  The fork
+therefore uses a non-identifying synthetic low word, returns a zero high word,
+and does not clone the captured physical identity.  Focused qtests cover both
+board revisions and serial responses, persistence across reset, and migration
+of a guest-programmed customer OTP row.
 
 Capture and compare a full Linux system
 ---------------------------------------

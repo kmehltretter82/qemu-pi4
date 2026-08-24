@@ -939,8 +939,49 @@ QP4-UP-035: CPRMAN migration loses derived output clocks
   fork's AI-derived code and tests cannot be proposed upstream; any patch and
   regression test must be independently implemented by a human.
 
+QP4-UP-036: Pi firmware board serial and OTP identity are incomplete
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: enhancement candidate; documented missing model with no
+  demonstrated real-workload failure
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Contract: Raspberry Pi's public OTP documentation assigns the serial, its
+  complement and board revision to logical rows 28, 29 and 30.  Its mailbox
+  documentation defines ``GET_BOARD_SERIAL`` as an eight-byte response whose
+  most-significant 32 bits are zero.
+:Observed issue: Current QEMU initializes every modeled OTP row to zero.
+  ``GET_BOARD_REVISION`` instead reads a separate device property, while
+  ``GET_BOARD_SERIAL`` logs that it is unimplemented but still marks eight
+  response bytes successful without writing them.  No maintained guest
+  failure is currently known.
+:Fork change: Initialize rows 28 through 30 from one configurable synthetic
+  serial and the board revision, and answer both identity tags from those
+  rows.  Existing e-fuse, reset and migration behavior is retained and covered
+  by focused tests on both board models.
+:Scope caveat: The raw OTP register block remains unimplemented.  Completing
+  a functional mailbox identity does not document or emulate that programming
+  interface.  A synthetic serial is a virtual-machine policy choice and is
+  not evidence for any physical board's factory value.
+:Before sending: Treat this as optional model completion unless a supported
+  workload establishes stronger impact.  Recheck current master and prior
+  discussions, and follow the live provenance policy; this fork's AI-derived
+  implementation, tests and documentation cannot be sent upstream.
+
 Rejected and research-only findings
 ------------------------------------
+
+BCM2835 OTP row-storage off-by-one hypothesis
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: not a bug
+:Reason rejected: Raspberry Pi's official documentation numbers the
+  non-BCM2712 serial, complement, revision and customer rows as 28, 29, 30 and
+  36 through 43.  QEMU's public helper accepts those one-based logical row
+  numbers and uses ``row - 1`` only as the private C-array index.  Therefore
+  logical row 36 correctly occupies array element 35.  The live Pi 400
+  identity relationships agree with the documented numbering.  The
+  unimplemented raw OTP register protocol is a separate enhancement gap, not
+  evidence for an indexing defect.
 
 Same-PE ordinary store between ``LDXR`` and ``STXR``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

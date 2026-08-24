@@ -61,8 +61,8 @@ Implemented devices
    BCM54213PE-compatible PHY
  * MailBox controller (MBOX)
  * VideoCore firmware property interface, including firmware-controlled GPIOs,
-   clock and power-domain state, reboot notification, and the Pi 4-family
-   VL805 initialization notification
+   coherent OTP-backed board identity, clock and power-domain state, reboot
+   notification, and the Pi 4-family VL805 initialization notification
  * Peripheral SPI controller (SPI)
  * Broadcom Serial Controller (I2C)
  * BCM2711 RNG200 random number generator, including its 16-word FIFO,
@@ -510,6 +510,29 @@ host voice state.  Samples already accepted only by the host audio backend do
 not migrate.  Focused qtests cover thresholds, FIFO status and errors,
 bounded timer catch-up, DVP and MAI resets, DMA completion and migration of an
 active stream.
+
+Firmware board identity and OTP
+-------------------------------
+
+The Pi 4 firmware property device initializes the factory identity rows of
+the BCM2835-compatible OTP model.  Row 28 contains the lower 32-bit serial,
+row 29 its ones' complement and row 30 the machine's board revision.  Both
+``GET_BOARD_REVISION`` and ``GET_BOARD_SERIAL`` read those rows, so mailbox
+and OTP-backed identity cannot disagree.  The serial response is 64 bits with
+an upper word of zero, matching the documented firmware property response.
+
+The default serial is the deterministic synthetic value ``0x51454d55``
+(``QEMU`` in ASCII).  Give separate virtual boards distinct identities when
+software relies on uniqueness, for example::
+
+  -global bcm2835-property.board-serial=0x12345678
+
+Do not copy the serial of a physical board unless deliberately cloning that
+identity.  Factory and customer OTP rows retain e-fuse semantics: writes can
+only set bits, survive a system reset and migrate with the VM.  The raw OTP
+controller register interface remains unimplemented because its programming
+protocol is not publicly documented; this functional identity support does
+not claim a Linux nvmem-accessible OTP controller.
 
 Firmware clock and power state
 ------------------------------

@@ -48,6 +48,12 @@ migrates the resulting state.  Clock and domain values are a firmware
 control-plane model only: they do not yet gate CPUs, clocks, or device MMIO in
 the emulator.
 
+Board revision and serial properties use the same factory OTP identity rows.
+Both machines default to the deterministic synthetic serial ``0x51454d55``;
+it can be changed with the ``bcm2835-property.board-serial`` global property.
+Factory identity and guest-programmed customer OTP survive reset and migrate
+with the VM.
+
 The BCM2835-compatible DMA engine runs linked control blocks in bounded
 virtual-clock slices instead of synchronously walking an entire chain.  Cyclic
 DMA therefore leaves the vCPU and event loop responsive.  The model supports
