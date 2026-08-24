@@ -137,8 +137,11 @@ precache-pi4:
 
 PI4_NINJA_TARGETS = qemu-system-aarch64 \
 	tests/unit/test-qgraph \
+	tests/qtest/bcm2835-cprman-test \
 	tests/qtest/bcm2835-dma-test \
 	tests/qtest/bcm2835-i2c-test \
+	tests/qtest/bcm2835-i2s-test \
+	tests/qtest/bcm2835-pwm-test \
 	tests/qtest/raspi400-test \
 	tests/qtest/raspi4b-test \
 	tests/qtest/qos-test
@@ -149,8 +152,11 @@ check-pi4:
 		"$(BUILD_DIR)/qemu-system-aarch64"
 	@$(MESON) test --no-rebuild --print-errorlogs \
 		qemu:test-qgraph \
+		qemu:qtest-aarch64/bcm2835-cprman-test \
 		qemu:qtest-aarch64/bcm2835-dma-test \
 		qemu:qtest-aarch64/bcm2835-i2c-test \
+		qemu:qtest-aarch64/bcm2835-i2s-test \
+		qemu:qtest-aarch64/bcm2835-pwm-test \
 		qemu:qtest-aarch64/raspi400-test \
 		qemu:qtest-aarch64/raspi4b-test \
 		qemu:qtest-aarch64/qos-test
