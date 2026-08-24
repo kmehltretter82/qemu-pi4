@@ -46,6 +46,8 @@ Implemented devices
    native Linux VC4 DRM scanout to a QEMU display
  * BCM2711 HDMI DVP clock/reset controller and both HDMI DDC I2C controllers,
    with a connected virtual EDID monitor on HDMI0
+ * BCM2711 HDMI0 MAI audio, with a 64-word FIFO, DMA DREQ pacing and PCM
+   playback through a QEMU audio backend
  * System Timer
  * GPIO controller, including all 58 input/output lines, edge and level event
    detection, and the three bank interrupts plus the all-bank interrupt
@@ -84,7 +86,7 @@ Missing devices
    placeholder)
  * Remaining native-display features: HVS scaling, multi-plane composition and
    tiled formats; pixel valves other than HDMI0's; HDMI1; dynamic hotplug, CEC
-   and HDMI audio data
+   and signal-level TMDS and HDMI audio-packet transport
  * Remaining BCM2711 PCIe controller-event behavior
  * Consumer-control key-event production for the Pi 400 keyboard's second HID
    interface; its identity, descriptors, enumeration and migration already
@@ -386,7 +388,9 @@ tree and implements the hotplug, FIFO, packet-status and scheduler responses
 needed by the Linux HDMI driver.  It starts connected and consumes HDMI0's
 DVP clock-enable and reset signals.  Most transmitter registers are retained
 control state rather than a signal-level HDMI encoder; there is no TMDS,
-blanking-interval, audio-packet or physical-monitor model.
+blanking-interval, audio-packet or physical-monitor model.  The separate MAI
+functional model described below terminates audio at QEMU's host audio core
+rather than synthesizing an HDMI wire stream.
 
 The HDMI DVP clock/reset controller is mapped at ARM physical address
 ``0xfef00000``.  It exposes six software-reset bits and two active-low HDMI
@@ -409,11 +413,14 @@ supplies no DDC interrupt and Linux uses the controller's polling path.
 HDMI0 contains QEMU's standard virtual DDC monitor at address ``0x50``;
 HDMI1 has no target by default and therefore reports NACK, representing a
 disconnected connector.  The virtual EDID is a QEMU display contract, not an
-EDID captured from the project's physical monitor.  Linux 7.2 binds
+EDID captured from the project's physical monitor.  Its 256 bytes contain a
+CTA-861 revision 3 extension with Basic Audio, a two-channel LPCM short audio
+descriptor for 32, 44.1 and 48 kHz at 16, 20 and 24 bits, front-left/right
+speaker allocation and an HDMI vendor data block.  Linux 7.2 binds
 ``brcm2711-dvp`` and both ``brcmstb-i2c`` instances on ``raspi4b`` and
 ``raspi400``.  The acceptance init performs the normal combined pointer-write
-and 128-byte read through ``/dev/i2c-*``, which exercises four hardware-sized
-chunks and validates the EDID header and checksum.
+and two 128-byte reads through ``/dev/i2c-*``, exercises eight hardware-sized
+chunks, validates both checksums and parses the HDMI and audio capabilities.
 
 DVP, HDMI-transmitter, HVS, pixel-valve and DDC register state, the vblank
 deadline, an open I2C transaction and the attached EDID cursor migrate.  Reset
@@ -437,8 +444,59 @@ each band::
 This is native Linux-programmed scanout, but it remains a deliberately small
 display-pipeline subset.  Scaling, arbitrary plane positions, composition,
 tiled and compressed formats, mode-derived timings, HDMI1, dynamic HPD, CEC,
-HDMI audio data and V3D are not modeled.  The DDC controller also omits the
-combined hardware DTF encodings and ten-bit I2C addressing.
+signal-level TMDS and audio-packet transport, and V3D are not modeled.  The
+DDC controller also omits the combined hardware DTF encodings and ten-bit I2C
+addressing.
+
+HDMI0 MAI audio
+---------------
+
+The HDMI0 transmitter's shared HD register bank contains a functional MAI
+audio subset.  It implements the control, threshold, format and data
+registers, a 64-word FIFO, busy/empty/full status, sticky underflow and
+overflow status, write-one-to-clear errors, and reset and flush commands.  A
+running stream consumes complete frames at the selected virtual-time rate.
+Low and high FIFO thresholds provide hysteretic DMA DREQ 10 pacing to the
+BCM2835-compatible DMA engine, so the production Linux driver exercises the
+same MAI/DMA path rather than an acceptance-only shortcut.
+
+All fifteen MAI rate selectors from 8 kHz through 192 kHz and one through
+eight interleaved channels are accepted.  IEC958 validity-marked subframes
+produce silence.  Mono is duplicated to the host stereo output; for wider
+streams the first two channels reach the host and the remaining words are
+consumed to preserve FIFO and DMA pacing.  PCM reaches QEMU's audio core as
+signed 32-bit stereo.  Subframe preamble and parity checking, channel-status
+interpretation, non-PCM/HBR decoding and an HDMI packet or link model remain
+unimplemented.
+
+Select an explicit backend for HDMI audio when other Pi audio devices are
+also present.  For example, this captures HDMI0 and assigns the unrelated I2S
+and PWM devices to a silent backend::
+
+  -audiodev wav,id=hdmi,path=pi4-hdmi.wav,out.frequency=48000,out.channels=2 \
+  -audiodev none,id=silent \
+  -global bcm2711-hdmi.audiodev=hdmi \
+  -global bcm2835-i2s.audiodev=silent \
+  -global bcm2835-pwm.audiodev=silent
+
+The pinned Linux 7.2 image sees the CTA audio advertisement, registers
+``vc4-hdmi-0`` and opens its IEC958 PCM device at 48 kHz stereo.  Its
+one-second test stream uses different square-wave frequencies and amplitudes
+on the two channels.  The dedicated host gate requires production-driver
+playback to complete, then verifies the WAV format, duration, continuity,
+channel frequencies, amplitudes and RMS ratio on both board models::
+
+  scripts/pi4/test-audio.py --qemu build/qemu-system-aarch64 \
+      --machine raspi4b
+  scripts/pi4/test-audio.py --qemu build/qemu-system-aarch64 \
+      --machine raspi400
+
+MAI register state, FIFO contents, the fractional-rate accumulator and the
+next pacing deadline migrate.  Post-load re-establishes the derived DREQ and
+host voice state.  Samples already accepted only by the host audio backend do
+not migrate.  Focused qtests cover thresholds, FIFO status and errors,
+bounded timer catch-up, DVP and MAI resets, DMA completion and migration of an
+active stream.
 
 Firmware clock and power state
 ------------------------------

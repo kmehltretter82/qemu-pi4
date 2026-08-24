@@ -74,13 +74,15 @@ QEMU exits cleanly, the guest prints ``PI4-LAB: upstream Linux boot
 successful``, and Linux reports that it registered the BCM2711 AON L2
 interrupt controller.  The initramfs also requires the ``brcm2711-dvp`` and
 both ``brcmstb-i2c`` platform drivers, finds HDMI0 by its adapter identity,
-and validates a complete 128-byte EDID through Linux's ``I2C_RDWR`` path.  It
-also requires VC4 DRM to register ``card0``, report a connected HDMI-A-1 with
-the preferred 1280x800 mode, enable scanout and create a 1280x800 RGB565
-framebuffer.  The guest requires two successful target-range sector reads in
-consecutive polling intervals before starting the storage integrity checks;
-seeing the block device's ``/dev`` node alone is not sufficient because Linux
-can publish it while disk initialization is still in progress.
+and validates both blocks of a 256-byte EDID through Linux's ``I2C_RDWR``
+path.  The check verifies both checksums and the CTA Basic Audio, stereo LPCM,
+speaker-allocation and HDMI vendor blocks.  It also requires VC4 DRM to
+register ``card0``, report a connected HDMI-A-1 with the preferred 1280x800
+mode, enable scanout and create a 1280x800 RGB565 framebuffer.  The guest
+requires two successful target-range sector reads in consecutive polling
+intervals before starting the storage integrity checks; seeing the block
+device's ``/dev`` node alone is not sufficient because Linux can publish it
+while disk initialization is still in progress.
 
 The initramfs verifies that upstream Linux selected ``iproc-rng200``, obtains
 64 bytes through ``/dev/hwrng``, and reports the modeled 35050-millidegree
@@ -116,6 +118,20 @@ waits for all Linux acceptance checks, requests a QMP screendump and validates
 red, green, blue and white samples at three different scanlines.  This
 distinguishes a merely bound DRM driver from an HVS path that actually reaches
 QEMU's display surface.
+
+To validate HDMI0 audio through the production VC4 driver and the host audio
+backend, run the dedicated gate for each board model::
+
+  scripts/pi4/test-audio.py \
+      --qemu build/qemu-system-aarch64 --machine raspi4b
+  scripts/pi4/test-audio.py \
+      --qemu build/qemu-system-aarch64 --machine raspi400
+
+The guest opens ``vc4-hdmi-0`` as 48 kHz, two-channel IEC958 PCM and sends one
+second of distinct left and right square waves through MAI and DMA.  The host
+gate rejects silence, internal gaps, channel swapping, incorrect amplitude,
+frequency or duration, and a malformed WAV format.  Pass ``--output PATH`` to
+retain the validated capture.
 
 The same kernel and unmodified upstream Pi 4 DTB can also mount a normal
 Linux root filesystem from the emulated external SD card.  Attach the image
@@ -245,10 +261,11 @@ disconnected behavior.
 
 On the emulated side, the pinned Linux 7.2 image bound the DVP and both DDC
 drivers on ``raspi4b`` and ``raspi400``.  Its production ``I2C_RDWR`` path
-successfully performed a pointer write followed by four 32-byte read chunks
-and validated the standard EDID header and checksum.  Focused qtests also
-cover DVP and DDC reset, ownership, ACK/NACK, malformed-command cleanup and
-live migration with a repeated-start session left open.
+successfully performed two pointer writes followed by eight 32-byte read
+chunks, validated both EDID checksums and parsed the HDMI stereo-audio CTA
+blocks.  Focused qtests also cover DVP and DDC reset, ownership, ACK/NACK,
+malformed-command cleanup and live migration with a repeated-start session
+left open.
 
 The native scanout milestone intentionally uses the virtual HDMI0 monitor
 rather than pretending the disconnected physical capture supplied a display
@@ -266,11 +283,21 @@ writes were made on the physical Pi for this milestone.  The implemented
 register subset is justified by the upstream Linux driver path and virtual
 display contract, not claimed as a complete BCM2711 hardware reproduction.
 
+The same Linux driver registered the ``vc4-hdmi-0`` IEC958 playback device and
+completed the MAI/DMA 48 kHz stereo workload on both machines.  The final
+acceptance run captured 48,236 active frames on ``raspi4b`` and 47,919 on
+``raspi400``;
+the measured channels were approximately 1 kHz and 2 kHz with the intended
+2.0001 RMS ratio and no internal silent frames.  The functional endpoint is
+QEMU's host audio core: no claim is made that the fork generates TMDS or HDMI
+audio packets, and the physical Pi 400's disconnected ports supplied no
+monitor-derived audio comparison for this milestone.
+
 On 2026-08-24 the complete Pi-focused gate passed all eight qtest binaries and
-all 81 subtests: seven display, four CPRMAN, seven DMA, ten I2S, nine PWM,
+all 83 subtests: nine display, four CPRMAN, seven DMA, ten I2S, nine PWM,
 three I2C, five Pi 400 and 36 Pi 4B tests.  Both boards then passed the full
 Linux USB-storage/GENET/DRM acceptance boot and the separate visible-pixel
-gate.
+and HDMI-audio gates.
 
 GPIO reference evidence
 -----------------------
@@ -362,8 +389,8 @@ Before fork commit ``4f78fe1e54``, each pinned Linux 7.2 diagnostic boot
 logged one unsupported ``AUX_MU_MCR_REG`` write in addition to three PL011
 messages.  After the change, both boards retain all PCIe, VL805, MSI,
 USB-storage, GENET and Pi 400 keyboard checks, and only the three PL011
-messages remain.  The complete focused gate passes 34 Pi 4B qtests, five Pi
-400 qtests, all three offline functional boots and all eight lab-tool tests.
+messages remain.  The complete focused gate passes 36 Pi 4B qtests, five Pi
+400 qtests, all three offline functional boots and all 13 lab-tool tests.
 The 2026-08-24 enable-gate, IER and scratch change repeated both pinned Linux
 boots with the same result: each diagnostic log contained exactly those three
 PL011 messages and no AUX, unimplemented or guest-error message.
