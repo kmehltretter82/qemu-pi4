@@ -9,6 +9,7 @@
 #define BCM2835_DMA_H
 
 #include "hw/core/sysbus.h"
+#include "qemu/timer.h"
 #include "qom/object.h"
 
 typedef struct {
@@ -21,6 +22,19 @@ typedef struct {
     uint32_t stride;
     uint32_t nextconbk;
     uint32_t debug;
+
+    /* Internal progress for bounded, asynchronous transfers. */
+    bool cb_loaded;
+    bool dreq_valid;
+    uint32_t xlen;
+    uint32_t xlen_td;
+    uint32_t ylen;
+    int32_t dst_stride;
+    int32_t src_stride;
+
+    struct BCM2835DMAState *dma;
+    QEMUTimer *timer;
+    unsigned channel;
 
     qemu_irq irq;
 } BCM2835DMAChan;
@@ -42,6 +56,7 @@ struct BCM2835DMAState {
     BCM2835DMAChan chan[BCM2835_DMA_NCHANS];
     uint32_t int_status;
     uint32_t enable;
+    uint32_t dreq;
 };
 
 #endif

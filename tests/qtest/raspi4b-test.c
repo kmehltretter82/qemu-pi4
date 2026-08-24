@@ -44,6 +44,16 @@
 #define RASPI4_SYSTIMER_COMPARE_0 (RASPI4_SYSTIMER_BASE + 0x0c)
 #define RASPI4_SYSTIMER_GIC_IRQ_0 64
 
+#define RASPI4_DMA5_BASE           0xfe007500
+#define RASPI4_DMA_CS              (RASPI4_DMA5_BASE + 0x00)
+#define RASPI4_DMA_ADDR            (RASPI4_DMA5_BASE + 0x04)
+#define RASPI4_DMA_TXFR_LEN        (RASPI4_DMA5_BASE + 0x14)
+#define DMA_ACTIVE                 (1U << 0)
+#define DMA_END                    (1U << 1)
+#define DMA_ISPAUSED               (1U << 4)
+#define DMA_S_INC                  (1U << 8)
+#define DMA_D_INC                  (1U << 4)
+
 #define RASPI4_DWC2_BASE          0xfe980000
 #define RASPI4_DWC2_REG(_reg)     (RASPI4_DWC2_BASE + (_reg))
 #define RASPI4_DWC2_GIC_IRQ       73
@@ -1317,7 +1327,13 @@ static void test_soc_peripheral_migration(void)
     QTestState *destination;
     uint32_t source_word;
     uint32_t destination_word;
+    const uint32_t dma_cb = 0x8000;
+    const uint32_t dma_source = 0x9000;
+    const uint32_t dma_destination = 0xa000;
+    const uint32_t dma_length = 2048;
+    int64_t dma_clock;
     QDict *response;
+    unsigned offset;
     int net_sockets[2];
     int ret;
 
@@ -1366,6 +1382,27 @@ static void test_soc_peripheral_migration(void)
     writel(RASPI4_AUX_MU_MCR, AUX_MCR_RTS);
     writel(RASPI4_AUX_MU_SCRATCH, 0xa5);
     writel(RASPI4_AUX_ENABLES, 0);
+
+    /* Leave a bounded DMA transfer half complete at the migration boundary. */
+    writel(dma_cb, DMA_S_INC | DMA_D_INC);
+    writel(dma_cb + 4, dma_source);
+    writel(dma_cb + 8, dma_destination);
+    writel(dma_cb + 12, dma_length);
+    writel(dma_cb + 16, 0);
+    writel(dma_cb + 20, 0);
+    for (offset = 0; offset < dma_length; offset += sizeof(uint32_t)) {
+        writel(dma_source + offset, 0x12340000 + offset);
+        writel(dma_destination + offset, 0);
+    }
+    writel(RASPI4_DMA_ADDR, dma_cb);
+    writel(RASPI4_DMA_CS, DMA_ACTIVE);
+    g_assert_cmphex(readl(dma_destination + 1020), ==, 0x123403fc);
+    g_assert_cmphex(readl(dma_destination + 1024), ==, 0);
+    g_assert_cmphex(readl(RASPI4_DMA_TXFR_LEN), ==, 1024);
+
+    /* Consume 400 ns of the 1 us continuation delay before migration. */
+    dma_clock = qtest_clock_step(source, 400);
+    g_assert_cmphex(readl(dma_destination + 1024), ==, 0);
 
     qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
     tmpdir = g_dir_make_tmp("raspi4b-soc-migration-XXXXXX", &error);
@@ -1437,6 +1474,12 @@ static void test_soc_peripheral_migration(void)
                     AUX_MCR_RTS);
     g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_MU_SCRATCH), ==,
                     0xa5);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_DMA_CS) & DMA_ACTIVE,
+                    ==, DMA_ACTIVE);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_DMA_TXFR_LEN), ==, 1024);
+    g_assert_cmphex(qtest_readl(destination, dma_destination + 1020), ==,
+                    0x123403fc);
+    g_assert_cmphex(qtest_readl(destination, dma_destination + 1024), ==, 0);
 
     property_request_qtest(destination, RPI_FWREQ_GET_CLOCK_STATE, get_clock,
                            G_N_ELEMENTS(get_clock), sizeof(get_clock));
@@ -1453,8 +1496,19 @@ static void test_soc_peripheral_migration(void)
     g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_FIFO_COUNT), ==,
                     RNG200_FIFO_THRESHOLD | 3);
 
-    /* The pending one-word refill deadline must migrate too. */
+    /* In-flight DMA progress and its continuation deadline must migrate. */
     qtest_qmp_assert_success(destination, "{ 'execute': 'cont' }");
+    g_assert_cmpint(qtest_clock_step_next(destination), ==, dma_clock + 600);
+    g_assert_cmphex(qtest_readl(destination,
+                               dma_destination + dma_length - 4), ==,
+                    0x12340000 + dma_length - 4);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_DMA_CS) & DMA_ACTIVE,
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_DMA_CS) &
+                    (DMA_END | DMA_ISPAUSED), ==,
+                    DMA_END | DMA_ISPAUSED);
+
+    /* The pending one-word RNG refill deadline must migrate too. */
     qtest_clock_step_next(destination);
     g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_FIFO_COUNT), ==,
                     RNG200_FIFO_THRESHOLD | 4);
