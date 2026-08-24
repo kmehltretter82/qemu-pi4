@@ -95,6 +95,7 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define INTERRUPT_HOSTPORT             32
 #define INTERRUPT_I2C                  53
 #define INTERRUPT_SPI                  54
+#define INTERRUPT_PCM                  55
 #define INTERRUPT_SDIO                 56
 #define INTERRUPT_UART0                57
 #define INTERRUPT_ARASANSDIO           62

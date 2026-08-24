@@ -114,6 +114,9 @@ static void raspi_peripherals_base_init(Object *obj)
     object_property_add_const_link(OBJECT(&s->dma), "dma-mr",
                                    OBJECT(&s->gpu_bus_mr));
 
+    /* PCM / I2S */
+    object_initialize_child(obj, "i2s", &s->i2s, TYPE_BCM2835_I2S);
+
     /* Mphi */
     object_initialize_child(obj, "mphi", &s->mphi, TYPE_BCM2835_MPHI);
 
@@ -193,6 +196,8 @@ void bcm_soc_peripherals_common_realize(DeviceState *dev, Error **errp)
                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->cprman), 0));
     qdev_connect_clock_in(DEVICE(&s->uart0), "clk",
                           qdev_get_clock_out(DEVICE(&s->cprman), "uart-out"));
+    qdev_connect_clock_in(DEVICE(&s->i2s), "pcm-in",
+                          qdev_get_clock_out(DEVICE(&s->cprman), "pcm-out"));
 
     memory_region_add_subregion(&s->peri_mr, ARMCTRL_IC_OFFSET,
                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->ic), 0));
@@ -347,6 +352,21 @@ void bcm_soc_peripherals_common_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(&s->peri_mr, DMA15_OFFSET,
                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->dma), 1));
 
+    /* PCM / I2S */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->i2s), errp)) {
+        return;
+    }
+
+    memory_region_add_subregion(&s->peri_mr, I2S_OFFSET,
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->i2s), 0));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->i2s), 0,
+        qdev_get_gpio_in_named(DEVICE(&s->ic), BCM2835_IC_GPU_IRQ,
+                               INTERRUPT_PCM));
+    qdev_connect_gpio_out_named(DEVICE(&s->i2s), "dreq", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->dma), "dreq", 2));
+    qdev_connect_gpio_out_named(DEVICE(&s->i2s), "dreq", 1,
+        qdev_get_gpio_in_named(DEVICE(&s->dma), "dreq", 3));
+
     /* Mphi */
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->mphi), errp)) {
         return;
@@ -422,7 +442,6 @@ void bcm_soc_peripherals_common_realize(DeviceState *dev, Error **errp)
 
     create_unimp(s, &s->txp, "bcm2835-txp", TXP_OFFSET, 0x1000);
     create_unimp(s, &s->armtmr, "bcm2835-sp804", ARMCTRL_TIMER0_1_OFFSET, 0x40);
-    create_unimp(s, &s->i2s, "bcm2835-i2s", I2S_OFFSET, 0x100);
     create_unimp(s, &s->smi, "bcm2835-smi", SMI_OFFSET, 0x100);
     create_unimp(s, &s->bscsl, "bcm2835-spis", BSC_SL_OFFSET, 0x100);
     create_unimp(s, &s->dbus, "bcm2835-dbus", DBUS_OFFSET, 0x8000);

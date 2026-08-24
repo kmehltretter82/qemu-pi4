@@ -243,6 +243,10 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->spi[0]), 0,
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_SPI0));
 
+    /* Connect PCM / I2S to its BCM2711 GIC SPI. */
+    sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->i2s), 0,
+                       qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_PCM));
+
     /* Connect VC mailbox to the interrupt controller */
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->mboxes), 0,
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_MBOX));
