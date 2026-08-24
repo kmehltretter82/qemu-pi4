@@ -131,7 +131,7 @@ if ! grep -Fq \
 fi
 
 if ! grep -Fq \
-    'PI4-LAB: HDMI0 DDC reads a valid 128-byte EDID' "$qemu_log"; then
+    'PI4-LAB: HDMI0 DDC advertises HDMI stereo audio' "$qemu_log"; then
     echo "BCM2711 HDMI DVP/DDC/EDID acceptance checks were not run" >&2
     exit 1
 fi

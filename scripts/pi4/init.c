@@ -18,6 +18,7 @@
 #include <linux/i2c-dev.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <sound/asound.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -45,12 +46,29 @@
 #define SYSFS_WAIT_US 100000
 #define HDMI_DDC_ADAPTER "fef04500.i2c"
 #define HDMI_EDID_ADDRESS 0x50
-#define HDMI_EDID_LENGTH 128
+#define EDID_BLOCK_LENGTH 128
+#define HDMI_EDID_LENGTH (2 * EDID_BLOCK_LENGTH)
+#define EDID_EXTENSION_COUNT 126
+#define CTA_EXTENSION_TAG 0x02
+#define CTA_REVISION 0x03
+#define CTA_BASIC_AUDIO (1U << 6)
+#define CTA_DB_AUDIO 1
+#define CTA_DB_VENDOR 3
+#define CTA_DB_SPEAKER 4
 #define DRM_CARD_PATH "/dev/dri/card0"
 #define DRM_CONNECTOR_PATH "/sys/class/drm/card0-HDMI-A-1"
 #define FRAMEBUFFER_PATH "/dev/fb0"
 #define DISPLAY_WIDTH 1280
 #define DISPLAY_HEIGHT 800
+#define HDMI_AUDIO_RATE 48000
+#define HDMI_AUDIO_CHANNELS 2
+#define HDMI_AUDIO_PERIOD_FRAMES 1024
+#define HDMI_AUDIO_BUFFER_FRAMES 4096
+#define HDMI_AUDIO_TEST_FRAMES HDMI_AUDIO_RATE
+#define HDMI_AUDIO_LEFT_PERIOD 48
+#define HDMI_AUDIO_RIGHT_PERIOD 24
+#define HDMI_AUDIO_LEFT_AMPLITUDE 0x400000
+#define HDMI_AUDIO_RIGHT_AMPLITUDE 0x200000
 
 static void mount_fs(const char *source, const char *target,
                      const char *filesystem)
@@ -813,18 +831,100 @@ static int find_i2c_device(const char *adapter_name, char *device_path,
     return -1;
 }
 
+static int read_hdmi_edid_block(int fd, unsigned char offset,
+                                unsigned char block[EDID_BLOCK_LENGTH])
+{
+    struct i2c_rdwr_ioctl_data transfer;
+    struct i2c_msg messages[2];
+    int result;
+
+    messages[0].addr = HDMI_EDID_ADDRESS;
+    messages[0].flags = 0;
+    messages[0].len = sizeof(offset);
+    messages[0].buf = &offset;
+    messages[1].addr = HDMI_EDID_ADDRESS;
+    messages[1].flags = I2C_M_RD;
+    messages[1].len = EDID_BLOCK_LENGTH;
+    messages[1].buf = block;
+    transfer.msgs = messages;
+    transfer.nmsgs = 2;
+
+    result = ioctl(fd, I2C_RDWR, &transfer);
+    if (result != 2) {
+        printf("PI4-LAB: HDMI0 EDID block 0x%02x I2C_RDWR"
+               " returned %d%s%s\n", offset, result,
+               result < 0 ? ": " : "",
+               result < 0 ? strerror(errno) : "");
+        return -1;
+    }
+    return 0;
+}
+
+static int verify_hdmi_cta_audio(const unsigned char *cta)
+{
+    unsigned int end = cta[2];
+    int has_lpcm = 0;
+    int has_speakers = 0;
+    int has_hdmi = 0;
+
+    if (cta[0] != CTA_EXTENSION_TAG || cta[1] != CTA_REVISION ||
+        end <= 4 || end >= EDID_BLOCK_LENGTH ||
+        !(cta[3] & CTA_BASIC_AUDIO)) {
+        printf("PI4-LAB: HDMI0 CTA header is"
+               " tag=%02x revision=%02x dtd=%u features=%02x\n",
+               cta[0], cta[1], end, cta[3]);
+        return -1;
+    }
+
+    for (unsigned int offset = 4; offset < end; ) {
+        unsigned int length = cta[offset] & 0x1f;
+        unsigned int tag = cta[offset] >> 5;
+        const unsigned char *payload = cta + offset + 1;
+
+        if (offset + length + 1 > end) {
+            printf("PI4-LAB: HDMI0 CTA data block overruns offset %u\n",
+                   offset);
+            return -1;
+        }
+        if (tag == CTA_DB_AUDIO) {
+            for (unsigned int descriptor = 0;
+                 descriptor + 3 <= length; descriptor += 3) {
+                const unsigned char *sad = payload + descriptor;
+
+                if ((sad[0] & 0x78) == 0x08 &&
+                    (sad[0] & 0x07) == 0x01 &&
+                    (sad[1] & 0x07) == 0x07 &&
+                    (sad[2] & 0x07) == 0x07) {
+                    has_lpcm = 1;
+                }
+            }
+        } else if (tag == CTA_DB_SPEAKER && length >= 1 &&
+                   (payload[0] & 0x01)) {
+            has_speakers = 1;
+        } else if (tag == CTA_DB_VENDOR && length >= 3 &&
+                   payload[0] == 0x03 && payload[1] == 0x0c &&
+                   payload[2] == 0x00) {
+            has_hdmi = 1;
+        }
+        offset += length + 1;
+    }
+
+    if (!has_lpcm || !has_speakers || !has_hdmi) {
+        printf("PI4-LAB: HDMI0 CTA capabilities are"
+               " lpcm=%d speakers=%d hdmi=%d\n",
+               has_lpcm, has_speakers, has_hdmi);
+        return -1;
+    }
+    return 0;
+}
+
 static int verify_hdmi_edid(void)
 {
     static const unsigned char header[] = {
         0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
     };
-    struct i2c_rdwr_ioctl_data transfer;
-    struct i2c_msg messages[2];
-    unsigned char offset = 0;
     unsigned char edid[HDMI_EDID_LENGTH];
     char device_path[PATH_MAX];
-    unsigned int checksum = 0;
-    int result;
     int fd;
 
     if (find_i2c_device(HDMI_DDC_ADAPTER, device_path,
@@ -841,24 +941,10 @@ static int verify_hdmi_edid(void)
         return -1;
     }
 
-    messages[0].addr = HDMI_EDID_ADDRESS;
-    messages[0].flags = 0;
-    messages[0].len = sizeof(offset);
-    messages[0].buf = &offset;
-    messages[1].addr = HDMI_EDID_ADDRESS;
-    messages[1].flags = I2C_M_RD;
-    messages[1].len = sizeof(edid);
-    messages[1].buf = edid;
-    transfer.msgs = messages;
-    transfer.nmsgs = 2;
-
-    result = ioctl(fd, I2C_RDWR, &transfer);
-    if (result != 2) {
-        int saved_errno = errno;
-
+    if (read_hdmi_edid_block(fd, 0, edid) ||
+        read_hdmi_edid_block(fd, EDID_BLOCK_LENGTH,
+                             edid + EDID_BLOCK_LENGTH)) {
         close(fd);
-        printf("PI4-LAB: HDMI0 EDID I2C_RDWR returned %d: %s\n",
-               result, strerror(saved_errno));
         return -1;
     }
     close(fd);
@@ -870,15 +956,259 @@ static int verify_hdmi_edid(void)
                edid[4], edid[5], edid[6], edid[7]);
         return -1;
     }
-    for (size_t i = 0; i < sizeof(edid); i++) {
-        checksum += edid[i];
-    }
-    if (checksum & 0xff) {
-        printf("PI4-LAB: HDMI0 EDID checksum is 0x%02x\n",
-               checksum & 0xff);
+    if (edid[20] != 0xa2 || edid[EDID_EXTENSION_COUNT] != 1) {
+        printf("PI4-LAB: HDMI0 EDID interface is 0x%02x with"
+               " %u extensions\n", edid[20],
+               edid[EDID_EXTENSION_COUNT]);
         return -1;
     }
-    return 0;
+    for (unsigned int block = 0; block < 2; block++) {
+        unsigned int checksum = 0;
+
+        for (unsigned int i = 0; i < EDID_BLOCK_LENGTH; i++) {
+            checksum += edid[block * EDID_BLOCK_LENGTH + i];
+        }
+        if (checksum & 0xff) {
+            printf("PI4-LAB: HDMI0 EDID block %u checksum is 0x%02x\n",
+                   block, checksum & 0xff);
+            return -1;
+        }
+    }
+    return verify_hdmi_cta_audio(edid + EDID_BLOCK_LENGTH);
+}
+
+static int find_hdmi_pcm_device(char *device_path, size_t device_path_size)
+{
+    for (int attempt = 0; attempt < SYSFS_WAIT_ATTEMPTS; attempt++) {
+        for (unsigned int card = 0; card < 32; card++) {
+            char path[PATH_MAX];
+            char resolved[PATH_MAX];
+            int count;
+
+            snprintf(path, sizeof(path),
+                     "/sys/class/sound/card%u/device", card);
+            if (!realpath(path, resolved) ||
+                !strstr(resolved, "/fef00700.hdmi")) {
+                continue;
+            }
+            count = snprintf(device_path, device_path_size,
+                             "/dev/snd/pcmC%uD0p", card);
+            if (count >= 0 && (size_t)count < device_path_size &&
+                !access(device_path, R_OK | W_OK)) {
+                return 0;
+            }
+        }
+        usleep(SYSFS_WAIT_US);
+    }
+    return -1;
+}
+
+static struct snd_mask *pcm_hw_mask(struct snd_pcm_hw_params *params,
+                                    unsigned int parameter)
+{
+    return &params->masks[parameter - SNDRV_PCM_HW_PARAM_FIRST_MASK];
+}
+
+static struct snd_interval *pcm_hw_interval(struct snd_pcm_hw_params *params,
+                                            unsigned int parameter)
+{
+    return &params->intervals[parameter -
+                              SNDRV_PCM_HW_PARAM_FIRST_INTERVAL];
+}
+
+static void pcm_hw_params_any(struct snd_pcm_hw_params *params)
+{
+    memset(params, 0, sizeof(*params));
+    for (unsigned int parameter = SNDRV_PCM_HW_PARAM_FIRST_MASK;
+         parameter <= SNDRV_PCM_HW_PARAM_LAST_MASK; parameter++) {
+        struct snd_mask *mask = pcm_hw_mask(params, parameter);
+
+        for (size_t word = 0; word < sizeof(mask->bits) /
+                                      sizeof(mask->bits[0]); word++) {
+            mask->bits[word] = UINT_MAX;
+        }
+        params->cmask |= 1U << parameter;
+        params->rmask |= 1U << parameter;
+    }
+    for (unsigned int parameter = SNDRV_PCM_HW_PARAM_FIRST_INTERVAL;
+         parameter <= SNDRV_PCM_HW_PARAM_LAST_INTERVAL; parameter++) {
+        struct snd_interval *interval = pcm_hw_interval(params, parameter);
+
+        interval->min = 0;
+        interval->max = UINT_MAX;
+        params->cmask |= 1U << parameter;
+        params->rmask |= 1U << parameter;
+    }
+    params->info = UINT_MAX;
+}
+
+static void pcm_hw_param_set(struct snd_pcm_hw_params *params,
+                             unsigned int parameter, unsigned int value)
+{
+    if (parameter <= SNDRV_PCM_HW_PARAM_LAST_MASK) {
+        struct snd_mask *mask = pcm_hw_mask(params, parameter);
+
+        memset(mask, 0, sizeof(*mask));
+        mask->bits[value / 32] = 1U << (value % 32);
+    } else {
+        struct snd_interval *interval = pcm_hw_interval(params, parameter);
+
+        memset(interval, 0, sizeof(*interval));
+        interval->min = value;
+        interval->max = value;
+        interval->integer = 1;
+    }
+    params->cmask |= 1U << parameter;
+    params->rmask |= 1U << parameter;
+}
+
+static unsigned int pcm_hw_param_value(struct snd_pcm_hw_params *params,
+                                       unsigned int parameter)
+{
+    if (parameter <= SNDRV_PCM_HW_PARAM_LAST_MASK) {
+        struct snd_mask *mask = pcm_hw_mask(params, parameter);
+
+        for (unsigned int value = 0; value < SNDRV_MASK_MAX; value++) {
+            if (mask->bits[value / 32] & (1U << (value % 32))) {
+                return value;
+            }
+        }
+        return UINT_MAX;
+    }
+    return pcm_hw_interval(params, parameter)->min;
+}
+
+static uint32_t hdmi_audio_subframe(int32_t sample, unsigned int frame,
+                                    unsigned int channel)
+{
+    uint32_t preamble;
+    uint32_t subframe;
+
+    if (channel) {
+        preamble = 0x4;
+    } else if (!(frame % 192)) {
+        preamble = 0x8;
+    } else {
+        preamble = 0x2;
+    }
+
+    subframe = (((uint32_t)sample & 0xffffff) << 4) | preamble;
+    if (__builtin_parity(subframe >> 4)) {
+        subframe |= 1U << 31;
+    }
+    return subframe;
+}
+
+static int play_hdmi_audio(const char *device_path)
+{
+    struct snd_pcm_hw_params params;
+    uint32_t *samples = NULL;
+    const char *stage = "allocate sample buffer";
+    unsigned int transferred = 0;
+    int result = -1;
+    int fd = -1;
+
+    samples = malloc(HDMI_AUDIO_TEST_FRAMES * HDMI_AUDIO_CHANNELS *
+                     sizeof(*samples));
+    if (!samples) {
+        errno = ENOMEM;
+        goto out;
+    }
+    for (unsigned int frame = 0; frame < HDMI_AUDIO_TEST_FRAMES; frame++) {
+        int32_t left = frame % HDMI_AUDIO_LEFT_PERIOD <
+                       HDMI_AUDIO_LEFT_PERIOD / 2 ?
+                       HDMI_AUDIO_LEFT_AMPLITUDE :
+                       -HDMI_AUDIO_LEFT_AMPLITUDE;
+        int32_t right = frame % HDMI_AUDIO_RIGHT_PERIOD <
+                        HDMI_AUDIO_RIGHT_PERIOD / 2 ?
+                        HDMI_AUDIO_RIGHT_AMPLITUDE :
+                        -HDMI_AUDIO_RIGHT_AMPLITUDE;
+
+        samples[frame * HDMI_AUDIO_CHANNELS] =
+            hdmi_audio_subframe(left, frame, 0);
+        samples[frame * HDMI_AUDIO_CHANNELS + 1] =
+            hdmi_audio_subframe(right, frame, 1);
+    }
+
+    stage = "open PCM device";
+    fd = open(device_path, O_WRONLY);
+    if (fd < 0) {
+        goto out;
+    }
+    stage = "configure PCM hardware";
+    pcm_hw_params_any(&params);
+    pcm_hw_param_set(&params, SNDRV_PCM_HW_PARAM_ACCESS,
+                     SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+    pcm_hw_param_set(&params, SNDRV_PCM_HW_PARAM_FORMAT,
+                     SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE);
+    pcm_hw_param_set(&params, SNDRV_PCM_HW_PARAM_CHANNELS,
+                     HDMI_AUDIO_CHANNELS);
+    pcm_hw_param_set(&params, SNDRV_PCM_HW_PARAM_RATE, HDMI_AUDIO_RATE);
+    pcm_hw_param_set(&params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+                     HDMI_AUDIO_PERIOD_FRAMES);
+    pcm_hw_param_set(&params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE,
+                     HDMI_AUDIO_BUFFER_FRAMES);
+    if (ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &params)) {
+        goto out;
+    }
+    stage = "validate PCM hardware parameters";
+    if (pcm_hw_param_value(&params, SNDRV_PCM_HW_PARAM_ACCESS) !=
+            SNDRV_PCM_ACCESS_RW_INTERLEAVED ||
+        pcm_hw_param_value(&params, SNDRV_PCM_HW_PARAM_FORMAT) !=
+            SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE ||
+        pcm_hw_param_value(&params, SNDRV_PCM_HW_PARAM_CHANNELS) !=
+            HDMI_AUDIO_CHANNELS ||
+        pcm_hw_param_value(&params, SNDRV_PCM_HW_PARAM_RATE) !=
+            HDMI_AUDIO_RATE ||
+        pcm_hw_param_value(&params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE) !=
+            HDMI_AUDIO_PERIOD_FRAMES ||
+        pcm_hw_param_value(&params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE) !=
+            HDMI_AUDIO_BUFFER_FRAMES) {
+        errno = EINVAL;
+        goto out;
+    }
+
+    printf("PI4-LAB: HDMI0 PCM device %s, %u Hz IEC958, %u channels\n",
+           device_path, HDMI_AUDIO_RATE, HDMI_AUDIO_CHANNELS);
+    stage = "prepare PCM device";
+    if (ioctl(fd, SNDRV_PCM_IOCTL_PREPARE)) {
+        goto out;
+    }
+    stage = "write PCM frames";
+    while (transferred < HDMI_AUDIO_TEST_FRAMES) {
+        struct snd_xferi transfer = {
+            .buf = samples + transferred * HDMI_AUDIO_CHANNELS,
+            .frames = HDMI_AUDIO_TEST_FRAMES - transferred,
+        };
+        int ioctl_result = ioctl(fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES,
+                                 &transfer);
+
+        if (ioctl_result || transfer.result <= 0) {
+            if (!ioctl_result && transfer.result < 0) {
+                errno = -transfer.result;
+            } else if (!ioctl_result) {
+                errno = EIO;
+            }
+            goto out;
+        }
+        transferred += transfer.result;
+    }
+    stage = "drain PCM device";
+    if (ioctl(fd, SNDRV_PCM_IOCTL_DRAIN)) {
+        goto out;
+    }
+    result = 0;
+
+out:
+    if (result) {
+        fprintf(stderr, "pi4-lab: HDMI playback on %s failed during %s: %s\n",
+                device_path, stage, strerror(errno));
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+    free(samples);
+    return result;
 }
 
 static void report_check(const char *name, int failed, int *failures)
@@ -959,11 +1289,14 @@ static void dump_ipv4_address(const char *name)
 
 int main(void)
 {
+    char hdmi_pcm_device[PATH_MAX] = { 0 };
     char storage_device[PATH_MAX] = { 0 };
     struct utsname uts;
     long temperature = 0;
     unsigned long interrupts_before_rebind;
     int failures = 0;
+    int hdmi_audio_ready;
+    int hdmi_audio_test;
     int pi400;
     int display_test;
     int storage_ready = 0;
@@ -990,6 +1323,7 @@ int main(void)
     pi400 = model_is_pi400();
     storage_test = cmdline_has_word("pi4lab.usb_storage=1");
     display_test = cmdline_has_word("pi4lab.display_test=1");
+    hdmi_audio_test = cmdline_has_word("pi4lab.hdmi_audio_test=1");
     report_check("VC4 DRM card0 registered",
                  wait_for_path(DRM_CARD_PATH, 1), &failures);
     report_check("HDMI-A-1 connector reports connected",
@@ -1013,8 +1347,17 @@ int main(void)
     report_check("BCM2711 HDMI DDC1 controller and driver",
                  !platform_driver_bound("fef09500.i2c", "brcmstb-i2c"),
                  &failures);
-    report_check("HDMI0 DDC reads a valid 128-byte EDID",
+    report_check("HDMI0 DDC advertises HDMI stereo audio",
                  verify_hdmi_edid(), &failures);
+    hdmi_audio_ready = !find_hdmi_pcm_device(hdmi_pcm_device,
+                                              sizeof(hdmi_pcm_device));
+    report_check("vc4-hdmi-0 IEC958 playback device",
+                 !hdmi_audio_ready, &failures);
+    if (hdmi_audio_test) {
+        report_check("HDMI0 48 kHz stereo MAI/DMA playback",
+                     !hdmi_audio_ready ||
+                     play_hdmi_audio(hdmi_pcm_device), &failures);
+    }
     report_check("RNG200 selected and /dev/hwrng supplies 64 bytes",
                  verify_hwrng(), &failures);
     if (!cpu_thermal_temperature(&temperature)) {

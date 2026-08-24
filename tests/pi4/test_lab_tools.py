@@ -5,9 +5,11 @@
 
 import gzip
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
@@ -15,6 +17,11 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PI4_SCRIPTS = REPO_ROOT / "scripts" / "pi4"
+
+AUDIO_SPEC = importlib.util.spec_from_file_location(
+    "pi4_test_audio", PI4_SCRIPTS / "test-audio.py")
+AUDIO_TOOLS = importlib.util.module_from_spec(AUDIO_SPEC)
+AUDIO_SPEC.loader.exec_module(AUDIO_TOOLS)
 
 
 class InitramfsTests(unittest.TestCase):
@@ -160,13 +167,61 @@ class ComparisonTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
 
 
+class AudioCaptureTests(unittest.TestCase):
+    def write_capture(self, path, silent_frame=None, zero_lengths=False):
+        values = [0, 0] * 128
+        for frame in range(AUDIO_TOOLS.AUDIO_FRAMES):
+            left = 16383 if frame % 48 < 24 else -16383
+            right = 8191 if frame % 24 < 12 else -8191
+            if frame == silent_frame:
+                left = right = 0
+            values.extend((left, right))
+        values.extend([0, 0] * 64)
+        payload = struct.pack(f"<{len(values)}h", *values)
+        wave_format = struct.pack(
+            "<HHIIHH", 1, 2, 48000, 192000, 4, 16)
+        riff_length = 0 if zero_lengths else len(payload) + 36
+        data_length = 0 if zero_lengths else len(payload)
+        path.write_bytes(
+            b"RIFF" + struct.pack("<I", riff_length) + b"WAVE" +
+            b"fmt " + struct.pack("<I", len(wave_format)) + wave_format +
+            b"data" + struct.pack("<I", data_length) + payload)
+
+    def test_hdmi_audio_validator_accepts_expected_stereo_tones(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "capture.wav"
+            self.write_capture(capture, zero_lengths=True)
+
+            AUDIO_TOOLS.repair_qemu_wav_lengths(capture)
+            result = AUDIO_TOOLS.validate_wav(capture)
+
+            self.assertEqual(result["active_frames"], 48000)
+            self.assertAlmostEqual(result["left_frequency"], 1000,
+                                   delta=1)
+            self.assertAlmostEqual(result["right_frequency"], 2000,
+                                   delta=1)
+            blob = capture.read_bytes()
+            self.assertEqual(struct.unpack_from("<I", blob, 4)[0],
+                             len(blob) - 8)
+            self.assertEqual(struct.unpack_from("<I", blob, 40)[0],
+                             len(blob) - 44)
+
+    def test_hdmi_audio_validator_rejects_internal_silence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "capture.wav"
+            self.write_capture(capture, silent_frame=24000)
+
+            with self.assertRaisesRegex(RuntimeError, "silent frames"):
+                AUDIO_TOOLS.validate_wav(capture)
+
+
 class ShellScriptTests(unittest.TestCase):
     LINUX_SUCCESS = "PI4-LAB: upstream Linux boot successful"
     AON_REGISTERED = (
         "irq_brcmstb_l2: registered L2 intc "
         "(/soc/interrupt-controller@7ef00100, parent irq: 14)"
     )
-    DDC_CHECKED = "PI4-LAB: HDMI0 DDC reads a valid 128-byte EDID ok"
+    DDC_CHECKED = "PI4-LAB: HDMI0 DDC advertises HDMI stereo audio ok"
     DRM_CARD_CHECKED = "PI4-LAB: VC4 DRM card0 registered ok"
     DRM_FB_CHECKED = (
         "PI4-LAB: VC4 DRM framebuffer is 1280x800 RGB565 ok"
