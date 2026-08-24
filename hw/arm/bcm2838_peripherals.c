@@ -104,7 +104,13 @@ static void bcm2838_peripherals_init(Object *obj)
     object_initialize_child(obj, "aon-intr", &s->aon_intr,
                             TYPE_BCM2838_AON_INTR);
 
-    /* BCM2711 HDMI service-plane clocks, resets and DDC buses. */
+    /* BCM2711 native display pipeline and HDMI service plane. */
+    object_initialize_child(obj, "hvs", &s->hvs, TYPE_BCM2711_HVS);
+    object_property_add_const_link(OBJECT(&s->hvs), "fb",
+                                   OBJECT(&s_base->fb));
+    object_initialize_child(obj, "pixelvalve2", &s->pixelvalve2,
+                            TYPE_BCM2711_PIXELVALVE);
+    object_initialize_child(obj, "hdmi0", &s->hdmi0, TYPE_BCM2711_HDMI);
     object_initialize_child(obj, "dvp", &s->dvp, TYPE_BCM2711_DVP);
     object_initialize_child(obj, "hdmi0-i2c", &s->hdmi_i2c[0],
                             TYPE_BCM2711_HDMI_I2C);
@@ -298,6 +304,66 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(
         &s_base->peri_mr, DVP_OFFSET,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->dvp), 0));
+
+    /* HVS, HDMI0 Pixel Valve and HDMI0 transmitter. */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->hvs), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s_base->peri_mr, HVS_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hvs), 0));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->pixelvalve2), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s_base->peri_mr, PIXELVALVE2_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pixelvalve2), 0));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->hdmi0), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s_base->peri_mr, HDMI0_CORE_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi0),
+                               BCM2711_HDMI_CORE));
+    memory_region_add_subregion(
+        &s_base->peri_mr, HDMI0_DVP_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi0),
+                               BCM2711_HDMI_DVP));
+    memory_region_add_subregion(
+        &s_base->peri_mr, HDMI0_PHY_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi0),
+                               BCM2711_HDMI_PHY));
+    memory_region_add_subregion(
+        &s_base->peri_mr, HDMI0_RM_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi0),
+                               BCM2711_HDMI_RM));
+    memory_region_add_subregion(
+        &s_base->peri_mr, HDMI0_PACKET_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi0),
+                               BCM2711_HDMI_PACKET));
+    memory_region_add_subregion(
+        &s_base->peri_mr, HDMI0_METADATA_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi0),
+                               BCM2711_HDMI_METADATA));
+    memory_region_add_subregion(
+        &s_base->peri_mr, HDMI0_CSC_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi0),
+                               BCM2711_HDMI_CSC));
+    memory_region_add_subregion(
+        &s_base->peri_mr, HDMI0_CEC_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi0),
+                               BCM2711_HDMI_CEC));
+    memory_region_add_subregion(
+        &s_base->peri_mr, HDMI_SHARED_HD_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi0),
+                               BCM2711_HDMI_HD));
+
+    qdev_connect_gpio_out_named(DEVICE(&s->dvp), "reset", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->hdmi0), "reset", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->dvp), "clock-enable", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->hdmi0), "clock-enable", 0));
 
     /* Both HDMI DDC engines; the default display is attached to HDMI0. */
     for (n = 0; n < ARRAY_SIZE(s->hdmi_i2c); n++) {

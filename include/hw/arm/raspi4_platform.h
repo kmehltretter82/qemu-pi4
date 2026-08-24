@@ -61,6 +61,7 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define CPRMAN_OFFSET           0x101000 /* Clock Management */
 #define RNG200_OFFSET           0x104000
 #define GPIO_OFFSET             0x200000
+#define PIXELVALVE2_OFFSET      0x20a000
 #define UART0_OFFSET            0x201000 /* PL011 */
 #define MMCI0_OFFSET            0x202000 /* Legacy MMC */
 #define I2S_OFFSET              0x203000 /* PCM */
@@ -78,6 +79,7 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define GENET_SIZE              0x10000
 #define AVS_OFFSET              0x15d2000
 #define SMI_OFFSET              0x600000
+#define HVS_OFFSET              0x400000
 #define BSC1_OFFSET             0x804000 /* BSC1 I2C/TWI */
 #define BSC2_OFFSET             0x805000 /* BSC2 I2C/TWI */
 #define DBUS_OFFSET             0x900000
@@ -88,10 +90,19 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define DMA15_OFFSET            0xE05000 /* DMA controller, channel 15 */
 #define DVP_OFFSET              0xF00000 /* HDMI DVP clock/reset controller */
 #define AON_INTR_OFFSET         0xF00100 /* Always-on HDMI L2 interrupts */
+#define HDMI0_CSC_OFFSET        0xF00200
+#define HDMI0_DVP_OFFSET        0xF00300
+#define HDMI0_CORE_OFFSET       0xF00700
 #define HDMI0_AUTO_I2C_OFFSET   0xF00B00
+#define HDMI0_PHY_OFFSET        0xF00F00
+#define HDMI0_RM_OFFSET         0xF00F80
+#define HDMI0_PACKET_OFFSET     0xF01B00
+#define HDMI0_METADATA_OFFSET   0xF01F00
+#define HDMI0_CEC_OFFSET        0xF04300
 #define HDMI0_DDC_OFFSET        0xF04500
 #define HDMI1_AUTO_I2C_OFFSET   0xF05B00
 #define HDMI1_DDC_OFFSET        0xF09500
+#define HDMI_SHARED_HD_OFFSET   0xF20000
 
 /* GPU interrupts */
 #define INTERRUPT_TIMER0               0
@@ -110,15 +121,5 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 
 /* ARM CPU IRQs use a private number space */
 #define INTERRUPT_ARM_MAILBOX          1
-
-/* Clock rates */
-#define RPI_FIRMWARE_EMMC_CLK_RATE    50000000
-#define RPI_FIRMWARE_UART_CLK_RATE    3000000
-/*
- * TODO: this is really SoC-specific; we might want to
- * set it per-SoC if it turns out any guests care.
- */
-#define RPI_FIRMWARE_CORE_CLK_RATE    350000000
-#define RPI_FIRMWARE_DEFAULT_CLK_RATE 700000000
 
 #endif /* HW_ARM_RASPI4_PLATFORM_H */

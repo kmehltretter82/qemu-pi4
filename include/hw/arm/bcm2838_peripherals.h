@@ -10,6 +10,9 @@
 #define BCM2838_PERIPHERALS_H
 
 #include "hw/arm/bcm2835_peripherals.h"
+#include "hw/display/bcm2711_hdmi.h"
+#include "hw/display/bcm2711_hvs.h"
+#include "hw/display/bcm2711_pixelvalve.h"
 #include "hw/sd/sdhci.h"
 #include "hw/gpio/bcm2838_gpio.h"
 #include "hw/i2c/bcm2711_hdmi_i2c.h"
@@ -91,6 +94,9 @@ struct BCM2838PeripheralState {
     BCM2838GenetState genet;
     BCM2711PcieHostState pcie;
     BCM2835PWMState pwm1;
+    BCM2711HVSState hvs;
+    BCM2711PixelValveState pixelvalve2;
+    BCM2711HDMIState hdmi0;
     BCM2711DVPState dvp;
     BCM2711HDMII2CState hdmi_i2c[2];
     I2CDDCState hdmi0_edid;

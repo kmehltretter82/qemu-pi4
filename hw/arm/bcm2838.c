@@ -223,6 +223,12 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps->aon_intr), 0,
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_AON));
 
+    /* Connect the native display pipeline interrupts. */
+    sysbus_connect_irq(SYS_BUS_DEVICE(&ps->hvs), 0,
+                       qdev_get_gpio_in(gicdev, 97));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&ps->pixelvalve2), 0,
+                       qdev_get_gpio_in(gicdev, 101));
+
     /* Connect the I2C interrupt to the interrupt controller */
     qdev_connect_gpio_out(DEVICE(&ps_base->orgated_i2c_irq_splitter), 1,
                           qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_I2C));

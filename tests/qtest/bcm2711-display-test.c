@@ -1,5 +1,5 @@
 /*
- * QTests for the BCM2711 HDMI DVP and DDC service-plane blocks.
+ * QTests for the BCM2711 native display and HDMI service-plane blocks.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -16,6 +16,51 @@
 #define DVP_SPARE                   (DVP_BASE + 0x0c)
 #define DVP_SW_INIT_MASK            0x3f
 #define DVP_MISC_CONFIG_MASK        0x18
+
+#define HVS_BASE                    0xfe400000
+#define HVS_DISPSTAT                (HVS_BASE + 0x0004)
+#define HVS_DISPID                  (HVS_BASE + 0x0008)
+#define HVS_DISPLIST0               (HVS_BASE + 0x0020)
+#define HVS_DISPLACT0               (HVS_BASE + 0x0030)
+#define HVS_DISPCTRL0               (HVS_BASE + 0x0040)
+#define HVS_DISPSTAT0               (HVS_BASE + 0x0048)
+#define HVS_CHANNEL_STRIDE          0x10
+#define HVS_DLIST_BASE              (HVS_BASE + 0x4000)
+#define HVS_DLIST_WORDS             4096
+#define HVS_DISPCTRL_ENABLE         BIT(31)
+#define HVS_DISPCTRL_RESET          BIT(30)
+#define HVS_DISPSTAT_RUN            (2U << 30)
+#define HVS_DISPSTAT_EMPTY          BIT(28)
+
+#define PIXELVALVE2_BASE            0xfe20a000
+#define PV_CONTROL                  (PIXELVALVE2_BASE + 0x00)
+#define PV_V_CONTROL                (PIXELVALVE2_BASE + 0x04)
+#define PV_INTEN                    (PIXELVALVE2_BASE + 0x24)
+#define PV_INTSTAT                  (PIXELVALVE2_BASE + 0x28)
+#define PV_CONTROL_ENABLE           BIT(0)
+#define PV_CONTROL_FIFO_CLEAR       BIT(1)
+#define PV_V_CONTROL_VIDEO_ENABLE   BIT(0)
+#define PV_INT_VFP_START            BIT(7)
+#define PV_INT_MASK                 0x3ff
+#define PV_CONTROL_IDLE             0x00048000
+#define PV_V_CONTROL_IDLE           0x01000000
+#define PV_FRAME_PERIOD_NS          16666667
+#define PIXELVALVE2_QOM_PATH \
+    "/machine/soc/peripherals/pixelvalve2"
+
+#define HDMI0_CORE_BASE             0xfef00700
+#define HDMI0_DVP_BASE              0xfef00300
+#define HDMI0_PHY_BASE              0xfef00f00
+#define HDMI_FIFO_CTL               (HDMI0_CORE_BASE + 0x074)
+#define HDMI_RAM_PACKET_CONFIG      (HDMI0_CORE_BASE + 0x0bc)
+#define HDMI_RAM_PACKET_STATUS      (HDMI0_CORE_BASE + 0x0c4)
+#define HDMI_SCHEDULER_CONTROL      (HDMI0_CORE_BASE + 0x0e0)
+#define HDMI_HOTPLUG                (HDMI0_CORE_BASE + 0x1a8)
+#define HDMI_DVP_CLOCK_STOP         (HDMI0_DVP_BASE + 0x0bc)
+#define HDMI_FIFO_RECENTER_DONE     BIT(14)
+#define HDMI_FIFO_WRITE_MASK        0xefff
+#define HDMI_SCHEDULER_MODE_HDMI    BIT(0)
+#define HDMI_SCHEDULER_HDMI_ACTIVE  BIT(1)
 
 #define HDMI0_AUTO_I2C_BASE         0xfef00b00
 #define HDMI0_DDC_BASE              0xfef04500
@@ -51,6 +96,147 @@
 static QTestState *display_start(void)
 {
     return qtest_init("-machine raspi4b -nic none");
+}
+
+static void test_hvs_registers_and_reset(void)
+{
+    QTestState *qts = display_start();
+    uint32_t control = HVS_DISPCTRL_ENABLE | (640U << 16) | 480;
+
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPID), ==, 0x64647276);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPSTAT), ==, 0);
+    for (unsigned int channel = 0; channel < 3; channel++) {
+        g_assert_cmphex(qtest_readl(qts, HVS_DISPCTRL0 +
+                                        channel * HVS_CHANNEL_STRIDE),
+                        ==, 0);
+        g_assert_cmphex(qtest_readl(qts, HVS_DISPSTAT0 +
+                                        channel * HVS_CHANNEL_STRIDE),
+                        ==, HVS_DISPSTAT_EMPTY);
+    }
+
+    qtest_writel(qts, HVS_DLIST_BASE + 7 * sizeof(uint32_t), 0x12345678);
+    g_assert_cmphex(qtest_readl(qts,
+                               HVS_DLIST_BASE + 7 * sizeof(uint32_t)),
+                    ==, 0x12345678);
+
+    qtest_writel(qts, HVS_DISPLIST0, HVS_DLIST_WORDS + 0x24);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPLIST0), ==,
+                    HVS_DLIST_WORDS + 0x24);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPLACT0), ==, 0x24);
+    qtest_writel(qts, HVS_DISPLACT0, 0x55);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPLACT0), ==, 0x24);
+
+    qtest_writel(qts, HVS_DISPCTRL0, control);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPCTRL0), ==, control);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPSTAT0), ==,
+                    HVS_DISPSTAT_RUN);
+
+    qtest_writel(qts, HVS_DISPCTRL0,
+                 control | HVS_DISPCTRL_RESET);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPCTRL0), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPSTAT0), ==,
+                    HVS_DISPSTAT_EMPTY);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPID), ==, 0x64647276);
+    g_assert_cmphex(qtest_readl(qts,
+                               HVS_DLIST_BASE + 7 * sizeof(uint32_t)),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPLIST0), ==, 0);
+    qtest_quit(qts);
+}
+
+static void test_pixelvalve_vblank_and_reset(void)
+{
+    QTestState *qts = display_start();
+
+    qtest_irq_intercept_out_named(qts, PIXELVALVE2_QOM_PATH, "sysbus-irq");
+    g_assert_cmphex(qtest_readl(qts, PV_CONTROL), ==, PV_CONTROL_IDLE);
+    g_assert_cmphex(qtest_readl(qts, PV_V_CONTROL), ==, PV_V_CONTROL_IDLE);
+    g_assert_cmphex(qtest_readl(qts, PV_INTEN), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, PV_INTSTAT), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, PV_INTEN, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, PV_INTEN), ==, PV_INT_MASK);
+    qtest_writel(qts, PV_CONTROL,
+                 PV_CONTROL_ENABLE | PV_CONTROL_FIFO_CLEAR);
+    g_assert_cmphex(qtest_readl(qts, PV_CONTROL), ==, PV_CONTROL_ENABLE);
+    qtest_writel(qts, PV_V_CONTROL, PV_V_CONTROL_VIDEO_ENABLE);
+
+    qtest_clock_step(qts, PV_FRAME_PERIOD_NS / 2);
+
+    /* A control write within a frame must not postpone its vblank deadline. */
+    qtest_writel(qts, PV_INTEN, PV_INT_MASK);
+    qtest_clock_step(qts, PV_FRAME_PERIOD_NS -
+                          PV_FRAME_PERIOD_NS / 2 - 1);
+    g_assert_cmphex(qtest_readl(qts, PV_INTSTAT), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(qtest_readl(qts, PV_INTSTAT), ==, PV_INT_VFP_START);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, PV_INTSTAT, PV_INT_VFP_START);
+    g_assert_cmphex(qtest_readl(qts, PV_INTSTAT), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_writel(qts, PV_CONTROL, 0);
+    qtest_clock_step(qts, PV_FRAME_PERIOD_NS);
+    g_assert_cmphex(qtest_readl(qts, PV_INTSTAT), ==, 0);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, PV_CONTROL), ==, PV_CONTROL_IDLE);
+    g_assert_cmphex(qtest_readl(qts, PV_V_CONTROL), ==, PV_V_CONTROL_IDLE);
+    g_assert_cmphex(qtest_readl(qts, PV_INTEN), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, PV_INTSTAT), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_quit(qts);
+}
+
+static void test_hdmi_transmitter_registers_and_reset(void)
+{
+    QTestState *qts = display_start();
+
+    g_assert_cmphex(qtest_readl(qts, HDMI_HOTPLUG), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, HDMI_FIFO_CTL), ==,
+                    HDMI_FIFO_RECENTER_DONE);
+    g_assert_cmphex(qtest_readl(qts, HDMI_DVP_CLOCK_STOP), ==, 3);
+
+    qtest_writel(qts, HDMI_HOTPLUG, 0);
+    g_assert_cmphex(qtest_readl(qts, HDMI_HOTPLUG), ==, 1);
+    qtest_writel(qts, HDMI_FIFO_CTL, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, HDMI_FIFO_CTL), ==,
+                    HDMI_FIFO_WRITE_MASK);
+
+    qtest_writel(qts, HDMI_RAM_PACKET_CONFIG, BIT(16) | 0x1234);
+    g_assert_cmphex(qtest_readl(qts, HDMI_RAM_PACKET_STATUS), ==, 0x1234);
+    qtest_writel(qts, HDMI_RAM_PACKET_STATUS, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, HDMI_RAM_PACKET_STATUS), ==, 0x1234);
+
+    qtest_writel(qts, HDMI_SCHEDULER_CONTROL,
+                 HDMI_SCHEDULER_MODE_HDMI);
+    g_assert_cmphex(qtest_readl(qts, HDMI_SCHEDULER_CONTROL), ==,
+                    HDMI_SCHEDULER_MODE_HDMI |
+                    HDMI_SCHEDULER_HDMI_ACTIVE);
+    qtest_writel(qts, HDMI0_PHY_BASE, 0x89abcdef);
+    g_assert_cmphex(qtest_readl(qts, HDMI0_PHY_BASE), ==, 0x89abcdef);
+
+    /* HDMI0 is reset by DVP software-reset output zero. */
+    qtest_writel(qts, DVP_SW_INIT, BIT(0));
+    g_assert_cmphex(qtest_readl(qts, HDMI_FIFO_CTL), ==,
+                    HDMI_FIFO_RECENTER_DONE);
+    g_assert_cmphex(qtest_readl(qts, HDMI_RAM_PACKET_CONFIG), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, HDMI_SCHEDULER_CONTROL), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, HDMI0_PHY_BASE), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, HDMI_DVP_CLOCK_STOP), ==, 3);
+    qtest_writel(qts, DVP_SW_INIT, 0);
+
+    qtest_writel(qts, HDMI0_PHY_BASE, 0x10203040);
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, HDMI_HOTPLUG), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, HDMI_FIFO_CTL), ==,
+                    HDMI_FIFO_RECENTER_DONE);
+    g_assert_cmphex(qtest_readl(qts, HDMI0_PHY_BASE), ==, 0);
+    qtest_quit(qts);
 }
 
 static void ddc_release(QTestState *qts, uint64_t auto_i2c_base)
@@ -291,10 +477,28 @@ static void test_display_migration(void)
     QTestState *destination;
     uint8_t edid[EDID_LENGTH];
     uint32_t status;
+    const uint32_t hvs_control =
+        HVS_DISPCTRL_ENABLE | (640U << 16) | 480;
+    const int64_t pixelvalve_elapsed_ns = 5 * 1000 * 1000;
 
     ddc_read_edid(source, edid);
-    qtest_writel(source, DVP_SW_INIT, BIT(0) | BIT(5));
+    qtest_writel(source, DVP_SW_INIT, BIT(1) | BIT(5));
     qtest_writel(source, DVP_MISC_CONFIG, 0);
+
+    qtest_writel(source, HVS_DLIST_BASE + 0x30 * sizeof(uint32_t),
+                 0x12345678);
+    qtest_writel(source, HVS_DISPLIST0, 0x30);
+    qtest_writel(source, HVS_DISPCTRL0, hvs_control);
+
+    qtest_writel(source, PV_INTEN, PV_INT_VFP_START);
+    qtest_writel(source, PV_CONTROL, PV_CONTROL_ENABLE);
+    qtest_writel(source, PV_V_CONTROL, PV_V_CONTROL_VIDEO_ENABLE);
+    qtest_clock_step(source, pixelvalve_elapsed_ns);
+
+    qtest_writel(source, HDMI_RAM_PACKET_CONFIG, BIT(16) | 0x55aa);
+    qtest_writel(source, HDMI_SCHEDULER_CONTROL,
+                 HDMI_SCHEDULER_MODE_HDMI);
+    qtest_writel(source, HDMI0_PHY_BASE, 0x89abcdef);
 
     /* Leave the EDID pointer and an open repeated-start transaction live. */
     ddc_set_pointer(source, HDMI0_DDC_BASE, 0x10, true);
@@ -317,8 +521,39 @@ static void test_display_migration(void)
     wait_for_migration(destination);
 
     g_assert_cmphex(qtest_readl(destination, DVP_SW_INIT), ==,
-                    BIT(0) | BIT(5));
+                    BIT(1) | BIT(5));
     g_assert_cmphex(qtest_readl(destination, DVP_MISC_CONFIG), ==, 0);
+    g_assert_cmphex(qtest_readl(destination,
+                               HVS_DLIST_BASE + 0x30 * sizeof(uint32_t)),
+                    ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPLIST0), ==, 0x30);
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPLACT0), ==, 0x30);
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPCTRL0), ==,
+                    hvs_control);
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPSTAT0), ==,
+                    HVS_DISPSTAT_RUN);
+
+    g_assert_cmphex(qtest_readl(destination, HDMI_RAM_PACKET_CONFIG), ==,
+                    BIT(16) | 0x55aa);
+    g_assert_cmphex(qtest_readl(destination, HDMI_RAM_PACKET_STATUS), ==,
+                    0x55aa);
+    g_assert_cmphex(qtest_readl(destination, HDMI_SCHEDULER_CONTROL), ==,
+                    HDMI_SCHEDULER_MODE_HDMI |
+                    HDMI_SCHEDULER_HDMI_ACTIVE);
+    g_assert_cmphex(qtest_readl(destination, HDMI0_PHY_BASE), ==,
+                    0x89abcdef);
+
+    qtest_irq_intercept_out_named(destination, PIXELVALVE2_QOM_PATH,
+                                  "sysbus-irq");
+    g_assert_cmphex(qtest_readl(destination, PV_INTSTAT), ==, 0);
+    g_assert_false(qtest_get_irq(destination, 0));
+    qtest_qmp_assert_success(destination, "{ 'execute': 'cont' }");
+    g_assert_cmpint(qtest_clock_step_next(destination), >, 0);
+    g_assert_cmphex(qtest_readl(destination, PV_INTSTAT), ==,
+                    PV_INT_VFP_START);
+    g_assert_true(qtest_get_irq(destination, 0));
+    qtest_writel(destination, PV_INTSTAT, PV_INT_VFP_START);
+    g_assert_false(qtest_get_irq(destination, 0));
     g_assert_cmphex(qtest_readl(destination,
                                BSC_DATA_IN(HDMI0_DDC_BASE, 0)), ==, 0x10);
 
@@ -340,6 +575,11 @@ static void test_display_migration(void)
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    qtest_add_func("/bcm2711/display/hvs", test_hvs_registers_and_reset);
+    qtest_add_func("/bcm2711/display/pixelvalve/vblank",
+                   test_pixelvalve_vblank_and_reset);
+    qtest_add_func("/bcm2711/display/hdmi/transmitter",
+                   test_hdmi_transmitter_registers_and_reset);
     qtest_add_func("/bcm2711/display/dvp", test_dvp_reset_and_controls);
     qtest_add_func("/bcm2711/display/ddc/registers_reset_and_nack",
                    test_ddc_registers_reset_and_nack);
