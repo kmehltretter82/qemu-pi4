@@ -12,6 +12,7 @@
 #include "net/net.h"
 #include "hw/display/bcm2835_fb.h"
 #include "hw/nvram/bcm2835_otp.h"
+#include "hw/arm/raspberrypi-fw-defs.h"
 #include "qom/object.h"
 
 #define TYPE_BCM2835_PROPERTY "bcm2835-property"
@@ -42,6 +43,7 @@ struct BCM2835PropertyState {
     bool pending;
 
     uint32_t clock_states;
+    uint32_t clock_rates[RPI_FIRMWARE_NUM_CLK_ID];
     uint32_t domain_states;
 
     uint32_t gpio_direction[BCM2835_PROPERTY_GPIO_COUNT];

@@ -30,6 +30,51 @@
      BIT(RPI_FIRMWARE_TRANSPOSER_DOMAIN_ID) | \
      BIT(RPI_FIRMWARE_ARM_DOMAIN_ID))
 
+/* BCM2711 firmware values captured through /dev/vcio on a Pi 400. */
+static const uint32_t rpi4_clock_default_rates[RPI_FIRMWARE_NUM_CLK_ID] = {
+    [RPI_FIRMWARE_EMMC_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_UART_CLK_ID] = 48000000,
+    [RPI_FIRMWARE_ARM_CLK_ID] = 1800000000,
+    [RPI_FIRMWARE_CORE_CLK_ID] = 200000000,
+    [RPI_FIRMWARE_V3D_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_H264_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_ISP_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_SDRAM_CLK_ID] = 400000000,
+    [RPI_FIRMWARE_HEVC_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_M2MC_CLK_ID] = 120000000,
+    [RPI_FIRMWARE_PIXEL_BVB_CLK_ID] = 75000000,
+};
+
+static const uint32_t rpi4_clock_min_rates[RPI_FIRMWARE_NUM_CLK_ID] = {
+    [RPI_FIRMWARE_EMMC_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_ARM_CLK_ID] = 600000000,
+    [RPI_FIRMWARE_CORE_CLK_ID] = 200000000,
+    [RPI_FIRMWARE_V3D_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_H264_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_ISP_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_SDRAM_CLK_ID] = 400000000,
+    [RPI_FIRMWARE_HEVC_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_PIXEL_BVB_CLK_ID] = 75000000,
+};
+
+static const uint32_t rpi4_clock_max_rates[RPI_FIRMWARE_NUM_CLK_ID] = {
+    [RPI_FIRMWARE_EMMC_CLK_ID] = 250000000,
+    [RPI_FIRMWARE_UART_CLK_ID] = 1000000000,
+    [RPI_FIRMWARE_ARM_CLK_ID] = 1800000000,
+    [RPI_FIRMWARE_CORE_CLK_ID] = 500000000,
+    [RPI_FIRMWARE_V3D_CLK_ID] = 500000000,
+    [RPI_FIRMWARE_H264_CLK_ID] = 500000000,
+    [RPI_FIRMWARE_ISP_CLK_ID] = 500000000,
+    [RPI_FIRMWARE_SDRAM_CLK_ID] = 400000000,
+    [RPI_FIRMWARE_PIXEL_CLK_ID] = 2400000000,
+    [RPI_FIRMWARE_PWM_CLK_ID] = 500000000,
+    [RPI_FIRMWARE_HEVC_CLK_ID] = 500000000,
+    [RPI_FIRMWARE_EMMC2_CLK_ID] = 500000000,
+    [RPI_FIRMWARE_M2MC_CLK_ID] = 600000000,
+    [RPI_FIRMWARE_PIXEL_BVB_CLK_ID] = 324000000,
+    [RPI_FIRMWARE_VEC_CLK_ID] = 108000000,
+};
+
 /* https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface */
 
 static bool bcm2835_property_gpio_index(uint32_t gpio, unsigned int *index)
@@ -41,6 +86,12 @@ static bool bcm2835_property_gpio_index(uint32_t gpio, unsigned int *index)
 
     *index = gpio - RPI_EXP_GPIO_BASE;
     return true;
+}
+
+static bool bcm2835_property_clock_valid(uint32_t id)
+{
+    /* BCM2711 firmware discovers IDs 1 through 15; DISP (16) is absent. */
+    return id > 0 && id < RPI_FIRMWARE_DISP_CLK_ID;
 }
 
 static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
@@ -135,7 +186,7 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             }
 
             id = ldl_le_phys(&s->dma_as, value + 12);
-            if (id == 0 || id >= RPI_FIRMWARE_NUM_CLK_ID) {
+            if (!bcm2835_property_clock_valid(id)) {
                 state = RPI_FIRMWARE_STATE_NOT_EXIST;
             } else {
                 if (tag == RPI_FWREQ_SET_CLOCK_STATE) {
@@ -154,32 +205,64 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
         case RPI_FWREQ_GET_CLOCK_RATE:
         case RPI_FWREQ_GET_MAX_CLOCK_RATE:
         case RPI_FWREQ_GET_MIN_CLOCK_RATE:
-            switch (ldl_le_phys(&s->dma_as, value + 12)) {
-            case RPI_FIRMWARE_EMMC_CLK_ID:
-                stl_le_phys(&s->dma_as, value + 16, RPI_FIRMWARE_EMMC_CLK_RATE);
-                break;
-            case RPI_FIRMWARE_UART_CLK_ID:
-                stl_le_phys(&s->dma_as, value + 16, RPI_FIRMWARE_UART_CLK_RATE);
-                break;
-            case RPI_FIRMWARE_CORE_CLK_ID:
-                stl_le_phys(&s->dma_as, value + 16, RPI_FIRMWARE_CORE_CLK_RATE);
-                break;
-            default:
-                stl_le_phys(&s->dma_as, value + 16,
-                            RPI_FIRMWARE_DEFAULT_CLK_RATE);
-                break;
+        {
+            uint32_t id = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t rate = 0;
+
+            if (bcm2835_property_clock_valid(id)) {
+                switch (tag) {
+                case RPI_FWREQ_GET_CLOCK_RATE:
+                    rate = s->clock_rates[id];
+                    break;
+                case RPI_FWREQ_GET_MAX_CLOCK_RATE:
+                    rate = rpi4_clock_max_rates[id];
+                    break;
+                case RPI_FWREQ_GET_MIN_CLOCK_RATE:
+                    rate = rpi4_clock_min_rates[id];
+                    break;
+                default:
+                    g_assert_not_reached();
+                }
             }
+            stl_le_phys(&s->dma_as, value + 16, rate);
             resplen = 8;
             break;
+        }
 
         case RPI_FWREQ_GET_CLOCKS:
-            /* TODO: add more clock IDs if needed */
-            stl_le_phys(&s->dma_as, value + 12, 0);
-            stl_le_phys(&s->dma_as, value + 16, RPI_FIRMWARE_ARM_CLK_ID);
-            resplen = 8;
+        {
+            size_t entries = bufsize / (2 * sizeof(uint32_t));
+            unsigned int id;
+
+            /* Each response entry is a parent/clock-ID pair. */
+            for (id = 1; id < RPI_FIRMWARE_DISP_CLK_ID && entries; id++) {
+                stl_le_phys(&s->dma_as, value + 12 + resplen, 0);
+                stl_le_phys(&s->dma_as, value + 16 + resplen, id);
+                resplen += 2 * sizeof(uint32_t);
+                entries--;
+            }
             break;
+        }
 
         case RPI_FWREQ_SET_CLOCK_RATE:
+        {
+            uint32_t id = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t rate = 0;
+
+            if (bufsize < 8) {
+                break;
+            }
+            if (bcm2835_property_clock_valid(id)) {
+                rate = ldl_le_phys(&s->dma_as, value + 16);
+                rate = MIN(rate, rpi4_clock_max_rates[id]);
+                rate = MAX(rate, rpi4_clock_min_rates[id]);
+                s->clock_rates[id] = rate;
+            }
+            stl_le_phys(&s->dma_as, value + 16, rate);
+            resplen = 8;
+            break;
+        }
+
         case RPI_FWREQ_SET_MAX_CLOCK_RATE:
         case RPI_FWREQ_SET_MIN_CLOCK_RATE:
             qemu_log_mask(LOG_UNIMP,
@@ -666,13 +749,15 @@ static const MemoryRegionOps bcm2835_property_ops = {
 
 static const VMStateDescription vmstate_bcm2835_property = {
     .name = TYPE_BCM2835_PROPERTY,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_MACADDR(macaddr, BCM2835PropertyState),
         VMSTATE_UINT32(addr, BCM2835PropertyState),
         VMSTATE_BOOL(pending, BCM2835PropertyState),
         VMSTATE_UINT32_V(clock_states, BCM2835PropertyState, 3),
+        VMSTATE_UINT32_ARRAY_V(clock_rates, BCM2835PropertyState,
+                               RPI_FIRMWARE_NUM_CLK_ID, 4),
         VMSTATE_UINT32_V(domain_states, BCM2835PropertyState, 3),
         VMSTATE_UINT32_ARRAY_V(gpio_direction, BCM2835PropertyState,
                                BCM2835_PROPERTY_GPIO_COUNT, 2),
@@ -713,7 +798,9 @@ static void bcm2835_property_reset(DeviceState *dev)
 
     s->pending = false;
     qemu_set_irq(s->mbox_irq, 0);
-    s->clock_states = MAKE_64BIT_MASK(1, RPI_FIRMWARE_NUM_CLK_ID - 1);
+    s->clock_states = MAKE_64BIT_MASK(1, RPI_FIRMWARE_DISP_CLK_ID - 1);
+    memcpy(s->clock_rates, rpi4_clock_default_rates,
+           sizeof(s->clock_rates));
     s->domain_states = RPI_FW_DOMAIN_DEFAULTS;
     memset(s->gpio_direction, 0, sizeof(s->gpio_direction));
     memset(s->gpio_polarity, 0, sizeof(s->gpio_polarity));

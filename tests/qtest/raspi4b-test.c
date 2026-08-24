@@ -1465,11 +1465,17 @@ static void test_soc_peripheral_migration(void)
     const uint32_t clock_off[] = {
         RPI_FIRMWARE_ARM_CLK_ID, 0,
     };
+    const uint32_t clock_rate[] = {
+        RPI_FIRMWARE_CORE_CLK_ID, 480000000, 0,
+    };
     const uint32_t domain_on[] = {
         RPI_FIRMWARE_V3D_DOMAIN_ID, RPI_FIRMWARE_STATE_ENABLE,
     };
     const uint32_t get_clock[] = {
         RPI_FIRMWARE_ARM_CLK_ID, UINT32_MAX,
+    };
+    const uint32_t get_clock_rate[] = {
+        RPI_FIRMWARE_CORE_CLK_ID, UINT32_MAX,
     };
     const uint32_t get_domain[] = {
         RPI_FIRMWARE_V3D_DOMAIN_ID, UINT32_MAX,
@@ -1501,6 +1507,9 @@ static void test_soc_peripheral_migration(void)
 
     property_request_qtest(source, RPI_FWREQ_SET_CLOCK_STATE, clock_off,
                            G_N_ELEMENTS(clock_off), sizeof(clock_off));
+    property_request_qtest(source, RPI_FWREQ_SET_CLOCK_RATE, clock_rate,
+                           G_N_ELEMENTS(clock_rate),
+                           2 * sizeof(uint32_t));
     property_request_qtest(source, RPI_FWREQ_SET_DOMAIN_STATE, domain_on,
                            G_N_ELEMENTS(domain_on), sizeof(domain_on));
     writel(RASPI4_AUX_ENABLES, AUX_ENABLE_UART);
@@ -1659,6 +1668,10 @@ static void test_soc_peripheral_migration(void)
     property_request_qtest(destination, RPI_FWREQ_GET_CLOCK_STATE, get_clock,
                            G_N_ELEMENTS(get_clock), sizeof(get_clock));
     g_assert_cmphex(property_payload_qtest(destination, 1), ==, 0);
+    property_request_qtest(destination, RPI_FWREQ_GET_CLOCK_RATE,
+                           get_clock_rate, G_N_ELEMENTS(get_clock_rate),
+                           sizeof(get_clock_rate));
+    g_assert_cmpuint(property_payload_qtest(destination, 1), ==, 480000000);
     property_request_qtest(destination, RPI_FWREQ_GET_DOMAIN_STATE, get_domain,
                            G_N_ELEMENTS(get_domain), sizeof(get_domain));
     g_assert_cmphex(property_payload_qtest(destination, 1), ==,
@@ -2316,6 +2329,123 @@ static void test_firmware_dma_channels(void)
     g_assert_cmphex(property_payload(0), ==, 0x07f5);
 }
 
+static void test_firmware_clocks(void)
+{
+    static const uint32_t expected_current[RPI_FIRMWARE_NUM_CLK_ID] = {
+        [RPI_FIRMWARE_EMMC_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_UART_CLK_ID] = 48000000,
+        [RPI_FIRMWARE_ARM_CLK_ID] = 1800000000,
+        [RPI_FIRMWARE_CORE_CLK_ID] = 200000000,
+        [RPI_FIRMWARE_V3D_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_H264_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_ISP_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_SDRAM_CLK_ID] = 400000000,
+        [RPI_FIRMWARE_HEVC_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_M2MC_CLK_ID] = 120000000,
+        [RPI_FIRMWARE_PIXEL_BVB_CLK_ID] = 75000000,
+    };
+    static const uint32_t expected_min[RPI_FIRMWARE_NUM_CLK_ID] = {
+        [RPI_FIRMWARE_EMMC_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_ARM_CLK_ID] = 600000000,
+        [RPI_FIRMWARE_CORE_CLK_ID] = 200000000,
+        [RPI_FIRMWARE_V3D_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_H264_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_ISP_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_SDRAM_CLK_ID] = 400000000,
+        [RPI_FIRMWARE_HEVC_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_PIXEL_BVB_CLK_ID] = 75000000,
+    };
+    static const uint32_t expected_max[RPI_FIRMWARE_NUM_CLK_ID] = {
+        [RPI_FIRMWARE_EMMC_CLK_ID] = 250000000,
+        [RPI_FIRMWARE_UART_CLK_ID] = 1000000000,
+        [RPI_FIRMWARE_ARM_CLK_ID] = 1800000000,
+        [RPI_FIRMWARE_CORE_CLK_ID] = 500000000,
+        [RPI_FIRMWARE_V3D_CLK_ID] = 500000000,
+        [RPI_FIRMWARE_H264_CLK_ID] = 500000000,
+        [RPI_FIRMWARE_ISP_CLK_ID] = 500000000,
+        [RPI_FIRMWARE_SDRAM_CLK_ID] = 400000000,
+        [RPI_FIRMWARE_PIXEL_CLK_ID] = 2400000000,
+        [RPI_FIRMWARE_PWM_CLK_ID] = 500000000,
+        [RPI_FIRMWARE_HEVC_CLK_ID] = 500000000,
+        [RPI_FIRMWARE_EMMC2_CLK_ID] = 500000000,
+        [RPI_FIRMWARE_M2MC_CLK_ID] = 600000000,
+        [RPI_FIRMWARE_PIXEL_BVB_CLK_ID] = 324000000,
+        [RPI_FIRMWARE_VEC_CLK_ID] = 108000000,
+    };
+    static const uint32_t query_tags[] = {
+        RPI_FWREQ_GET_CLOCK_RATE,
+        RPI_FWREQ_GET_MIN_CLOCK_RATE,
+        RPI_FWREQ_GET_MAX_CLOCK_RATE,
+    };
+    static const uint32_t *const expected_rates[] = {
+        expected_current,
+        expected_min,
+        expected_max,
+    };
+    uint32_t payload[RPI_FIRMWARE_NUM_CLK_ID * 2] = { 0 };
+    unsigned int id;
+
+    property_request(RPI_FWREQ_GET_CLOCKS, payload,
+                     G_N_ELEMENTS(payload),
+                     (RPI_FIRMWARE_DISP_CLK_ID - 1) * 2 * sizeof(uint32_t));
+
+    for (id = 1; id < RPI_FIRMWARE_DISP_CLK_ID; id++) {
+        size_t word = (id - 1) * 2;
+
+        g_assert_cmphex(property_payload(word), ==, 0);
+        g_assert_cmphex(property_payload(word + 1), ==, id);
+    }
+
+    /* The deliberately oversized request retains its zero sentinel. */
+    g_assert_cmphex(property_payload((RPI_FIRMWARE_DISP_CLK_ID - 1) * 2),
+                    ==, 0);
+    g_assert_cmphex(property_payload((RPI_FIRMWARE_DISP_CLK_ID - 1) * 2 + 1),
+                    ==, 0);
+
+    for (unsigned int query = 0; query < G_N_ELEMENTS(query_tags); query++) {
+        for (id = 1; id < RPI_FIRMWARE_DISP_CLK_ID; id++) {
+            const uint32_t rate_query[] = { id, UINT32_MAX };
+
+            property_request(query_tags[query], rate_query,
+                             G_N_ELEMENTS(rate_query), sizeof(rate_query));
+            g_assert_cmphex(property_payload(0), ==, id);
+            g_assert_cmpuint(property_payload(1), ==,
+                             expected_rates[query][id]);
+        }
+    }
+
+    {
+        const uint32_t invalid_query[] = {
+            RPI_FIRMWARE_DISP_CLK_ID, UINT32_MAX,
+        };
+        const uint32_t set_core[] = {
+            RPI_FIRMWARE_CORE_CLK_ID, 480000000, 0,
+        };
+        const uint32_t set_core_above_max[] = {
+            RPI_FIRMWARE_CORE_CLK_ID, 600000000, 0,
+        };
+        const uint32_t get_core[] = {
+            RPI_FIRMWARE_CORE_CLK_ID, UINT32_MAX,
+        };
+
+        property_request(RPI_FWREQ_GET_CLOCK_RATE, invalid_query,
+                         G_N_ELEMENTS(invalid_query), sizeof(invalid_query));
+        g_assert_cmphex(property_payload(1), ==, 0);
+
+        property_request(RPI_FWREQ_SET_CLOCK_RATE, set_core,
+                         G_N_ELEMENTS(set_core), 2 * sizeof(uint32_t));
+        g_assert_cmpuint(property_payload(1), ==, 480000000);
+        property_request(RPI_FWREQ_GET_CLOCK_RATE, get_core,
+                         G_N_ELEMENTS(get_core), sizeof(get_core));
+        g_assert_cmpuint(property_payload(1), ==, 480000000);
+
+        property_request(RPI_FWREQ_SET_CLOCK_RATE, set_core_above_max,
+                         G_N_ELEMENTS(set_core_above_max),
+                         2 * sizeof(uint32_t));
+        g_assert_cmpuint(property_payload(1), ==, 500000000);
+    }
+}
+
 static void test_firmware_state_and_reboot(void)
 {
     const uint32_t get_arm_clock[] = {
@@ -2328,7 +2458,7 @@ static void test_firmware_state_and_reboot(void)
         RPI_FIRMWARE_ARM_CLK_ID, ~RPI_FIRMWARE_STATE_ENABLE,
     };
     const uint32_t get_invalid_clock[] = {
-        RPI_FIRMWARE_NUM_CLK_ID, UINT32_MAX,
+        RPI_FIRMWARE_DISP_CLK_ID, UINT32_MAX,
     };
     const uint32_t get_arm_domain[] = {
         RPI_FIRMWARE_ARM_DOMAIN_ID, UINT32_MAX,
@@ -2717,6 +2847,7 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/firmware_gpio", test_firmware_gpio);
     raspi4b_add_test("/raspi4b/firmware_dma_channels",
                      test_firmware_dma_channels);
+    raspi4b_add_test("/raspi4b/firmware/clocks", test_firmware_clocks);
     raspi4b_add_test("/raspi4b/firmware/state_and_reboot",
                      test_firmware_state_and_reboot);
     raspi4b_add_test("/raspi4b/firmware/notify_xhci_reset",
