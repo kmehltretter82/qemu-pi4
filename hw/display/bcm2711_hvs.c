@@ -40,9 +40,23 @@
 #define SCALER5_POS0_START_Y_SHIFT   16
 #define SCALER5_POS0_START_Y_MASK    0xfff
 #define SCALER5_POS0_START_X_MASK    0x3fff
+#define SCALER5_POS0_VFLIP           BIT(31)
+#define SCALER5_POS0_HFLIP           BIT(15)
+#define SCALER5_POS1_HEIGHT_SHIFT    16
+#define SCALER5_POS1_HEIGHT_MASK     0x1fff
+#define SCALER5_POS1_WIDTH_MASK      0x1fff
 #define SCALER5_POS2_HEIGHT_SHIFT    16
 #define SCALER5_POS2_HEIGHT_MASK     0x1fff
 #define SCALER5_POS2_WIDTH_MASK      0x1fff
+
+#define SCALER5_CTL2_ALPHA_MODE_SHIFT 30
+#define SCALER5_CTL2_ALPHA_MODE_MASK  0x3
+#define SCALER5_CTL2_ALPHA_MODE_PIPELINE 0
+#define SCALER5_CTL2_ALPHA_MODE_FIXED 1
+#define SCALER5_CTL2_ALPHA_PREMULT    BIT(29)
+#define SCALER5_CTL2_ALPHA_MIX        BIT(28)
+#define SCALER5_CTL2_ALPHA_SHIFT      4
+#define SCALER5_CTL2_ALPHA_MASK       0xfff
 
 #define HVS_PIXEL_FORMAT_RGB565      4
 #define HVS_PIXEL_FORMAT_RGB888      5
@@ -85,11 +99,12 @@ static bool bcm2711_hvs_decode_format(uint32_t ctl, uint32_t *bpp,
     case HVS_PIXEL_FORMAT_RGB888:
         *bpp = 24;
         if (order == HVS_PIXEL_ORDER_XRGB) {
-            *pixo = 1;
+            /* DRM RGB888 is stored as B, G, R on little-endian guests. */
+            *pixo = 0;
             return true;
         }
         if (order == HVS_PIXEL_ORDER_XBGR) {
-            *pixo = 0;
+            *pixo = 1;
             return true;
         }
         return false;
@@ -112,20 +127,11 @@ static bool bcm2711_hvs_decode_format(uint32_t ctl, uint32_t *bpp,
 static bool bcm2711_hvs_apply_scanout(BCM2711HVSState *s,
                                       unsigned int channel)
 {
+    BCM2835FBHVSLayer layers[BCM2835_FB_MAX_HVS_LAYERS] = { 0 };
     BCM2835FBConfig config = { 0 };
     uint32_t channel_ctl;
     uint32_t dlist;
-    uint32_t ctl;
-    uint32_t size;
-    uint32_t pos0;
-    uint32_t pos2;
-    uint32_t ptr_index;
-    uint32_t pitch_index;
-    uint32_t pitch;
-    uint32_t bytes_per_pixel;
-    uint32_t source_width;
-    uint32_t source_height;
-    uint32_t next_ctl;
+    uint32_t layer_count = 0;
 
     g_assert(channel < HVS_CHANNELS);
 
@@ -144,67 +150,144 @@ static bool bcm2711_hvs_apply_scanout(BCM2711HVSState *s,
 
     dlist = s->regs[(SCALER_DISPLIST0 >> 2) + channel] &
             (HVS_DLIST_WORDS - 1);
-    ctl = s->regs[(SCALER5_DLIST_START >> 2) + dlist];
-    if (!(ctl & SCALER_CTL0_VALID) || (ctl & SCALER_CTL0_END) ||
-        ((ctl >> SCALER_CTL0_TILING_SHIFT) & SCALER_CTL0_TILING_MASK) ||
-        !(ctl & SCALER5_CTL0_UNITY)) {
+    while (true) {
+        uint32_t base_index = (SCALER5_DLIST_START >> 2) + dlist;
+        uint32_t ctl = s->regs[base_index];
+        BCM2835FBHVSLayer *layer;
+        uint32_t size;
+        uint32_t pos0;
+        uint32_t ctl2;
+        uint32_t pos1 = 0;
+        uint32_t pos2_index;
+        uint32_t pos2;
+        uint32_t ptr_index;
+        uint32_t pitch_index;
+        uint32_t bytes_per_pixel;
+
+        if (ctl & SCALER_CTL0_END) {
+            break;
+        }
+        if (layer_count == BCM2835_FB_MAX_HVS_LAYERS) {
+            qemu_log_mask(LOG_UNIMP,
+                          "%s: more than %u HVS planes are not implemented\n",
+                          TYPE_BCM2711_HVS, BCM2835_FB_MAX_HVS_LAYERS);
+            return false;
+        }
+        layer = &layers[layer_count];
+        if (!(ctl & SCALER_CTL0_VALID)) {
+            return false;
+        }
+        if ((ctl >> SCALER_CTL0_TILING_SHIFT) &
+            SCALER_CTL0_TILING_MASK) {
+            qemu_log_mask(LOG_UNIMP,
+                          "%s: tiled HVS planes are not implemented\n",
+                          TYPE_BCM2711_HVS);
+            return false;
+        }
+
+        size = (ctl >> SCALER_CTL0_SIZE_SHIFT) & SCALER_CTL0_SIZE_MASK;
+        if (size < 8 || dlist + size >= HVS_DLIST_WORDS) {
+            return false;
+        }
+        if (!bcm2711_hvs_decode_format(ctl, &layer->bpp,
+                                       &layer->pixo)) {
+            return false;
+        }
+
+        pos0 = s->regs[base_index + 1];
+        ctl2 = s->regs[base_index + 2];
+        if (ctl & SCALER5_CTL0_UNITY) {
+            pos2_index = dlist + 3;
+        } else {
+            pos1 = s->regs[base_index + 3];
+            pos2_index = dlist + 4;
+        }
+        ptr_index = pos2_index + 2;
+        pitch_index = ptr_index + 2;
+        if (pitch_index >= dlist + size) {
+            return false;
+        }
+        pos2 = s->regs[(SCALER5_DLIST_START >> 2) + pos2_index];
+
+        layer->source_width = pos2 & SCALER5_POS2_WIDTH_MASK;
+        layer->source_height =
+            (pos2 >> SCALER5_POS2_HEIGHT_SHIFT) &
+            SCALER5_POS2_HEIGHT_MASK;
+        layer->dest_x = pos0 & SCALER5_POS0_START_X_MASK;
+        layer->dest_y = (pos0 >> SCALER5_POS0_START_Y_SHIFT) &
+                        SCALER5_POS0_START_Y_MASK;
+        layer->hflip = pos0 & SCALER5_POS0_HFLIP;
+        layer->vflip = pos0 & SCALER5_POS0_VFLIP;
+        if (ctl & SCALER5_CTL0_UNITY) {
+            layer->dest_width = layer->source_width;
+            layer->dest_height = layer->source_height;
+        } else {
+            layer->dest_width = pos1 & SCALER5_POS1_WIDTH_MASK;
+            layer->dest_height = (pos1 >> SCALER5_POS1_HEIGHT_SHIFT) &
+                                 SCALER5_POS1_HEIGHT_MASK;
+        }
+        if (!layer->source_width || !layer->source_height ||
+            !layer->dest_width || !layer->dest_height ||
+            layer->source_width > HVS_MAX_XRES ||
+            layer->source_height > HVS_MAX_YRES) {
+            return false;
+        }
+
+        bytes_per_pixel = layer->bpp >> 3;
+        layer->pitch =
+            s->regs[(SCALER5_DLIST_START >> 2) + pitch_index] & 0xffff;
+        if (!layer->pitch || layer->pitch % bytes_per_pixel ||
+            layer->pitch < layer->source_width * bytes_per_pixel ||
+            layer->pitch / bytes_per_pixel > HVS_MAX_XRES) {
+            return false;
+        }
+        layer->base =
+            s->regs[(SCALER5_DLIST_START >> 2) + ptr_index];
+        layer->alpha = (ctl2 >> SCALER5_CTL2_ALPHA_SHIFT) &
+                       SCALER5_CTL2_ALPHA_MASK;
+        layer->alpha_mode = (ctl2 >> SCALER5_CTL2_ALPHA_MODE_SHIFT) &
+                            SCALER5_CTL2_ALPHA_MODE_MASK;
+        if (layer->alpha_mode != SCALER5_CTL2_ALPHA_MODE_PIPELINE &&
+            layer->alpha_mode != SCALER5_CTL2_ALPHA_MODE_FIXED) {
+            qemu_log_mask(LOG_UNIMP,
+                          "%s: HVS alpha mode %u is not implemented\n",
+                          TYPE_BCM2711_HVS, layer->alpha_mode);
+            return false;
+        }
+        layer->alpha_mix = ctl2 & SCALER5_CTL2_ALPHA_MIX;
+        layer->alpha_premult = ctl2 & SCALER5_CTL2_ALPHA_PREMULT;
+
+        layer_count++;
+        dlist += size;
+    }
+    if (!layer_count) {
         return false;
     }
 
-    size = (ctl >> SCALER_CTL0_SIZE_SHIFT) & SCALER_CTL0_SIZE_MASK;
-    if (size < 8 || dlist + size >= HVS_DLIST_WORDS) {
-        return false;
+    if (layer_count == 1 && layers[0].dest_x == 0 &&
+        layers[0].dest_y == 0 && !layers[0].hflip && !layers[0].vflip &&
+        layers[0].source_width == config.xres &&
+        layers[0].source_height == config.yres &&
+        layers[0].dest_width == config.xres &&
+        layers[0].dest_height == config.yres &&
+        layers[0].alpha_mode == SCALER5_CTL2_ALPHA_MODE_FIXED &&
+        layers[0].alpha == 0xfff) {
+        uint32_t bytes_per_pixel = layers[0].bpp >> 3;
+
+        config.bpp = layers[0].bpp;
+        config.pixo = layers[0].pixo;
+        config.xres_virtual = layers[0].pitch / bytes_per_pixel;
+        config.yres_virtual = config.yres;
+        config.xoffset = 0;
+        config.yoffset = 0;
+        config.base = layers[0].base;
+        config.alpha = 0;
+        bcm2835_fb_validate_config(&config);
+        bcm2835_fb_reconfigure(s->fb, &config);
+    } else {
+        bcm2835_fb_reconfigure_hvs(s->fb, config.xres, config.yres,
+                                   layers, layer_count);
     }
-
-    pos0 = s->regs[(SCALER5_DLIST_START >> 2) + dlist + 1];
-    pos2 = s->regs[(SCALER5_DLIST_START >> 2) + dlist + 3];
-    if ((pos0 & SCALER5_POS0_START_X_MASK) ||
-        ((pos0 >> SCALER5_POS0_START_Y_SHIFT) &
-         SCALER5_POS0_START_Y_MASK)) {
-        return false;
-    }
-
-    source_width = pos2 & SCALER5_POS2_WIDTH_MASK;
-    source_height = (pos2 >> SCALER5_POS2_HEIGHT_SHIFT) &
-                    SCALER5_POS2_HEIGHT_MASK;
-    if (source_width != config.xres || source_height != config.yres) {
-        return false;
-    }
-
-    if (!bcm2711_hvs_decode_format(ctl, &config.bpp, &config.pixo)) {
-        return false;
-    }
-
-    ptr_index = dlist + 5;
-    pitch_index = dlist + 7;
-    if (pitch_index >= dlist + size) {
-        return false;
-    }
-
-    bytes_per_pixel = config.bpp >> 3;
-    pitch = s->regs[(SCALER5_DLIST_START >> 2) + pitch_index] & 0xffff;
-    if (!pitch || pitch % bytes_per_pixel ||
-        pitch < config.xres * bytes_per_pixel ||
-        pitch / bytes_per_pixel > HVS_MAX_XRES) {
-        return false;
-    }
-
-    next_ctl = s->regs[(SCALER5_DLIST_START >> 2) + dlist + size];
-    if (!(next_ctl & SCALER_CTL0_END)) {
-        qemu_log_mask(LOG_UNIMP,
-                      "%s: multi-plane HVS composition is not implemented\n",
-                      TYPE_BCM2711_HVS);
-    }
-
-    config.xres_virtual = pitch / bytes_per_pixel;
-    config.yres_virtual = config.yres;
-    config.xoffset = 0;
-    config.yoffset = 0;
-    config.base = s->regs[(SCALER5_DLIST_START >> 2) + ptr_index];
-    config.alpha = 0;
-
-    bcm2835_fb_validate_config(&config);
-    bcm2835_fb_reconfigure(s->fb, &config);
     return true;
 }
 
@@ -268,6 +351,16 @@ static void bcm2711_hvs_write(void *opaque, hwaddr offset, uint64_t value,
             s->regs[index] = 0;
         }
         bcm2711_hvs_update_channel(s, channel);
+    } else if (offset >= SCALER5_DLIST_START &&
+               offset < SCALER5_DLIST_START +
+                        HVS_DLIST_WORDS * sizeof(uint32_t)) {
+        for (channel = 0; channel < HVS_CHANNELS; channel++) {
+            if (s->regs[(SCALER_DISPCTRL0 +
+                         channel * SCALER_CHANNEL_STRIDE) >> 2] &
+                SCALER_DISPCTRLX_ENABLE) {
+                bcm2711_hvs_update_channel(s, channel);
+            }
+        }
     }
 }
 

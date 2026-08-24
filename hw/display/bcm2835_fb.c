@@ -138,6 +138,228 @@ static void draw_line_src16(void *opaque, uint8_t *dst, const uint8_t *src,
     }
 }
 
+static void fb_hvs_decode_pixel(const BCM2835FBHVSLayer *layer,
+                                const uint8_t *source,
+                                uint8_t *red, uint8_t *green,
+                                uint8_t *blue, uint8_t *alpha)
+{
+    uint32_t pixel;
+
+    switch (layer->bpp) {
+    case 16:
+        pixel = lduw_le_p(source);
+        *red = ((pixel >> 11) & 0x1f) << 3;
+        *green = ((pixel >> 5) & 0x3f) << 2;
+        *blue = (pixel & 0x1f) << 3;
+        *alpha = 0xff;
+        break;
+    case 24:
+        *red = source[0];
+        *green = source[1];
+        *blue = source[2];
+        *alpha = 0xff;
+        break;
+    case 32:
+        *red = source[0];
+        *green = source[1];
+        *blue = source[2];
+        *alpha = source[3];
+        break;
+    default:
+        *red = *green = *blue = 0;
+        *alpha = 0xff;
+        break;
+    }
+
+    if (!layer->pixo) {
+        uint8_t swap = *red;
+
+        *red = *blue;
+        *blue = swap;
+    }
+}
+
+static uint32_t fb_hvs_blend_pixel(uint32_t destination,
+                                   const BCM2835FBHVSLayer *layer,
+                                   uint8_t red, uint8_t green,
+                                   uint8_t blue, uint8_t pixel_alpha)
+{
+    unsigned int plane_alpha =
+        (MIN(layer->alpha, 0xfffU) * 0xffU + 0x7ffU) / 0xfffU;
+    unsigned int alpha;
+    unsigned int dest_red = (destination >> 16) & 0xff;
+    unsigned int dest_green = (destination >> 8) & 0xff;
+    unsigned int dest_blue = destination & 0xff;
+    unsigned int out_red;
+    unsigned int out_green;
+    unsigned int out_blue;
+
+    if (layer->alpha_mode == 0) {
+        alpha = pixel_alpha;
+        if (layer->alpha_mix) {
+            alpha = (alpha * plane_alpha + 0x7f) / 0xff;
+        }
+    } else {
+        alpha = plane_alpha;
+    }
+
+    if (!alpha) {
+        return destination;
+    }
+    if (alpha == 0xff && !layer->alpha_premult) {
+        return (red << 16) | (green << 8) | blue;
+    }
+
+    if (layer->alpha_mode == 0 && layer->alpha_premult) {
+        unsigned int color_alpha = layer->alpha_mix ? plane_alpha : 0xff;
+
+        out_red = (red * color_alpha + 0x7f) / 0xff;
+        out_green = (green * color_alpha + 0x7f) / 0xff;
+        out_blue = (blue * color_alpha + 0x7f) / 0xff;
+        out_red += (dest_red * (0xff - alpha) + 0x7f) / 0xff;
+        out_green += (dest_green * (0xff - alpha) + 0x7f) / 0xff;
+        out_blue += (dest_blue * (0xff - alpha) + 0x7f) / 0xff;
+        out_red = MIN(out_red, 0xffU);
+        out_green = MIN(out_green, 0xffU);
+        out_blue = MIN(out_blue, 0xffU);
+    } else {
+        out_red = (red * alpha + dest_red * (0xff - alpha) + 0x7f) /
+                  0xff;
+        out_green = (green * alpha + dest_green * (0xff - alpha) +
+                     0x7f) / 0xff;
+        out_blue = (blue * alpha + dest_blue * (0xff - alpha) + 0x7f) /
+                   0xff;
+    }
+
+    return (out_red << 16) | (out_green << 8) | out_blue;
+}
+
+static void fb_hvs_store_pixel(uint8_t *destination, int bpp,
+                               uint32_t pixel)
+{
+    uint8_t red = (pixel >> 16) & 0xff;
+    uint8_t green = (pixel >> 8) & 0xff;
+    uint8_t blue = pixel & 0xff;
+
+    switch (bpp) {
+    case 8:
+        destination[0] = rgb_to_pixel8(red, green, blue);
+        break;
+    case 15:
+        *(uint16_t *)destination = rgb_to_pixel15(red, green, blue);
+        break;
+    case 16:
+        *(uint16_t *)destination = rgb_to_pixel16(red, green, blue);
+        break;
+    case 24:
+        pixel = rgb_to_pixel24(red, green, blue);
+        destination[0] = pixel & 0xff;
+        destination[1] = (pixel >> 8) & 0xff;
+        destination[2] = (pixel >> 16) & 0xff;
+        break;
+    case 32:
+        *(uint32_t *)destination = rgb_to_pixel32(red, green, blue);
+        break;
+    default:
+        break;
+    }
+}
+
+static bool fb_hvs_update_display(BCM2835FBState *s)
+{
+    DisplaySurface *surface = qemu_console_surface(s->con);
+    uint32_t width = s->config.xres;
+    uint32_t height = s->config.yres;
+    size_t pixel_count = (size_t)width * height;
+    int surface_bpp = surface_bits_per_pixel(surface);
+    unsigned int surface_bytes = DIV_ROUND_UP(surface_bpp, 8);
+
+    if (!width || !height || !surface_bpp) {
+        return true;
+    }
+    if (s->hvs_pixels_count < pixel_count) {
+        s->hvs_pixels = g_renew(uint32_t, s->hvs_pixels, pixel_count);
+        s->hvs_pixels_count = pixel_count;
+    }
+    memset(s->hvs_pixels, 0, pixel_count * sizeof(*s->hvs_pixels));
+
+    for (unsigned int index = 0; index < s->hvs_layer_count; index++) {
+        const BCM2835FBHVSLayer *layer = &s->hvs_layers[index];
+        unsigned int source_bytes = layer->bpp >> 3;
+        size_t source_line_size = (size_t)layer->source_width * source_bytes;
+        uint64_t dest_right = (uint64_t)layer->dest_x + layer->dest_width;
+        uint64_t dest_bottom = (uint64_t)layer->dest_y + layer->dest_height;
+        uint32_t first_x = MIN(layer->dest_x, width);
+        uint32_t first_y = MIN(layer->dest_y, height);
+        uint32_t last_x = MIN(dest_right, (uint64_t)width);
+        uint32_t last_y = MIN(dest_bottom, (uint64_t)height);
+
+        if (!layer->source_width || !layer->source_height ||
+            !layer->dest_width || !layer->dest_height || !source_bytes ||
+            !source_line_size || first_x >= last_x || first_y >= last_y) {
+            continue;
+        }
+        if (s->hvs_source_line_size < source_line_size) {
+            s->hvs_source_line = g_realloc(s->hvs_source_line,
+                                           source_line_size);
+            s->hvs_source_line_size = source_line_size;
+        }
+
+        for (uint32_t y = first_y; y < last_y; y++) {
+            uint32_t source_y = ((uint64_t)(y - layer->dest_y) *
+                                 layer->source_height) /
+                                layer->dest_height;
+            hwaddr source_address;
+
+            source_y = MIN(source_y, layer->source_height - 1);
+            if (layer->vflip) {
+                source_y = layer->source_height - 1 - source_y;
+            }
+            source_address = layer->base + (hwaddr)source_y * layer->pitch;
+            if (address_space_read(&s->dma_as, source_address,
+                                   MEMTXATTRS_UNSPECIFIED,
+                                   s->hvs_source_line,
+                                   source_line_size) != MEMTX_OK) {
+                continue;
+            }
+
+            for (uint32_t x = first_x; x < last_x; x++) {
+                uint32_t source_x = ((uint64_t)(x - layer->dest_x) *
+                                     layer->source_width) /
+                                    layer->dest_width;
+                uint8_t red, green, blue, alpha;
+                uint32_t *destination;
+
+                source_x = MIN(source_x, layer->source_width - 1);
+                if (layer->hflip) {
+                    source_x = layer->source_width - 1 - source_x;
+                }
+                fb_hvs_decode_pixel(layer,
+                                    s->hvs_source_line +
+                                    (size_t)source_x * source_bytes,
+                                    &red, &green, &blue, &alpha);
+                destination = &s->hvs_pixels[(size_t)y * width + x];
+                *destination = fb_hvs_blend_pixel(*destination, layer,
+                                                  red, green, blue, alpha);
+            }
+        }
+    }
+
+    for (uint32_t y = 0; y < height; y++) {
+        uint8_t *destination = surface_data(surface) +
+                               (size_t)y * surface_stride(surface);
+
+        for (uint32_t x = 0; x < width; x++) {
+            fb_hvs_store_pixel(destination + (size_t)x * surface_bytes,
+                               surface_bpp,
+                               s->hvs_pixels[(size_t)y * width + x]);
+        }
+    }
+    qemu_console_update(s->con, 0, 0, width, height);
+    s->invalidate = false;
+    return true;
+}
+
 static bool fb_use_offsets(BCM2835FBConfig *config)
 {
     /*
@@ -162,6 +384,9 @@ static bool fb_update_display(void *opaque)
 
     if (s->lock || !s->config.xres) {
         return true;
+    }
+    if (s->hvs_mode) {
+        return fb_hvs_update_display(s);
     }
 
     src_width = bcm2835_fb_get_pitch(&s->config);
@@ -257,10 +482,38 @@ void bcm2835_fb_reconfigure(BCM2835FBState *s, BCM2835FBConfig *newconfig)
 {
     s->lock = true;
 
+    s->hvs_mode = false;
+    s->hvs_layer_count = 0;
     s->config = *newconfig;
 
     s->invalidate = true;
     qemu_console_resize(s->con, s->config.xres, s->config.yres);
+    s->lock = false;
+}
+
+void bcm2835_fb_reconfigure_hvs(BCM2835FBState *s,
+                                uint32_t xres, uint32_t yres,
+                                const BCM2835FBHVSLayer *layers,
+                                uint32_t layer_count)
+{
+    g_assert(layer_count <= BCM2835_FB_MAX_HVS_LAYERS);
+
+    s->lock = true;
+    s->config.xres = xres;
+    s->config.yres = yres;
+    s->config.xres_virtual = xres;
+    s->config.yres_virtual = yres;
+    s->config.xoffset = 0;
+    s->config.yoffset = 0;
+    s->config.bpp = 32;
+    s->config.base = layer_count ? layers[0].base : 0;
+    s->config.pixo = 1;
+    s->config.alpha = 0;
+    s->hvs_mode = true;
+    s->hvs_layer_count = layer_count;
+    memcpy(s->hvs_layers, layers, layer_count * sizeof(*layers));
+    s->invalidate = true;
+    qemu_console_resize(s->con, xres, yres);
     s->lock = false;
 }
 
@@ -398,8 +651,18 @@ static void bcm2835_fb_reset(DeviceState *dev)
 
     s->config = s->initial_config;
 
+    s->hvs_mode = false;
+    s->hvs_layer_count = 0;
     s->invalidate = true;
     s->lock = false;
+}
+
+static void bcm2835_fb_finalize(Object *obj)
+{
+    BCM2835FBState *s = BCM2835_FB(obj);
+
+    g_free(s->hvs_pixels);
+    g_free(s->hvs_source_line);
 }
 
 static void bcm2835_fb_realize(DeviceState *dev, Error **errp)
@@ -459,6 +722,7 @@ static const TypeInfo bcm2835_fb_info = {
     .instance_size = sizeof(BCM2835FBState),
     .class_init    = bcm2835_fb_class_init,
     .instance_init = bcm2835_fb_init,
+    .instance_finalize = bcm2835_fb_finalize,
 };
 
 static void bcm2835_fb_register_types(void)

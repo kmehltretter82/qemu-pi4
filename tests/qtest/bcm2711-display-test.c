@@ -6,6 +6,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
+#include "qemu/bswap.h"
 #include "libqtest.h"
 #include "qobject/qdict.h"
 
@@ -31,6 +32,28 @@
 #define HVS_DISPCTRL_RESET          BIT(30)
 #define HVS_DISPSTAT_RUN            (2U << 30)
 #define HVS_DISPSTAT_EMPTY          BIT(28)
+#define HVS_CTL_END                 BIT(31)
+#define HVS_CTL_VALID               BIT(30)
+#define HVS_CTL_SIZE_SHIFT          24
+#define HVS_CTL_ORDER_SHIFT         13
+#define HVS_CTL_UNITY               BIT(15)
+#define HVS_CTL_FORMAT_RGB565       4
+#define HVS_CTL_FORMAT_RGB888       5
+#define HVS_CTL_FORMAT_RGBA8888     7
+#define HVS_CTL_ORDER_XRGB          2
+#define HVS_CTL_ORDER_ARGB          2
+#define HVS_POS0_VFLIP              BIT(31)
+#define HVS_POS0_Y_SHIFT            16
+#define HVS_POS0_HFLIP              BIT(15)
+#define HVS_POS1_HEIGHT_SHIFT       16
+#define HVS_POS2_HEIGHT_SHIFT       16
+#define HVS_CTL2_ALPHA_MODE_FIXED   BIT(30)
+#define HVS_CTL2_ALPHA_PREMULT      BIT(29)
+#define HVS_CTL2_ALPHA_MIX          BIT(28)
+#define HVS_CTL2_ALPHA_SHIFT        4
+#define HVS_CTL2_ALPHA_OPAQUE       0xfff
+#define HVS_PRIMARY_BASE            0x01000000
+#define HVS_OVERLAY_BASE            0x01100000
 
 #define PIXELVALVE2_BASE            0xfe20a000
 #define PV_CONTROL                  (PIXELVALVE2_BASE + 0x00)
@@ -189,6 +212,246 @@ static void test_hvs_registers_and_reset(void)
                                HVS_DLIST_BASE + 7 * sizeof(uint32_t)),
                     ==, 0);
     g_assert_cmphex(qtest_readl(qts, HVS_DISPLIST0), ==, 0);
+    qtest_quit(qts);
+}
+
+static void hvs_write_dlist(QTestState *qts, unsigned int index,
+                            uint32_t value)
+{
+    qtest_writel(qts, HVS_DLIST_BASE + index * sizeof(uint32_t), value);
+}
+
+static char *hvs_screendump(QTestState *qts, size_t *length)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *path = NULL;
+    char *contents = NULL;
+    int fd;
+
+    fd = g_file_open_tmp("bcm2711-hvs-XXXXXX.ppm", &path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'screendump', 'arguments': { 'filename': %s } }",
+        path);
+    g_file_get_contents(path, &contents, length, &error);
+    g_assert_no_error(error);
+    unlink(path);
+    return contents;
+}
+
+static void hvs_assert_ppm_pixel(const char *contents, size_t length,
+                                 unsigned int x, unsigned int y,
+                                 uint8_t red, uint8_t green, uint8_t blue)
+{
+    static const char header[] = "P6\n8 8\n255\n";
+    size_t offset = sizeof(header) - 1 + ((size_t)y * 8 + x) * 3;
+
+    g_assert_cmpuint(length, ==, sizeof(header) - 1 + 8 * 8 * 3);
+    g_assert_cmpmem(contents, sizeof(header) - 1,
+                    header, sizeof(header) - 1);
+    g_assert_cmphex((uint8_t)contents[offset], ==, red);
+    g_assert_cmphex((uint8_t)contents[offset + 1], ==, green);
+    g_assert_cmphex((uint8_t)contents[offset + 2], ==, blue);
+}
+
+static void hvs_program_scaled_rgb565(QTestState *qts)
+{
+    uint8_t primary[8 * 8 * sizeof(uint16_t)];
+    uint8_t overlay[2 * 2 * sizeof(uint16_t)];
+
+    for (unsigned int pixel = 0; pixel < 8 * 8; pixel++) {
+        stw_le_p(primary + pixel * sizeof(uint16_t), 0xf800);
+    }
+    stw_le_p(overlay + 0 * sizeof(uint16_t), 0x07e0);
+    stw_le_p(overlay + 1 * sizeof(uint16_t), 0x001f);
+    stw_le_p(overlay + 2 * sizeof(uint16_t), 0xffff);
+    stw_le_p(overlay + 3 * sizeof(uint16_t), 0x0000);
+    qtest_memwrite(qts, HVS_PRIMARY_BASE, primary, sizeof(primary));
+    qtest_memwrite(qts, HVS_OVERLAY_BASE, overlay, sizeof(overlay));
+
+    /* An opaque 8x8 primary plane followed by a scaled 2x2 overlay. */
+    hvs_write_dlist(qts, 0,
+                    HVS_CTL_VALID | (8U << HVS_CTL_SIZE_SHIFT) |
+                    (HVS_CTL_ORDER_XRGB << HVS_CTL_ORDER_SHIFT) |
+                    HVS_CTL_UNITY | HVS_CTL_FORMAT_RGB565);
+    hvs_write_dlist(qts, 1, 0);
+    hvs_write_dlist(qts, 2,
+                    HVS_CTL2_ALPHA_MODE_FIXED |
+                    (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
+    hvs_write_dlist(qts, 3, (8U << HVS_POS2_HEIGHT_SHIFT) | 8);
+    hvs_write_dlist(qts, 4, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 5, HVS_PRIMARY_BASE);
+    hvs_write_dlist(qts, 6, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 7, 8 * sizeof(uint16_t));
+
+    hvs_write_dlist(qts, 8,
+                    HVS_CTL_VALID | (9U << HVS_CTL_SIZE_SHIFT) |
+                    (HVS_CTL_ORDER_XRGB << HVS_CTL_ORDER_SHIFT) |
+                    HVS_CTL_FORMAT_RGB565);
+    hvs_write_dlist(qts, 9, (2U << HVS_POS0_Y_SHIFT) | 2);
+    hvs_write_dlist(qts, 10,
+                    HVS_CTL2_ALPHA_MODE_FIXED |
+                    (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
+    hvs_write_dlist(qts, 11, (4U << HVS_POS1_HEIGHT_SHIFT) | 4);
+    hvs_write_dlist(qts, 12, (2U << HVS_POS2_HEIGHT_SHIFT) | 2);
+    hvs_write_dlist(qts, 13, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 14, HVS_OVERLAY_BASE);
+    hvs_write_dlist(qts, 15, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 16, 2 * sizeof(uint16_t));
+    hvs_write_dlist(qts, 17, HVS_CTL_END);
+}
+
+static void test_hvs_scaled_composition(void)
+{
+    g_autofree char *contents = NULL;
+    QTestState *qts = display_start();
+    size_t length;
+
+    hvs_program_scaled_rgb565(qts);
+
+    qtest_writel(qts, HVS_DISPLIST0, 0);
+    qtest_writel(qts, HVS_DISPCTRL0,
+                 HVS_DISPCTRL_ENABLE | (8U << 16) | 8);
+    contents = hvs_screendump(qts, &length);
+
+    hvs_assert_ppm_pixel(contents, length, 0, 0, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 252, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 248);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 252, 248);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 0, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 7, 7, 248, 0, 0);
+
+    /* Active display-list writes must update scanout without a list flip. */
+    g_clear_pointer(&contents, g_free);
+    hvs_write_dlist(qts, 9,
+                    HVS_POS0_HFLIP | (2U << HVS_POS0_Y_SHIFT) | 2);
+    contents = hvs_screendump(qts, &length);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 0, 248);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 252, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 0, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 248, 252, 248);
+
+    /* Linux DRM RGB888 uses B, G, R byte order on a little-endian guest. */
+    g_clear_pointer(&contents, g_free);
+    {
+        static const uint8_t overlay_rgb888[] = {
+            0x00, 0xff, 0x00, /* green */
+            0xff, 0x00, 0x00, /* blue */
+            0xff, 0xff, 0xff, /* white */
+            0x00, 0x00, 0x00, /* black */
+        };
+
+        qtest_memwrite(qts, HVS_OVERLAY_BASE, overlay_rgb888,
+                       sizeof(overlay_rgb888));
+    }
+    hvs_write_dlist(qts, 8,
+                    HVS_CTL_VALID | (9U << HVS_CTL_SIZE_SHIFT) |
+                    (HVS_CTL_ORDER_XRGB << HVS_CTL_ORDER_SHIFT) |
+                    HVS_CTL_FORMAT_RGB888);
+    hvs_write_dlist(qts, 9, (2U << HVS_POS0_Y_SHIFT) | 2);
+    hvs_write_dlist(qts, 16, 2 * 3);
+    contents = hvs_screendump(qts, &length);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 255, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 255);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 255, 255, 255);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 0, 0, 0);
+
+    /* ARGB8888 coverage alpha must blend with the lower red plane. */
+    g_clear_pointer(&contents, g_free);
+    {
+        static const uint8_t overlay_argb8888[] = {
+            0x00, 0xff, 0x00, 0x80, /* half-alpha green */
+            0xff, 0x00, 0x00, 0xff, /* opaque blue */
+            0xff, 0xff, 0xff, 0x00, /* transparent white */
+            0x00, 0x00, 0x00, 0xff, /* opaque black */
+        };
+
+        qtest_memwrite(qts, HVS_OVERLAY_BASE, overlay_argb8888,
+                       sizeof(overlay_argb8888));
+    }
+    hvs_write_dlist(qts, 8,
+                    HVS_CTL_VALID | (9U << HVS_CTL_SIZE_SHIFT) |
+                    (HVS_CTL_ORDER_ARGB << HVS_CTL_ORDER_SHIFT) |
+                    HVS_CTL_FORMAT_RGBA8888);
+    hvs_write_dlist(qts, 10,
+                    HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT);
+    hvs_write_dlist(qts, 16, 2 * sizeof(uint32_t));
+    contents = hvs_screendump(qts, &length);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 124, 128, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 255);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 0, 0, 0);
+
+    /* Plane alpha mixes with per-pixel coverage alpha. */
+    g_clear_pointer(&contents, g_free);
+    hvs_write_dlist(qts, 10,
+                    HVS_CTL2_ALPHA_MIX |
+                    (0x800U << HVS_CTL2_ALPHA_SHIFT));
+    contents = hvs_screendump(qts, &length);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 186, 64, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 124, 0, 128);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 124, 0, 0);
+
+    /* Premultiplied pixels carry color channels scaled by their alpha. */
+    g_clear_pointer(&contents, g_free);
+    {
+        static const uint8_t overlay_premult[] = {
+            0x00, 0x80, 0x00, 0x80, /* half-alpha premultiplied green */
+            0xff, 0x00, 0x00, 0xff, /* opaque blue */
+            0x00, 0x00, 0x00, 0x00, /* transparent black */
+            0x00, 0x00, 0x00, 0xff, /* opaque black */
+        };
+
+        qtest_memwrite(qts, HVS_OVERLAY_BASE, overlay_premult,
+                       sizeof(overlay_premult));
+    }
+    hvs_write_dlist(qts, 10,
+                    HVS_CTL2_ALPHA_PREMULT |
+                    (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
+    contents = hvs_screendump(qts, &length);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 124, 128, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 255);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 0, 0, 0);
+
+    /* The two reflection flags are independent of scaling. */
+    g_clear_pointer(&contents, g_free);
+    hvs_write_dlist(qts, 9,
+                    HVS_POS0_VFLIP | HVS_POS0_HFLIP |
+                    (2U << HVS_POS0_Y_SHIFT) | 2);
+    contents = hvs_screendump(qts, &length);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 0, 0, 255);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 124, 128, 0);
+
+    /* A terminated list may use every advertised compositor layer. */
+    g_clear_pointer(&contents, g_free);
+    for (unsigned int layer = 0; layer < 16; layer++) {
+        unsigned int word = layer * 8;
+
+        hvs_write_dlist(qts, word,
+                        HVS_CTL_VALID | (8U << HVS_CTL_SIZE_SHIFT) |
+                        (HVS_CTL_ORDER_XRGB << HVS_CTL_ORDER_SHIFT) |
+                        HVS_CTL_UNITY | HVS_CTL_FORMAT_RGB565);
+        hvs_write_dlist(qts, word + 1, 0);
+        hvs_write_dlist(qts, word + 2,
+                        HVS_CTL2_ALPHA_MODE_FIXED |
+                        (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
+        hvs_write_dlist(qts, word + 3,
+                        (8U << HVS_POS2_HEIGHT_SHIFT) | 8);
+        hvs_write_dlist(qts, word + 4, 0xc0c0c0c0);
+        hvs_write_dlist(qts, word + 5, HVS_PRIMARY_BASE);
+        hvs_write_dlist(qts, word + 6, 0xc0c0c0c0);
+        hvs_write_dlist(qts, word + 7, 8 * sizeof(uint16_t));
+    }
+    hvs_write_dlist(qts, 16 * 8, HVS_CTL_END);
+    contents = hvs_screendump(qts, &length);
+    hvs_assert_ppm_pixel(contents, length, 0, 0, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 7, 7, 248, 0, 0);
     qtest_quit(qts);
 }
 
@@ -704,6 +967,7 @@ static void wait_for_migration(QTestState *qts)
 static void test_display_migration(void)
 {
     g_autoptr(GError) error = NULL;
+    g_autofree char *contents = NULL;
     g_autofree char *tmpdir = NULL;
     g_autofree char *state_path = NULL;
     g_autofree char *uri = NULL;
@@ -711,10 +975,11 @@ static void test_display_migration(void)
     QTestState *source = display_start();
     QTestState *destination;
     uint8_t edid[EDID_LENGTH];
+    size_t length;
     uint32_t status;
     int64_t mai_deadline_ns;
     const uint32_t hvs_control =
-        HVS_DISPCTRL_ENABLE | (640U << 16) | 480;
+        HVS_DISPCTRL_ENABLE | (8U << 16) | 8;
     const uint32_t mai_control =
         (2U << HDMI_MAI_CTL_CHNUM_SHIFT) |
         HDMI_MAI_CTL_WHOLSMP |
@@ -726,9 +991,8 @@ static void test_display_migration(void)
     qtest_writel(source, DVP_SW_INIT, BIT(1) | BIT(5));
     qtest_writel(source, DVP_MISC_CONFIG, 0);
 
-    qtest_writel(source, HVS_DLIST_BASE + 0x30 * sizeof(uint32_t),
-                 0x12345678);
-    qtest_writel(source, HVS_DISPLIST0, 0x30);
+    hvs_program_scaled_rgb565(source);
+    qtest_writel(source, HVS_DISPLIST0, 0);
     qtest_writel(source, HVS_DISPCTRL0, hvs_control);
 
     qtest_writel(source, PV_INTEN, PV_INT_VFP_START);
@@ -794,14 +1058,20 @@ static void test_display_migration(void)
                     BIT(1) | BIT(5));
     g_assert_cmphex(qtest_readl(destination, DVP_MISC_CONFIG), ==, 0);
     g_assert_cmphex(qtest_readl(destination,
-                               HVS_DLIST_BASE + 0x30 * sizeof(uint32_t)),
-                    ==, 0x12345678);
-    g_assert_cmphex(qtest_readl(destination, HVS_DISPLIST0), ==, 0x30);
-    g_assert_cmphex(qtest_readl(destination, HVS_DISPLACT0), ==, 0x30);
+                               HVS_DLIST_BASE + 17 * sizeof(uint32_t)),
+                    ==, HVS_CTL_END);
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPLIST0), ==, 0);
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPLACT0), ==, 0);
     g_assert_cmphex(qtest_readl(destination, HVS_DISPCTRL0), ==,
                     hvs_control);
     g_assert_cmphex(qtest_readl(destination, HVS_DISPSTAT0), ==,
                     HVS_DISPSTAT_RUN);
+    contents = hvs_screendump(destination, &length);
+    hvs_assert_ppm_pixel(contents, length, 0, 0, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 252, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 248);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 252, 248);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 0, 0, 0);
 
     g_assert_cmphex(qtest_readl(destination, HDMI_RAM_PACKET_CONFIG), ==,
                     BIT(16) | 0x55aa);
@@ -870,6 +1140,8 @@ int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/bcm2711/display/hvs", test_hvs_registers_and_reset);
+    qtest_add_func("/bcm2711/display/hvs/scaled_composition",
+                   test_hvs_scaled_composition);
     qtest_add_func("/bcm2711/display/pixelvalve/vblank",
                    test_pixelvalve_vblank_and_reset);
     qtest_add_func("/bcm2711/display/hdmi/transmitter",

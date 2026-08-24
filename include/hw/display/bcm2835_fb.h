@@ -34,6 +34,27 @@ typedef struct {
     uint32_t alpha;
 } BCM2835FBConfig;
 
+#define BCM2835_FB_MAX_HVS_LAYERS 16
+
+typedef struct BCM2835FBHVSLayer {
+    uint32_t base;
+    uint32_t pitch;
+    uint32_t source_width;
+    uint32_t source_height;
+    uint32_t dest_x;
+    uint32_t dest_y;
+    uint32_t dest_width;
+    uint32_t dest_height;
+    uint32_t bpp;
+    uint32_t pixo;
+    uint32_t alpha;
+    uint32_t alpha_mode;
+    bool alpha_mix;
+    bool alpha_premult;
+    bool hflip;
+    bool vflip;
+} BCM2835FBHVSLayer;
+
 struct BCM2835FBState {
     /*< private >*/
     SysBusDevice busdev;
@@ -51,9 +72,21 @@ struct BCM2835FBState {
 
     BCM2835FBConfig config;
     BCM2835FBConfig initial_config;
+
+    bool hvs_mode;
+    uint32_t hvs_layer_count;
+    BCM2835FBHVSLayer hvs_layers[BCM2835_FB_MAX_HVS_LAYERS];
+    uint32_t *hvs_pixels;
+    size_t hvs_pixels_count;
+    uint8_t *hvs_source_line;
+    size_t hvs_source_line_size;
 };
 
 void bcm2835_fb_reconfigure(BCM2835FBState *s, BCM2835FBConfig *newconfig);
+void bcm2835_fb_reconfigure_hvs(BCM2835FBState *s,
+                                uint32_t xres, uint32_t yres,
+                                const BCM2835FBHVSLayer *layers,
+                                uint32_t layer_count);
 
 /**
  * bcm2835_fb_get_pitch: return number of bytes per line of the framebuffer
