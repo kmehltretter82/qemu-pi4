@@ -14,8 +14,10 @@
 #include "hw/misc/bcm2835_mbox_defs.h"
 #include "hw/arm/raspberrypi-fw-defs.h"
 #include "system/dma.h"
+#include "qemu/bswap.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/units.h"
 #include "trace.h"
 #include "hw/arm/raspi4_platform.h"
 
@@ -23,6 +25,7 @@
 #define RPI_EXP_GPIO_BASE       128
 #define RPI4_VL805_PCI_DEV_ADDR (1U << 20)
 #define RPI_FIRMWARE_DEFAULT_BOARD_SERIAL 0x51454d55
+#define RPI_FIRMWARE_MAX_PROPERTY_SIZE MiB
 
 #define RPI_FW_DOMAIN_DEFAULTS \
     (BIT(RPI_FIRMWARE_VIDEO_SCALER_DOMAIN_ID) | \
@@ -95,9 +98,122 @@ static bool bcm2835_property_clock_valid(uint32_t id)
     return id > 0 && id < RPI_FIRMWARE_DISP_CLK_ID;
 }
 
-static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
+static bool bcm2835_property_memory_read(BCM2835PropertyState *s,
+                                         hwaddr addr, void *data,
+                                         size_t len)
+{
+    return dma_memory_read(&s->dma_as, addr, data, len,
+                           MEMTXATTRS_UNSPECIFIED) == MEMTX_OK;
+}
+
+static bool bcm2835_property_memory_write(BCM2835PropertyState *s,
+                                          hwaddr addr, const void *data,
+                                          size_t len)
+{
+    return dma_memory_write(&s->dma_as, addr, data, len,
+                            MEMTXATTRS_UNSPECIFIED) == MEMTX_OK;
+}
+
+static bool bcm2835_property_read_u32(BCM2835PropertyState *s, hwaddr addr,
+                                      uint32_t *value)
+{
+    uint32_t le_value;
+
+    if (!bcm2835_property_memory_read(s, addr, &le_value, sizeof(le_value))) {
+        return false;
+    }
+    *value = le32_to_cpu(le_value);
+    return true;
+}
+
+static bool bcm2835_property_write_u32(BCM2835PropertyState *s, hwaddr addr,
+                                       uint32_t value)
+{
+    uint32_t le_value = cpu_to_le32(value);
+
+    return bcm2835_property_memory_write(s, addr, &le_value,
+                                         sizeof(le_value));
+}
+
+static bool bcm2835_property_tag_read(BCM2835PropertyState *s,
+                                      hwaddr payload, uint32_t bufsize,
+                                      size_t offset, void *data, size_t len)
+{
+    if (offset > bufsize || len > bufsize - offset) {
+        return false;
+    }
+
+    return bcm2835_property_memory_read(s, payload + offset, data, len);
+}
+
+static bool bcm2835_property_tag_read_u32(BCM2835PropertyState *s,
+                                          hwaddr payload, uint32_t bufsize,
+                                          size_t offset, uint32_t *value)
+{
+    uint32_t le_value;
+
+    if (!bcm2835_property_tag_read(s, payload, bufsize, offset, &le_value,
+                                   sizeof(le_value))) {
+        return false;
+    }
+    *value = le32_to_cpu(le_value);
+    return true;
+}
+
+static void bcm2835_property_tag_write(BCM2835PropertyState *s,
+                                       hwaddr payload, uint32_t bufsize,
+                                       size_t offset, const void *data,
+                                       size_t len, bool *error)
+{
+    size_t writable;
+
+    if (*error || offset >= bufsize || len == 0) {
+        return;
+    }
+
+    writable = MIN(len, (size_t)bufsize - offset);
+    if (!bcm2835_property_memory_write(s, payload + offset, data, writable)) {
+        *error = true;
+    }
+}
+
+static void bcm2835_property_tag_write_u32(BCM2835PropertyState *s,
+                                           hwaddr payload, uint32_t bufsize,
+                                           size_t offset, uint32_t value,
+                                           bool *error)
+{
+    uint32_t le_value = cpu_to_le32(value);
+
+    bcm2835_property_tag_write(s, payload, bufsize, offset, &le_value,
+                               sizeof(le_value), error);
+}
+
+static void bcm2835_property_tag_write_u64(BCM2835PropertyState *s,
+                                           hwaddr payload, uint32_t bufsize,
+                                           size_t offset, uint64_t value,
+                                           bool *error)
+{
+    uint64_t le_value = cpu_to_le64(value);
+
+    bcm2835_property_tag_write(s, payload, bufsize, offset, &le_value,
+                               sizeof(le_value), error);
+}
+
+static bool bcm2835_property_otp_range_valid(uint32_t start, uint32_t number,
+                                             uint32_t row_count)
+{
+    return start <= row_count && number <= row_count - start;
+}
+
+static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
+                                       uint32_t mbox_value)
 {
     uint32_t tot_len;
+    uint32_t request_code;
+    uint64_t end;
+    hwaddr value;
+    bool end_tag_found = false;
+    bool parse_error = false;
 
     /*
      * Copy the current state of the framebuffer config; we will update
@@ -107,78 +223,140 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
     BCM2835FBConfig fbconfig = s->fbdev->config;
     bool fbconfig_updated = false;
 
-    value &= ~0xf;
+    s->addr = mbox_value & ~0xf;
 
-    s->addr = value;
+    if (!bcm2835_property_read_u32(s, s->addr, &tot_len)) {
+        return;
+    }
 
-    tot_len = ldl_le_phys(&s->dma_as, value);
+    /* Do not write a response code outside the guest-declared header. */
+    if (tot_len < 2 * sizeof(uint32_t)) {
+        return;
+    }
+    if (!bcm2835_property_read_u32(s, s->addr + 4, &request_code) ||
+        request_code != 0 || tot_len < 3 * sizeof(uint32_t) ||
+        tot_len >= RPI_FIRMWARE_MAX_PROPERTY_SIZE ||
+        (tot_len & (sizeof(uint32_t) - 1)) ||
+        (uint64_t)s->addr + tot_len > (uint64_t)UINT32_MAX + 1) {
+        parse_error = true;
+        goto response;
+    }
 
-    /* @(addr + 4) : Buffer response code */
+    end = (uint64_t)s->addr + tot_len;
     value = s->addr + 8;
-    while (value + 8 <= s->addr + tot_len) {
-        uint32_t tag = ldl_le_phys(&s->dma_as, value);
-        uint32_t bufsize = ldl_le_phys(&s->dma_as, value + 4);
+    while (!parse_error) {
+        uint32_t tag;
+        uint32_t bufsize;
+        uint32_t tag_code;
+        uint32_t resplen = 0;
+        uint64_t padded;
+        uint64_t next;
+        hwaddr payload;
+        bool handled = true;
+        bool tag_error = false;
+
+        if (value > end || end - value < sizeof(tag) ||
+            !bcm2835_property_read_u32(s, value, &tag)) {
+            parse_error = true;
+            break;
+        }
+        if (tag == RPI_FWREQ_PROPERTY_END) {
+            end_tag_found = true;
+            break;
+        }
+        if (end - value < sizeof(rpi_firmware_prop_request_t) ||
+            !bcm2835_property_read_u32(s, value + 4, &bufsize) ||
+            !bcm2835_property_read_u32(s, value + 8, &tag_code)) {
+            parse_error = true;
+            break;
+        }
+
+        padded = ((uint64_t)bufsize + sizeof(uint32_t) - 1) &
+                 ~(uint64_t)(sizeof(uint32_t) - 1);
+        next = value + sizeof(rpi_firmware_prop_request_t) + padded;
+        if (tag_code != 0 || next > end - sizeof(uint32_t)) {
+            parse_error = true;
+            break;
+        }
+        payload = value + sizeof(rpi_firmware_prop_request_t);
+
         /* @(value + 8) : Request/response indicator */
-        size_t resplen = 0;
         switch (tag) {
         case RPI_FWREQ_PROPERTY_END:
+            handled = false;
             break;
         case RPI_FWREQ_GET_FIRMWARE_REVISION:
-            stl_le_phys(&s->dma_as, value + 12, 346337);
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 346337,
+                                           &tag_error);
             break;
         case RPI_FWREQ_GET_BOARD_MODEL:
-            qemu_log_mask(LOG_UNIMP,
-                          "bcm2835_property: 0x%08x get board model NYI\n",
-                          tag);
+            /*
+             * Pi 4-family firmware reports model zero; revision identifies
+             * the board.
+             */
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 0,
+                                           &tag_error);
             break;
         case RPI_FWREQ_GET_BOARD_REVISION:
-            if (bufsize < sizeof(uint32_t)) {
-                break;
-            }
-            stl_le_phys(&s->dma_as, value + 12,
-                        bcm2835_otp_get_row(s->otp,
-                                            BCM2835_OTP_BOARD_REVISION));
             resplen = 4;
+            bcm2835_property_tag_write_u32(
+                s, payload, bufsize, 0,
+                bcm2835_otp_get_row(s->otp, BCM2835_OTP_BOARD_REVISION),
+                &tag_error);
             break;
         case RPI_FWREQ_GET_BOARD_MAC_ADDRESS:
             resplen = sizeof(s->macaddr.a);
-            dma_memory_write(&s->dma_as, value + 12, s->macaddr.a, resplen,
-                             MEMTXATTRS_UNSPECIFIED);
+            bcm2835_property_tag_write(s, payload, bufsize, 0, s->macaddr.a,
+                                       resplen, &tag_error);
             break;
         case RPI_FWREQ_GET_BOARD_SERIAL:
-            if (bufsize < sizeof(uint64_t)) {
-                break;
-            }
-            stq_le_phys(&s->dma_as, value + 12,
-                        bcm2835_otp_get_row(s->otp,
-                                            BCM2835_OTP_SERIAL_NUMBER));
             resplen = 8;
+            bcm2835_property_tag_write_u64(
+                s, payload, bufsize, 0,
+                bcm2835_otp_get_row(s->otp, BCM2835_OTP_SERIAL_NUMBER),
+                &tag_error);
             break;
         case RPI_FWREQ_GET_ARM_MEMORY:
-            /* base */
-            stl_le_phys(&s->dma_as, value + 12, 0);
-            /* size */
-            stl_le_phys(&s->dma_as, value + 16, s->fbdev->vcram_base);
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 0,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           s->fbdev->vcram_base,
+                                           &tag_error);
             break;
         case RPI_FWREQ_GET_VC_MEMORY:
-            /* base */
-            stl_le_phys(&s->dma_as, value + 12, s->fbdev->vcram_base);
-            /* size */
-            stl_le_phys(&s->dma_as, value + 16, s->fbdev->vcram_size);
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           s->fbdev->vcram_base,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           s->fbdev->vcram_size,
+                                           &tag_error);
             break;
         case RPI_FWREQ_SET_POWER_STATE:
         {
+            uint32_t device;
+            uint32_t state;
+
             /*
              * Assume that whatever device they asked for exists,
              * and we'll just claim we set it to the desired state.
              */
-            uint32_t state = ldl_le_phys(&s->dma_as, value + 16);
-            stl_le_phys(&s->dma_as, value + 16, (state & 1));
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &device) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &state)) {
+                tag_error = true;
+                break;
+            }
+            state &= RPI_FIRMWARE_STATE_ENABLE;
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, device,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4, state,
+                                           &tag_error);
             break;
         }
 
@@ -190,24 +368,32 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             uint32_t id;
             uint32_t state;
 
-            if (bufsize < 8) {
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &id)) {
+                tag_error = true;
                 break;
             }
-
-            id = ldl_le_phys(&s->dma_as, value + 12);
+            if (tag == RPI_FWREQ_SET_CLOCK_STATE &&
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &state)) {
+                tag_error = true;
+                break;
+            }
             if (!bcm2835_property_clock_valid(id)) {
                 state = RPI_FIRMWARE_STATE_NOT_EXIST;
             } else {
                 if (tag == RPI_FWREQ_SET_CLOCK_STATE) {
-                    state = ldl_le_phys(&s->dma_as, value + 16);
                     s->clock_states = deposit32(s->clock_states, id, 1,
                                                 state &
                                                 RPI_FIRMWARE_STATE_ENABLE);
                 }
                 state = extract32(s->clock_states, id, 1);
             }
-            stl_le_phys(&s->dma_as, value + 16, state);
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, id,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4, state,
+                                           &tag_error);
             break;
         }
 
@@ -215,9 +401,14 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
         case RPI_FWREQ_GET_MAX_CLOCK_RATE:
         case RPI_FWREQ_GET_MIN_CLOCK_RATE:
         {
-            uint32_t id = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t id;
             uint32_t rate = 0;
 
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &id)) {
+                tag_error = true;
+                break;
+            }
             if (bcm2835_property_clock_valid(id)) {
                 switch (tag) {
                 case RPI_FWREQ_GET_CLOCK_RATE:
@@ -233,42 +424,61 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
                     g_assert_not_reached();
                 }
             }
-            stl_le_phys(&s->dma_as, value + 16, rate);
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, id,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4, rate,
+                                           &tag_error);
             break;
         }
 
         case RPI_FWREQ_GET_CLOCKS:
         {
-            size_t entries = bufsize / (2 * sizeof(uint32_t));
             unsigned int id;
 
             /* Each response entry is a parent/clock-ID pair. */
-            for (id = 1; id < RPI_FIRMWARE_DISP_CLK_ID && entries; id++) {
-                stl_le_phys(&s->dma_as, value + 12 + resplen, 0);
-                stl_le_phys(&s->dma_as, value + 16 + resplen, id);
-                resplen += 2 * sizeof(uint32_t);
-                entries--;
+            resplen = (RPI_FIRMWARE_DISP_CLK_ID - 1) *
+                      2 * sizeof(uint32_t);
+            for (id = 1; id < RPI_FIRMWARE_DISP_CLK_ID; id++) {
+                size_t offset = (id - 1) * 2 * sizeof(uint32_t);
+
+                bcm2835_property_tag_write_u32(s, payload, bufsize, offset,
+                                               0, &tag_error);
+                bcm2835_property_tag_write_u32(s, payload, bufsize,
+                                               offset + sizeof(uint32_t), id,
+                                               &tag_error);
             }
             break;
         }
 
         case RPI_FWREQ_SET_CLOCK_RATE:
         {
-            uint32_t id = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t id;
             uint32_t rate = 0;
+            uint32_t skip_turbo;
 
-            if (bufsize < 8) {
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &id) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &rate) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 8,
+                                               &skip_turbo)) {
+                tag_error = true;
                 break;
             }
+            (void)skip_turbo;
             if (bcm2835_property_clock_valid(id)) {
-                rate = ldl_le_phys(&s->dma_as, value + 16);
                 rate = MIN(rate, rpi4_clock_max_rates[id]);
                 rate = MAX(rate, rpi4_clock_min_rates[id]);
                 s->clock_rates[id] = rate;
+            } else {
+                rate = 0;
             }
-            stl_le_phys(&s->dma_as, value + 16, rate);
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, id,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4, rate,
+                                           &tag_error);
             break;
         }
 
@@ -277,160 +487,366 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             qemu_log_mask(LOG_UNIMP,
                           "bcm2835_property: 0x%08x set clock rate NYI\n",
                           tag);
-            resplen = 8;
+            handled = false;
             break;
 
         /* Temperature */
 
         case RPI_FWREQ_GET_TEMPERATURE:
-            stl_le_phys(&s->dma_as, value + 16, 25000);
-            resplen = 8;
-            break;
-
         case RPI_FWREQ_GET_MAX_TEMPERATURE:
-            stl_le_phys(&s->dma_as, value + 16, 99000);
+        {
+            uint32_t id;
+            uint32_t temperature = tag == RPI_FWREQ_GET_TEMPERATURE ?
+                                   25000 : 99000;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &id)) {
+                tag_error = true;
+                break;
+            }
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, id,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           temperature, &tag_error);
             break;
+        }
 
         /* Frame buffer */
 
         case RPI_FWREQ_FRAMEBUFFER_ALLOCATE:
-            stl_le_phys(&s->dma_as, value + 12, fbconfig.base);
-            stl_le_phys(&s->dma_as, value + 16,
-                        bcm2835_fb_get_size(&fbconfig));
+        {
+            uint32_t alignment;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &alignment)) {
+                tag_error = true;
+                break;
+            }
+            (void)alignment;
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.base, &tag_error);
+            bcm2835_property_tag_write_u32(
+                s, payload, bufsize, 4, bcm2835_fb_get_size(&fbconfig),
+                &tag_error);
             break;
+        }
         case RPI_FWREQ_FRAMEBUFFER_RELEASE:
             resplen = 0;
             break;
         case RPI_FWREQ_FRAMEBUFFER_BLANK:
+        case RPI_FWREQ_FRAMEBUFFER_TEST_DEPTH:
+        case RPI_FWREQ_FRAMEBUFFER_TEST_PIXEL_ORDER:
+        case RPI_FWREQ_FRAMEBUFFER_TEST_ALPHA_MODE:
+        {
+            uint32_t requested;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &requested)) {
+                tag_error = true;
+                break;
+            }
+            (void)requested;
             resplen = 4;
             break;
+        }
         case RPI_FWREQ_FRAMEBUFFER_TEST_PHYSICAL_WIDTH_HEIGHT:
         case RPI_FWREQ_FRAMEBUFFER_TEST_VIRTUAL_WIDTH_HEIGHT:
+        case RPI_FWREQ_FRAMEBUFFER_TEST_VIRTUAL_OFFSET:
+        {
+            uint32_t first;
+            uint32_t second;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &first) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &second)) {
+                tag_error = true;
+                break;
+            }
+            (void)first;
+            (void)second;
             resplen = 8;
             break;
+        }
         case RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT:
-            fbconfig.xres = ldl_le_phys(&s->dma_as, value + 12);
-            fbconfig.yres = ldl_le_phys(&s->dma_as, value + 16);
+        {
+            uint32_t xres;
+            uint32_t yres;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &xres) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &yres)) {
+                tag_error = true;
+                break;
+            }
+            fbconfig.xres = xres;
+            fbconfig.yres = yres;
             bcm2835_fb_validate_config(&fbconfig);
             fbconfig_updated = true;
-            /* fall through */
-        case RPI_FWREQ_FRAMEBUFFER_GET_PHYSICAL_WIDTH_HEIGHT:
-            stl_le_phys(&s->dma_as, value + 12, fbconfig.xres);
-            stl_le_phys(&s->dma_as, value + 16, fbconfig.yres);
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xres, &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yres, &tag_error);
+            break;
+        }
+        case RPI_FWREQ_FRAMEBUFFER_GET_PHYSICAL_WIDTH_HEIGHT:
+            resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xres, &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yres, &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT:
-            fbconfig.xres_virtual = ldl_le_phys(&s->dma_as, value + 12);
-            fbconfig.yres_virtual = ldl_le_phys(&s->dma_as, value + 16);
+        {
+            uint32_t xres;
+            uint32_t yres;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &xres) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &yres)) {
+                tag_error = true;
+                break;
+            }
+            fbconfig.xres_virtual = xres;
+            fbconfig.yres_virtual = yres;
             bcm2835_fb_validate_config(&fbconfig);
             fbconfig_updated = true;
-            /* fall through */
-        case RPI_FWREQ_FRAMEBUFFER_GET_VIRTUAL_WIDTH_HEIGHT:
-            stl_le_phys(&s->dma_as, value + 12, fbconfig.xres_virtual);
-            stl_le_phys(&s->dma_as, value + 16, fbconfig.yres_virtual);
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xres_virtual,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yres_virtual,
+                                           &tag_error);
             break;
-        case RPI_FWREQ_FRAMEBUFFER_TEST_DEPTH:
-            resplen = 4;
+        }
+        case RPI_FWREQ_FRAMEBUFFER_GET_VIRTUAL_WIDTH_HEIGHT:
+            resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xres_virtual,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yres_virtual,
+                                           &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_SET_DEPTH:
-            fbconfig.bpp = ldl_le_phys(&s->dma_as, value + 12);
+        {
+            uint32_t depth;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &depth)) {
+                tag_error = true;
+                break;
+            }
+            fbconfig.bpp = depth;
             bcm2835_fb_validate_config(&fbconfig);
             fbconfig_updated = true;
-            /* fall through */
-        case RPI_FWREQ_FRAMEBUFFER_GET_DEPTH:
-            stl_le_phys(&s->dma_as, value + 12, fbconfig.bpp);
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.bpp, &tag_error);
             break;
-        case RPI_FWREQ_FRAMEBUFFER_TEST_PIXEL_ORDER:
+        }
+        case RPI_FWREQ_FRAMEBUFFER_GET_DEPTH:
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.bpp, &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_SET_PIXEL_ORDER:
-            fbconfig.pixo = ldl_le_phys(&s->dma_as, value + 12);
+        {
+            uint32_t pixel_order;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &pixel_order)) {
+                tag_error = true;
+                break;
+            }
+            fbconfig.pixo = pixel_order;
             bcm2835_fb_validate_config(&fbconfig);
             fbconfig_updated = true;
-            /* fall through */
-        case RPI_FWREQ_FRAMEBUFFER_GET_PIXEL_ORDER:
-            stl_le_phys(&s->dma_as, value + 12, fbconfig.pixo);
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.pixo, &tag_error);
             break;
-        case RPI_FWREQ_FRAMEBUFFER_TEST_ALPHA_MODE:
+        }
+        case RPI_FWREQ_FRAMEBUFFER_GET_PIXEL_ORDER:
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.pixo, &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_SET_ALPHA_MODE:
-            fbconfig.alpha = ldl_le_phys(&s->dma_as, value + 12);
+        {
+            uint32_t alpha;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &alpha)) {
+                tag_error = true;
+                break;
+            }
+            fbconfig.alpha = alpha;
             bcm2835_fb_validate_config(&fbconfig);
             fbconfig_updated = true;
-            /* fall through */
-        case RPI_FWREQ_FRAMEBUFFER_GET_ALPHA_MODE:
-            stl_le_phys(&s->dma_as, value + 12, fbconfig.alpha);
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.alpha, &tag_error);
+            break;
+        }
+        case RPI_FWREQ_FRAMEBUFFER_GET_ALPHA_MODE:
+            resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.alpha, &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_GET_PITCH:
-            stl_le_phys(&s->dma_as, value + 12,
-                        bcm2835_fb_get_pitch(&fbconfig));
             resplen = 4;
-            break;
-        case RPI_FWREQ_FRAMEBUFFER_TEST_VIRTUAL_OFFSET:
-            resplen = 8;
+            bcm2835_property_tag_write_u32(
+                s, payload, bufsize, 0, bcm2835_fb_get_pitch(&fbconfig),
+                &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_OFFSET:
-            fbconfig.xoffset = ldl_le_phys(&s->dma_as, value + 12);
-            fbconfig.yoffset = ldl_le_phys(&s->dma_as, value + 16);
+        {
+            uint32_t xoffset;
+            uint32_t yoffset;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &xoffset) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &yoffset)) {
+                tag_error = true;
+                break;
+            }
+            fbconfig.xoffset = xoffset;
+            fbconfig.yoffset = yoffset;
             bcm2835_fb_validate_config(&fbconfig);
             fbconfig_updated = true;
-            /* fall through */
-        case RPI_FWREQ_FRAMEBUFFER_GET_VIRTUAL_OFFSET:
-            stl_le_phys(&s->dma_as, value + 12, fbconfig.xoffset);
-            stl_le_phys(&s->dma_as, value + 16, fbconfig.yoffset);
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xoffset, &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yoffset, &tag_error);
+            break;
+        }
+        case RPI_FWREQ_FRAMEBUFFER_GET_VIRTUAL_OFFSET:
+            resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xoffset, &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yoffset, &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_GET_OVERSCAN:
         case RPI_FWREQ_FRAMEBUFFER_TEST_OVERSCAN:
         case RPI_FWREQ_FRAMEBUFFER_SET_OVERSCAN:
-            stl_le_phys(&s->dma_as, value + 12, 0);
-            stl_le_phys(&s->dma_as, value + 16, 0);
-            stl_le_phys(&s->dma_as, value + 20, 0);
-            stl_le_phys(&s->dma_as, value + 24, 0);
+            if (tag != RPI_FWREQ_FRAMEBUFFER_GET_OVERSCAN) {
+                uint32_t requested;
+
+                for (size_t i = 0; i < 4; i++) {
+                    if (!bcm2835_property_tag_read_u32(
+                            s, payload, bufsize, i * sizeof(uint32_t),
+                            &requested)) {
+                        tag_error = true;
+                        break;
+                    }
+                }
+            }
             resplen = 16;
+            for (size_t i = 0; i < 4; i++) {
+                bcm2835_property_tag_write_u32(
+                    s, payload, bufsize, i * sizeof(uint32_t), 0,
+                    &tag_error);
+            }
             break;
+        case RPI_FWREQ_FRAMEBUFFER_GET_PALETTE:
+        {
+            uint32_t colors[256];
+
+            for (size_t i = 0; i < G_N_ELEMENTS(colors); i++) {
+                if (!bcm2835_property_read_u32(
+                        s, s->fbdev->vcram_base + i * sizeof(uint32_t),
+                        &colors[i])) {
+                    tag_error = true;
+                    break;
+                }
+            }
+            resplen = sizeof(colors);
+            if (!tag_error) {
+                for (size_t i = 0; i < G_N_ELEMENTS(colors); i++) {
+                    bcm2835_property_tag_write_u32(
+                        s, payload, bufsize, i * sizeof(uint32_t), colors[i],
+                        &tag_error);
+                }
+            }
+            break;
+        }
+        case RPI_FWREQ_FRAMEBUFFER_TEST_PALETTE:
         case RPI_FWREQ_FRAMEBUFFER_SET_PALETTE:
         {
-            uint32_t offset = ldl_le_phys(&s->dma_as, value + 12);
-            uint32_t length = ldl_le_phys(&s->dma_as, value + 16);
-            int resp;
+            uint32_t colors[256];
+            uint32_t offset;
+            uint32_t length;
+            uint32_t resp = 1;
 
-            if (offset > 255 || length < 1 || length > 256) {
-                resp = 1; /* invalid request */
-            } else {
-                for (uint32_t e = 0; e < length; e++) {
-                    uint32_t color = ldl_le_phys(&s->dma_as, value + 20 + (e << 2));
-                    stl_le_phys(&s->dma_as,
-                                s->fbdev->vcram_base + ((offset + e) << 2), color);
-                }
-                resp = 0;
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &offset) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &length)) {
+                tag_error = true;
+                break;
             }
-            stl_le_phys(&s->dma_as, value + 12, resp);
+            if (bufsize >= 6 * sizeof(uint32_t) &&
+                length > 0 && offset < G_N_ELEMENTS(colors) &&
+                length <= G_N_ELEMENTS(colors) - offset &&
+                bufsize >= 2 * sizeof(uint32_t) +
+                           length * sizeof(uint32_t)) {
+                for (size_t i = 0; i < length; i++) {
+                    if (!bcm2835_property_tag_read_u32(
+                            s, payload, bufsize,
+                            (i + 2) * sizeof(uint32_t), &colors[i])) {
+                        tag_error = true;
+                        break;
+                    }
+                }
+                if (!tag_error) {
+                    resp = 0;
+                }
+            }
+            if (resp == 0 && tag == RPI_FWREQ_FRAMEBUFFER_SET_PALETTE) {
+                for (size_t i = 0; i < length; i++) {
+                    if (!bcm2835_property_write_u32(
+                            s, s->fbdev->vcram_base +
+                               (offset + i) * sizeof(uint32_t), colors[i])) {
+                        tag_error = true;
+                        break;
+                    }
+                }
+            }
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, resp,
+                                           &tag_error);
             break;
         }
         case RPI_FWREQ_FRAMEBUFFER_GET_NUM_DISPLAYS:
-            stl_le_phys(&s->dma_as, value + 12, 1);
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 1,
+                                           &tag_error);
             break;
 
         case RPI_FWREQ_GET_DMA_CHANNELS:
-            stl_le_phys(&s->dma_as, value + 12, s->dma_channels);
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           s->dma_channels, &tag_error);
             break;
 
         case RPI_FWREQ_NOTIFY_XHCI_RESET:
         {
             uint32_t dev_addr;
+            uint32_t status;
 
-            if (bufsize < sizeof(dev_addr)) {
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &dev_addr)) {
+                tag_error = true;
                 break;
             }
 
@@ -441,34 +857,48 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
              * the firmware after PCI reset so it can initialize the VL805;
              * the call does not itself reset the xHCI register file.
              */
-            dev_addr = ldl_le_phys(&s->dma_as, value + 12);
             if (s->has_vl805 && dev_addr == RPI4_VL805_PCI_DEV_ADDR) {
-                stl_le_phys(&s->dma_as, value + 12, 0);
-                qemu_irq_pulse(s->xhci_notify);
+                status = 0;
             } else {
-                stl_le_phys(&s->dma_as, value + 12, UINT32_MAX);
+                status = UINT32_MAX;
             }
             resplen = sizeof(dev_addr);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, status,
+                                           &tag_error);
+            if (!tag_error && status == 0) {
+                qemu_irq_pulse(s->xhci_notify);
+            }
             break;
         }
 
         case RPI_FWREQ_GET_COMMAND_LINE:
+        {
+            size_t command_line_len = s->command_line ?
+                                      strlen(s->command_line) : 0;
+
             /*
              * We follow the firmware behaviour: no NUL terminator is
              * written to the buffer, and if the buffer is too short
              * we report the required length in the response header
              * and copy nothing to the buffer.
              */
-            resplen = strlen(s->command_line);
-            if (bufsize >= resplen)
-                address_space_write(&s->dma_as, value + 12,
-                                    MEMTXATTRS_UNSPECIFIED, s->command_line,
-                                    resplen);
+            if (command_line_len > INT32_MAX) {
+                tag_error = true;
+                break;
+            }
+            resplen = command_line_len;
+            if (bufsize >= resplen) {
+                bcm2835_property_tag_write(s, payload, bufsize, 0,
+                                           s->command_line, resplen,
+                                           &tag_error);
+            }
             break;
+        }
 
         case RPI_FWREQ_GET_THROTTLED:
-            stl_le_phys(&s->dma_as, value + 12, 0);
             resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 0,
+                                           &tag_error);
             break;
 
         /* Firmware-managed power domains */
@@ -479,23 +909,31 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             uint32_t id;
             uint32_t state;
 
-            if (bufsize < 8) {
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &id)) {
+                tag_error = true;
                 break;
             }
-
-            id = ldl_le_phys(&s->dma_as, value + 12);
+            if (tag == RPI_FWREQ_SET_DOMAIN_STATE &&
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &state)) {
+                tag_error = true;
+                break;
+            }
             if (id == 0 || id >= RPI_FIRMWARE_NUM_DOMAIN_ID) {
                 state = 0;
             } else {
                 if (tag == RPI_FWREQ_SET_DOMAIN_STATE) {
-                    state = ldl_le_phys(&s->dma_as, value + 16);
                     s->domain_states = deposit32(s->domain_states, id, 1,
                                                  !!state);
                 }
                 state = extract32(s->domain_states, id, 1);
             }
-            stl_le_phys(&s->dma_as, value + 16, state);
             resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, id,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4, state,
+                                           &tag_error);
             break;
         }
 
@@ -508,110 +946,163 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
 
         case RPI_FWREQ_GET_GPIO_CONFIG:
         {
-            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t gpio;
             unsigned int index;
 
-            if (bufsize < 20) {
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &gpio)) {
+                tag_error = true;
                 break;
             }
             resplen = 20;
             if (!bcm2835_property_gpio_index(gpio, &index)) {
                 break;
             }
-            stl_le_phys(&s->dma_as, value + 12, 0);
-            stl_le_phys(&s->dma_as, value + 16, s->gpio_direction[index]);
-            stl_le_phys(&s->dma_as, value + 20, s->gpio_polarity[index]);
-            stl_le_phys(&s->dma_as, value + 24, s->gpio_term_en[index]);
-            stl_le_phys(&s->dma_as, value + 28, s->gpio_term_pull_up[index]);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 0,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           s->gpio_direction[index],
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 8,
+                                           s->gpio_polarity[index],
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 12,
+                                           s->gpio_term_en[index],
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 16,
+                                           s->gpio_term_pull_up[index],
+                                           &tag_error);
             break;
         }
 
         case RPI_FWREQ_SET_GPIO_CONFIG:
         {
-            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t values[6];
             unsigned int index;
 
-            if (bufsize < 24) {
-                break;
+            for (size_t i = 0; i < G_N_ELEMENTS(values); i++) {
+                if (!bcm2835_property_tag_read_u32(
+                        s, payload, bufsize, i * sizeof(uint32_t),
+                        &values[i])) {
+                    tag_error = true;
+                    break;
+                }
             }
             resplen = 24;
-            if (!bcm2835_property_gpio_index(gpio, &index)) {
+            if (tag_error ||
+                !bcm2835_property_gpio_index(values[0], &index)) {
                 break;
             }
-            s->gpio_direction[index] = ldl_le_phys(&s->dma_as, value + 16);
-            s->gpio_polarity[index] = ldl_le_phys(&s->dma_as, value + 20);
-            s->gpio_term_en[index] = ldl_le_phys(&s->dma_as, value + 24);
-            s->gpio_term_pull_up[index] = ldl_le_phys(&s->dma_as, value + 28);
-            s->gpio_state[index] = ldl_le_phys(&s->dma_as, value + 32);
-            stl_le_phys(&s->dma_as, value + 12, 0);
+            s->gpio_direction[index] = values[1];
+            s->gpio_polarity[index] = values[2];
+            s->gpio_term_en[index] = values[3];
+            s->gpio_term_pull_up[index] = values[4];
+            s->gpio_state[index] = values[5];
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 0,
+                                           &tag_error);
             break;
         }
 
         case RPI_FWREQ_GET_GPIO_STATE:
         {
-            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t gpio;
             unsigned int index;
 
-            if (bufsize < 8) {
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &gpio)) {
+                tag_error = true;
                 break;
             }
             resplen = 8;
             if (!bcm2835_property_gpio_index(gpio, &index)) {
                 break;
             }
-            stl_le_phys(&s->dma_as, value + 12, 0);
-            stl_le_phys(&s->dma_as, value + 16, s->gpio_state[index]);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 0,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           s->gpio_state[index],
+                                           &tag_error);
             break;
         }
 
         case RPI_FWREQ_SET_GPIO_STATE:
         {
-            uint32_t gpio = ldl_le_phys(&s->dma_as, value + 12);
+            uint32_t gpio;
+            uint32_t state;
             unsigned int index;
 
-            if (bufsize < 8) {
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &gpio) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &state)) {
+                tag_error = true;
                 break;
             }
             resplen = 8;
             if (!bcm2835_property_gpio_index(gpio, &index)) {
                 break;
             }
-            s->gpio_state[index] = ldl_le_phys(&s->dma_as, value + 16);
-            stl_le_phys(&s->dma_as, value + 12, 0);
+            s->gpio_state[index] = state;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 0,
+                                           &tag_error);
             break;
         }
 
         case RPI_FWREQ_VCHIQ_INIT:
-            stl_le_phys(&s->dma_as,
-                        value + offsetof(rpi_firmware_prop_request_t, payload),
-                        0);
             resplen = VCHI_BUSADDR_SIZE;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 0,
+                                           &tag_error);
             break;
 
         /* Customer OTP */
 
         case RPI_FWREQ_GET_CUSTOMER_OTP:
         {
-            uint32_t start_num = ldl_le_phys(&s->dma_as, value + 12);
-            uint32_t number = ldl_le_phys(&s->dma_as, value + 16);
+            uint32_t start_num;
+            uint32_t number;
 
-            resplen = 8 + 4 * number;
-
-            for (uint32_t n = start_num; n < start_num + number &&
-                 n < BCM2835_OTP_CUSTOMER_OTP_LEN; n++) {
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &start_num) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &number)) {
+                tag_error = true;
+                break;
+            }
+            resplen = 2 * sizeof(uint32_t);
+            if (!bcm2835_property_otp_range_valid(
+                    start_num, number, BCM2835_OTP_CUSTOMER_OTP_LEN)) {
+                break;
+            }
+            resplen += number * sizeof(uint32_t);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           start_num, &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4, number,
+                                           &tag_error);
+            for (uint32_t n = 0; n < number; n++) {
                 uint32_t otp_row = bcm2835_otp_get_row(s->otp,
-                                              BCM2835_OTP_CUSTOMER_OTP + n);
-                stl_le_phys(&s->dma_as,
-                            value + 20 + ((n - start_num) << 2), otp_row);
+                    BCM2835_OTP_CUSTOMER_OTP + start_num + n);
+
+                bcm2835_property_tag_write_u32(
+                    s, payload, bufsize, (n + 2) * sizeof(uint32_t), otp_row,
+                    &tag_error);
             }
             break;
         }
         case RPI_FWREQ_SET_CUSTOMER_OTP:
         {
-            uint32_t start_num = ldl_le_phys(&s->dma_as, value + 12);
-            uint32_t number = ldl_le_phys(&s->dma_as, value + 16);
+            uint32_t rows[BCM2835_OTP_CUSTOMER_OTP_LEN];
+            uint32_t start_num;
+            uint32_t number;
 
             resplen = 4;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &start_num) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &number)) {
+                tag_error = true;
+                break;
+            }
 
             /* Magic numbers to permanently lock customer OTP */
             if (start_num == BCM2835_OTP_LOCK_NUM1 &&
@@ -622,18 +1113,32 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
                 break;
             }
 
+            if (!bcm2835_property_otp_range_valid(
+                    start_num, number, BCM2835_OTP_CUSTOMER_OTP_LEN)) {
+                break;
+            }
+
             /* If row 32 has the lock bit, don't allow further writes */
             if (bcm2835_otp_get_row(s->otp, BCM2835_OTP_ROW_32) &
                                     BCM2835_OTP_ROW_32_LOCK) {
                 break;
             }
 
-            for (uint32_t n = start_num; n < start_num + number &&
-                 n < BCM2835_OTP_CUSTOMER_OTP_LEN; n++) {
-                uint32_t otp_row = ldl_le_phys(&s->dma_as,
-                                      value + 20 + ((n - start_num) << 2));
+            for (uint32_t n = 0; n < number; n++) {
+                if (!bcm2835_property_tag_read_u32(
+                        s, payload, bufsize, (n + 2) * sizeof(uint32_t),
+                        &rows[n])) {
+                    tag_error = true;
+                    break;
+                }
+            }
+            if (tag_error) {
+                break;
+            }
+            for (uint32_t n = 0; n < number; n++) {
                 bcm2835_otp_set_row(s->otp,
-                                    BCM2835_OTP_CUSTOMER_OTP + n, otp_row);
+                                    BCM2835_OTP_CUSTOMER_OTP + start_num + n,
+                                    rows[n]);
             }
             break;
         }
@@ -641,26 +1146,55 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
         /* Device-specific private key */
         case RPI_FWREQ_GET_PRIVATE_KEY:
         {
-            uint32_t start_num = ldl_le_phys(&s->dma_as, value + 12);
-            uint32_t number = ldl_le_phys(&s->dma_as, value + 16);
+            uint32_t start_num;
+            uint32_t number;
 
-            resplen = 8 + 4 * number;
-
-            for (uint32_t n = start_num; n < start_num + number &&
-                 n < BCM2835_OTP_PRIVATE_KEY_LEN; n++) {
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &start_num) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &number)) {
+                tag_error = true;
+                break;
+            }
+            resplen = 2 * sizeof(uint32_t);
+            if (!bcm2835_property_otp_range_valid(
+                    start_num, number, BCM2835_OTP_PRIVATE_KEY_LEN)) {
+                break;
+            }
+            resplen += number * sizeof(uint32_t);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           start_num, &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4, number,
+                                           &tag_error);
+            for (uint32_t n = 0; n < number; n++) {
                 uint32_t otp_row = bcm2835_otp_get_row(s->otp,
-                                              BCM2835_OTP_PRIVATE_KEY + n);
-                stl_le_phys(&s->dma_as,
-                            value + 20 + ((n - start_num) << 2), otp_row);
+                    BCM2835_OTP_PRIVATE_KEY + start_num + n);
+
+                bcm2835_property_tag_write_u32(
+                    s, payload, bufsize, (n + 2) * sizeof(uint32_t), otp_row,
+                    &tag_error);
             }
             break;
         }
         case RPI_FWREQ_SET_PRIVATE_KEY:
         {
-            uint32_t start_num = ldl_le_phys(&s->dma_as, value + 12);
-            uint32_t number = ldl_le_phys(&s->dma_as, value + 16);
+            uint32_t rows[BCM2835_OTP_PRIVATE_KEY_LEN];
+            uint32_t start_num;
+            uint32_t number;
 
             resplen = 4;
+
+            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
+                                               &start_num) ||
+                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
+                                               &number)) {
+                tag_error = true;
+                break;
+            }
+            if (!bcm2835_property_otp_range_valid(
+                    start_num, number, BCM2835_OTP_PRIVATE_KEY_LEN)) {
+                break;
+            }
 
             /* If row 32 has the lock bit, don't allow further writes */
             if (bcm2835_otp_get_row(s->otp, BCM2835_OTP_ROW_32) &
@@ -668,37 +1202,58 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
                 break;
             }
 
-            for (uint32_t n = start_num; n < start_num + number &&
-                 n < BCM2835_OTP_PRIVATE_KEY_LEN; n++) {
-                uint32_t otp_row = ldl_le_phys(&s->dma_as,
-                                      value + 20 + ((n - start_num) << 2));
+            for (uint32_t n = 0; n < number; n++) {
+                if (!bcm2835_property_tag_read_u32(
+                        s, payload, bufsize, (n + 2) * sizeof(uint32_t),
+                        &rows[n])) {
+                    tag_error = true;
+                    break;
+                }
+            }
+            if (tag_error) {
+                break;
+            }
+            for (uint32_t n = 0; n < number; n++) {
                 bcm2835_otp_set_row(s->otp,
-                                    BCM2835_OTP_PRIVATE_KEY + n, otp_row);
+                                    BCM2835_OTP_PRIVATE_KEY + start_num + n,
+                                    rows[n]);
             }
             break;
         }
         default:
             qemu_log_mask(LOG_UNIMP,
                           "bcm2835_property: unhandled tag 0x%08x\n", tag);
+            handled = false;
             break;
         }
 
         trace_bcm2835_mbox_property(tag, bufsize, resplen);
-        if (tag == 0) {
+        if (tag_error) {
+            parse_error = true;
             break;
         }
-
-        stl_le_phys(&s->dma_as, value + 8, (1 << 31) | resplen);
-        value += bufsize + 12;
+        if (handled &&
+            !bcm2835_property_write_u32(s, value + 8,
+                                        (1U << 31) | resplen)) {
+            parse_error = true;
+            break;
+        }
+        value = next;
     }
 
+    if (!end_tag_found) {
+        parse_error = true;
+    }
+
+response:
     /* Reconfigure framebuffer if required */
     if (fbconfig_updated) {
         bcm2835_fb_reconfigure(s->fbdev, &fbconfig);
     }
 
     /* Buffer response code */
-    stl_le_phys(&s->dma_as, s->addr + 4, (1 << 31));
+    bcm2835_property_write_u32(s, s->addr + 4,
+                               parse_error ? 0x80000001 : 0x80000000);
 }
 
 static uint64_t bcm2835_property_read(void *opaque, hwaddr offset,
@@ -751,7 +1306,7 @@ static void bcm2835_property_write(void *opaque, hwaddr offset,
 static const MemoryRegionOps bcm2835_property_ops = {
     .read = bcm2835_property_read,
     .write = bcm2835_property_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .valid.min_access_size = 4,
     .valid.max_access_size = 4,
 };
