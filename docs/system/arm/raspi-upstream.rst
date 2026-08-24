@@ -137,13 +137,47 @@ QP4-UP-006: firmware GPIO property tags needed by Pi 4 SD regulators
 QP4-UP-007: self-linked BCM2835 DMA control blocks can hang the emulator
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:Classification: bug candidate
+:Classification: bug candidate; E4 host forward-progress failure and E3 Circle
+  workload impact
+:Fork commit: ``5ce2b80d81f3da738f1d2bf934f77011e9b3db4e``
 :Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
-:Observed issue: A control block whose next pointer refers to itself is
-  executed synchronously in the DMA write path.  A malformed guest can keep
-  the QEMU vCPU thread in the device model indefinitely.
-:Before sending: Confirm the intended hardware behavior with an asynchronous
-  DMA test on a Pi 4, then add a bounded-loop or completion test.
+:Contract: Guest-controlled work in an MMIO handler must be bounded so the
+  emulator, monitor and unrelated virtual devices retain forward progress.
+  The BCM2835 manual also describes independently operating DMA channels and
+  linked control blocks executing without software intervention.
+:Observed issue: A normal four-byte control block whose next pointer refers to
+  itself is executed synchronously in the ``CS.ACTIVE`` write path.  On the
+  checked upstream master, that final qtest command never returns, the vCPU
+  thread consumes a host core, the monitor stops responding and QEMU requires
+  a forced kill.  The transfer is word-sized and does not depend on the older
+  length-underflow issue.
+:Hardware evidence: A bounded Pi 400 kernel probe reserved DMA channel 4 and
+  ran the same self-linked four-byte block for 50.773 ms.  All 34 samples saw
+  the channel active with current and next addresses still pointing to the
+  block, while the kernel thread slept and woke and SSH remained responsive.
+  Linux's normal abort/reset sequence then stopped the channel cleanly.
+:Workload evidence: Circle commit ``6177984e30fa`` uses a two-control-block,
+  DREQ-paced ring for I2S audio.  Its sound sample wedges the synchronous
+  model before it can fill the second block.  With the fork change, the pinned
+  AArch64 sample image (SHA-256
+  ``772aff938605164b3211fb934bf2470ac4f1449e08ef78b550a58ffbc4aaf041``)
+  reaches ``Playing modulated 440 Hz tone`` on both ``raspi4b`` and
+  ``raspi400`` and QEMU exits immediately on SIGINT.  Because I2S remains a
+  placeholder, this proves forward progress rather than audible output.
+:Fork change: Execute at most 256 transfer operations per slice and continue
+  on a migratable virtual-clock timer.  Add ACTIVE pause/resume, ABORT,
+  channel-enable, DREQ/PERMAP and status behavior, byte-aligned transfers,
+  functional wide-memory flags, aligned control-block pointers, bus-error
+  handling, reset and migration.  Six focused DMA subtests and an active
+  Pi 4 migration test cover the state transitions and deadline.
+:Report status: The outer research bundle references QEMU GitLab issue 4221,
+  but its current external state was not independently retrievable during this
+  documentation update.  No external submission or reply was made.
+:Before sending: Verify the live report and current master again, have the
+  user personally rerun and inspect the minimal reproducer, and disclose the
+  assisted discovery.  This fork's AI-derived code and tests are not eligible
+  for upstream submission under QEMU's current provenance policy; any patch
+  must be independently implemented by a human.
 
 QP4-UP-008: malformed property-mailbox tags can make the parser lose progress
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

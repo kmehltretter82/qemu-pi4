@@ -34,7 +34,8 @@ Implemented devices
 
  * Four Cortex-A72 CPU cores
  * GIC-400 and legacy VideoCore interrupt controllers
- * DMA controller
+ * DMA controller with bounded asynchronous control-block execution,
+   byte-aligned transfers, DREQ pacing, pause/abort, and active migration
  * Clock and reset controller (CPRMAN)
  * System Timer
  * GPIO controller, including all 58 input/output lines, edge and level event
@@ -75,6 +76,7 @@ Missing devices
  * BCM2711 HDMI/display pipeline and HDMI DDC I2C controllers
  * BCM2711 always-on L2 interrupt controller used by HDMI
  * Pulse Width Modulation (PWM)
+ * BCM2835 PCM/I2S audio controller
  * Remaining BCM2711 PCIe controller-event behavior
  * Consumer-control key-event production for the Pi 400 keyboard's second HID
    interface; its identity, descriptors, enumeration and migration already
@@ -173,6 +175,39 @@ This is a DMA-only host model.  It has no separately observable FIFO payload,
 so a FIFO-flush command has no additional buffered data to discard.  Slave
 mode FIFO accesses and the DWC2 gadget/device register banks remain
 unimplemented.
+
+DMA controller
+--------------
+
+The BCM2835-compatible DMA engine executes at most 256 transfer operations in
+one slice.  An active channel with more work continues from a virtual-clock
+timer, so a cyclic control-block ring remains active without trapping the vCPU
+or QEMU event loop in the register write that starts it.  Clearing ``ACTIVE``
+pauses the current block, setting it resumes from the retained source,
+destination and length, and ``ABORT`` selects the next control block.  Global
+channel-disable state also pauses and resumes active work.
+
+Named DREQ inputs implement the control block's ``PERMAP``, source and
+destination pacing fields.  A low selected request holds the channel and a
+rising request schedules more work; DREQ 0 is permanently active as specified.
+``CS.DREQ`` and ``CS.ISHELD`` report the resulting state.  The model accepts
+the wide-memory flags used by Circle and preserves their guest-visible byte
+stream, although QEMU memory regions do not expose individual AXI beat widths.
+It also supports the controller's byte-aligned, non-word-multiple transfers
+and masks control-block pointers to their required 32-byte alignment.
+
+In-flight control-block state, DREQ levels and the partially elapsed
+continuation deadline migrate with the VM.  Reset cancels all pending work,
+clears channel and interrupt state, and lowers every channel IRQ.  The 1 us
+continuation delay is an emulation scheduling quantum, not a claim about exact
+DMA bus throughput.  AXI burst shape, wait-cycle timing, panic priority and
+bus arbitration remain approximate.
+
+Circle 51's I2S sound sample now reaches its ``Playing modulated 440 Hz tone``
+loop on both ``raspi4b`` and ``raspi400``, and QEMU remains responsive.  This
+is currently a forward-progress test only: the PCM/I2S register and FIFO block
+is still an unimplemented placeholder, so no samples reach a host audio
+backend yet.
 
 Firmware clock and power state
 ------------------------------

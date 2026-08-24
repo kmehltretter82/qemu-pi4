@@ -46,6 +46,15 @@ cleanly.  The state survives live migration.  Clock and domain values are a
 firmware control-plane model only: they do not yet gate CPUs, clocks, or device
 MMIO in the emulator.
 
+The BCM2835-compatible DMA engine runs linked control blocks in bounded
+virtual-clock slices instead of synchronously walking an entire chain.  Cyclic
+DMA therefore leaves the vCPU and event loop responsive.  The model supports
+pause/resume and abort, level-sensitive peripheral DREQ pacing, byte-aligned
+lengths, the wide-memory flags used by Circle, reset, and migration of active
+progress and its timer.  Circle's I2S example reaches its playback loop on
+both board models, but the PCM/I2S block itself is still a placeholder and no
+host audio is produced yet.
+
 Both boards expose the BCM2711 PCIe root complex and the fixed VIA VL805 xHCI
 controller used for their external USB ports.  The model includes private PCI
 DMA, MSI, multi-segment xHCI event rings, the VIA four-port USB 2 hub, and the
