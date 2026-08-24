@@ -427,6 +427,7 @@ static int vl805_usb_block_path(char *device_path, size_t path_size)
 static int wait_for_vl805_usb_block(int present, char *device_path,
                                     size_t path_size)
 {
+    int consecutive_ready = 0;
     int attempt;
 
     if (present && (!device_path || !path_size)) {
@@ -445,13 +446,30 @@ static int wait_for_vl805_usb_block(int present, char *device_path,
 
             if (fd >= 0) {
                 do {
-                    count = pread(fd, sector, sizeof(sector), 0);
+                    count = pread(fd, sector, sizeof(sector),
+                                  USB_STORAGE_OFFSET +
+                                  USB_STORAGE_TRANSFER_SIZE -
+                                  sizeof(sector));
                 } while (count < 0 && errno == EINTR);
                 close(fd);
                 if (count == (ssize_t)sizeof(sector)) {
-                    return 0;
+                    /*
+                     * With no udev daemon, the block node can become visible
+                     * while the kernel is still scanning the disk.  Require
+                     * readiness across two polls before starting destructive
+                     * I/O or an xHCI unbind.
+                     */
+                    if (++consecutive_ready == 2) {
+                        return 0;
+                    }
+                } else {
+                    consecutive_ready = 0;
                 }
+            } else {
+                consecutive_ready = 0;
             }
+        } else {
+            consecutive_ready = 0;
         }
         usleep(SYSFS_WAIT_US);
     }
