@@ -161,6 +161,12 @@ class ComparisonTests(unittest.TestCase):
 
 
 class ShellScriptTests(unittest.TestCase):
+    LINUX_SUCCESS = "PI4-LAB: upstream Linux boot successful"
+    AON_REGISTERED = (
+        "irq_brcmstb_l2: registered L2 intc "
+        "(/soc/interrupt-controller@7ef00100, parent irq: 14)"
+    )
+
     def test_shell_scripts_parse(self):
         subprocess.run([
             "bash", "-n",
@@ -196,20 +202,27 @@ class ShellScriptTests(unittest.TestCase):
 
     def test_linux_runner_requires_success_marker(self):
         result = self.run_linux_with_fake_qemu(
-            "PI4-LAB: acceptance failed (1 check)")
+            self.AON_REGISTERED)
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("acceptance marker was not produced", result.stderr)
 
+    def test_linux_runner_requires_aon_registration(self):
+        result = self.run_linux_with_fake_qemu(self.LINUX_SUCCESS)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("AON L2 interrupt controller was not registered",
+                      result.stderr)
+
     def test_linux_runner_accepts_success_marker(self):
         result = self.run_linux_with_fake_qemu(
-            "PI4-LAB: upstream Linux boot successful")
+            f"{self.LINUX_SUCCESS}\n{self.AON_REGISTERED}")
 
         self.assertEqual(result.returncode, 0)
 
     def test_linux_runner_propagates_qemu_failure(self):
         result = self.run_linux_with_fake_qemu(
-            "PI4-LAB: upstream Linux boot successful", qemu_status=7)
+            f"{self.LINUX_SUCCESS}\n{self.AON_REGISTERED}", qemu_status=7)
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("QEMU exited before completing", result.stderr)

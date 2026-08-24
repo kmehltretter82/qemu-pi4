@@ -122,3 +122,9 @@ if ! grep -Fq 'PI4-LAB: upstream Linux boot successful' "$qemu_log"; then
     echo "Pi 4 Linux acceptance marker was not produced" >&2
     exit 1
 fi
+
+if ! grep -Fq \
+    'registered L2 intc (/soc/interrupt-controller@7ef00100' "$qemu_log"; then
+    echo "BCM2711 AON L2 interrupt controller was not registered" >&2
+    exit 1
+fi
