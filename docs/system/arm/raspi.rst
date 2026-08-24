@@ -42,6 +42,8 @@ Implemented devices
  * Both BCM2711 PWM controllers, with FIFO and DMA-paced stereo playback
  * BCM2711 always-on edge-latched L2 interrupt controller, with independently
    masked CPU and PCI banks
+ * BCM2711 HDMI DVP clock/reset controller and both HDMI DDC I2C controllers,
+   with a virtual EDID monitor on HDMI0
  * System Timer
  * GPIO controller, including all 58 input/output lines, edge and level event
    detection, and the three bank interrupts plus the all-bank interrupt
@@ -78,7 +80,7 @@ Missing devices
 
  * V3D 4.2 graphics accelerator (its MMIO range is an unimplemented
    placeholder)
- * BCM2711 HDMI/display pipeline and HDMI DDC I2C controllers
+ * BCM2711 HVS, pixel-valve and HDMI-transmitter display pipeline
  * Remaining BCM2711 PCIe controller-event behavior
  * Consumer-control key-event production for the Pi 400 keyboard's second HID
    interface; its identity, descriptors, enumeration and migration already
@@ -342,11 +344,55 @@ events, masking, clearing a held-high source, reset and migration.
 
 The node remains present in supplied Pi 4-family device trees, and the pinned
 upstream Linux 7.2 image registers its ``irq_brcmstb_l2`` driver on both
-``raspi4b`` and ``raspi400``.  The unsupported VC4, HVS, pixel-valve, HDMI,
-HDMI DDC, DVP and V3D nodes are removed from the guest tree.  Consequently no
-HDMI source is wired to the controller yet: this model removes a Linux boot
-blocker and provides the interrupt foundation for later HDMI work, but does
-not by itself provide display or CEC emulation.
+``raspi4b`` and ``raspi400``.  The unsupported VC4, HVS, pixel-valve, HDMI
+transmitter and V3D nodes are removed from the guest tree.  DVP and HDMI DDC
+are modeled separately below, but no HDMI or CEC source is wired to this
+interrupt controller yet.  The AON model therefore provides the interrupt
+foundation for later HDMI work, but does not by itself provide display or CEC
+emulation.
+
+HDMI DVP clocks, resets and DDC
+-------------------------------
+
+The HDMI DVP clock/reset controller is mapped at ARM physical address
+``0xfef00000``.  It exposes six software-reset bits and two active-low HDMI
+108 MHz clock gates.  Its reset state uses the firmware-configured idle values
+captured from the project's Pi 400: control ``0x00000200``, software reset
+zero, both clock-disable bits set in miscellaneous configuration, and spare
+``0xffff0000``.  Writes to the implemented fields update named reset and
+clock-enable outputs so later HDMI devices can consume them without changing
+the guest-visible controller contract.
+
+The two HDMI DDC BSC engines are mapped at ``0xfef04500`` and ``0xfef09500``;
+their corresponding auto-I2C ownership windows are at ``0xfef00b00`` and
+``0xfef05b00``.  The model implements the eight 32-bit input and output data
+registers, 32-byte transfer chunks, seven-bit addressed reads and writes,
+START, repeated START, no-START and no-STOP sequencing, ACK/NACK status,
+ignore-ACK mode, clock-control readback and the BCM2711 ownership-release
+operation.  Transfers complete synchronously because the Pi 4 device tree
+supplies no DDC interrupt and Linux uses the controller's polling path.
+
+HDMI0 contains QEMU's standard virtual DDC monitor at address ``0x50``;
+HDMI1 has no target by default and therefore reports NACK, representing a
+disconnected connector.  The virtual EDID is a QEMU display contract, not an
+EDID captured from the project's physical monitor.  Linux 7.2 binds
+``brcm2711-dvp`` and both ``brcmstb-i2c`` instances on ``raspi4b`` and
+``raspi400``.  The acceptance init performs the normal combined pointer-write
+and 128-byte read through ``/dev/i2c-*``, which exercises four hardware-sized
+chunks and validates the EDID header and checksum.
+
+DVP and DDC register state, an open I2C transaction and the attached EDID
+cursor migrate.  Reset closes an active transaction and returns each DDC
+engine to auto-I2C ownership.  Focused qtests cover register masks, reset,
+ownership, ACK/NACK behavior, malformed-length cleanup, chunked EDID access
+and migration in the middle of a repeated-start session.
+
+This is the display service plane, not a native scanout implementation.  The
+combined hardware DTF encodings and ten-bit I2C addressing are not modeled.
+The HVS, pixel valves, HDMI transmitters, HPD, CEC and V3D remain absent, and
+their device-tree nodes stay hidden.  Reading EDID therefore does not create a
+DRM connector or an HDMI picture; visible output still uses the existing
+firmware-configured framebuffer.
 
 Firmware clock and power state
 ------------------------------

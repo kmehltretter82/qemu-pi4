@@ -72,10 +72,13 @@ user-supplied disk image; only that temporary file is modified.
 The runner captures the complete QEMU console and exits successfully only if
 QEMU exits cleanly, the guest prints ``PI4-LAB: upstream Linux boot
 successful``, and Linux reports that it registered the BCM2711 AON L2
-interrupt controller.  The guest also requires two successful target-range
-sector reads in consecutive polling intervals before starting the integrity
-checks; seeing the block device's ``/dev`` node alone is not sufficient
-because Linux can publish it while disk initialization is still in progress.
+interrupt controller.  The initramfs also requires the ``brcm2711-dvp`` and
+both ``brcmstb-i2c`` platform drivers, finds HDMI0 by its adapter identity,
+and validates a complete 128-byte EDID through Linux's ``I2C_RDWR`` path.  The
+guest requires two successful target-range sector reads in consecutive
+polling intervals before starting the storage integrity checks; seeing the
+block device's ``/dev`` node alone is not sufficient because Linux can
+publish it while disk initialization is still in progress.
 
 The initramfs verifies that upstream Linux selected ``iproc-rng200``, obtains
 64 bytes through ``/dev/hwrng``, and reports the modeled 35050-millidegree
@@ -195,6 +198,40 @@ full acceptance run on both ``raspi4b`` and ``raspi400``.  Focused qtests also
 proved bank-local software events, dual-bank physical events, mask and clear
 behavior, held-high edge handling, watchdog reset and migration with asserted
 outputs.
+
+HDMI DVP and DDC reference evidence
+-----------------------------------
+
+A read-only Pi 400 capture on 2026-08-24 used Raspberry Pi OS kernel
+``6.18.39+rpt-rpi-v8``.  Linux had bound ``brcm2711-dvp`` to
+``fef00000.clock``, ``vc4_hdmi`` to both HDMI transmitters, and
+``brcmstb-i2c`` to ``fef04500.i2c`` and ``fef09500.i2c``.  The two DDC
+adapters appeared as ``i2c-20`` and ``i2c-21``.  Both physical connectors were
+reported disconnected.
+
+After normal driver initialization, the DVP words at offsets zero through
+``0x0c`` read ``0x00000200``, zero, ``0x00000018`` and ``0xffff0000``.  Both
+DDC BSC blocks had chip-address value ``0xa0``, count and IIC-enable zero,
+control ``0x90`` for the 97.5 kHz configuration, control-high ``0x40`` for
+32-bit data registers, and zero in the data and SCL-parameter registers.  The
+auto-I2C release action at offset ``0x26c`` read back as zero.
+
+A cleanup-guarded ``i2c-dev`` probe attempted a normal EDID pointer write and
+read at address ``0x50`` on each disconnected adapter.  Both returned
+``EREMOTEIO``, and both controllers returned to the same idle register state.
+The temporary module was removed afterward.  This establishes the observed
+idle readback and disconnected NACK path, but not undocumented HDMI behavior
+or every possible BSC transfer encoding.  The fork's attached HDMI0 EDID is a
+deliberate virtual-monitor default rather than a claim that the physical Pi
+had a monitor connected during capture; HDMI1 retains the captured
+disconnected behavior.
+
+On the emulated side, the pinned Linux 7.2 image bound the DVP and both DDC
+drivers on ``raspi4b`` and ``raspi400``.  Its production ``I2C_RDWR`` path
+successfully performed a pointer write followed by four 32-byte read chunks
+and validated the standard EDID header and checksum.  Focused qtests also
+cover DVP and DDC reset, ownership, ACK/NACK, malformed-command cleanup and
+live migration with a repeated-start session left open.
 
 GPIO reference evidence
 -----------------------

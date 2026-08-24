@@ -96,10 +96,11 @@ QP4-UP-004: unimplemented BCM2711 DT nodes can abort recent Linux guests
   Linux probes these nodes early and can take synchronous external aborts.
   The original compatible-node loop can also miss repeated compatibles after
   nopping a node.
-:Fork change: Model the BCM2711 always-on L2 interrupt controller and keep its
-  node.  Hide every matching unimplemented VC4, HVS, pixel-valve, HDMI, HDMI
-  DDC, DVP and V3D node, and restart each libfdt search after a successful
-  ``fdt_nop_node()``.
+:Fork change: Restart each libfdt search after a successful
+  ``fdt_nop_node()`` and hide device nodes until their MMIO blocks exist.  The
+  fork now models the AON controller, DVP and both HDMI DDC controllers and
+  retains those nodes; the unimplemented VC4, HVS, pixel-valve, HDMI
+  transmitter and V3D nodes remain hidden.
 :Before sending: Capture a short failing Linux console log on unmodified QEMU
   11.1.0, identify the smallest necessary node set, and decide with Raspberry
   Pi maintainers whether setting ``status = "disabled"`` is preferable to
@@ -990,15 +991,16 @@ invent it.
 Known feature gaps, not bug candidates
 --------------------------------------
 
-The absence of V3D 4.2 and HDMI models, the unimplemented BCM2711 PCIe
-controller-event path, and missing Pi 400 consumer-control event production
-are tracked as implementation scope in :doc:`raspi`.  These are upstream
-enhancement opportunities, but should not be described as correctness bugs
-merely because the models or optional behavior do not exist.  The fork's
-GENET v5, BCM2711 PCIe, VL805, RNG200, and AVS thermal models belong in the
-same enhancement category and are tracked above or in :doc:`raspi-lab`.
-Implementing the former RNG200 and thermal gaps in this fork did not uncover a
-separate generic QEMU bug candidate.
+The absence of V3D 4.2 and the native HVS, pixel-valve and HDMI-transmitter
+pipeline, the unimplemented BCM2711 PCIe controller-event path, and missing
+Pi 400 consumer-control event production are tracked as implementation scope
+in :doc:`raspi`.  These are upstream enhancement opportunities, but should
+not be described as correctness bugs merely because the models or optional
+behavior do not exist.  The fork's DVP, HDMI DDC, GENET v5, BCM2711 PCIe,
+VL805, RNG200, and AVS thermal models belong in the same enhancement category
+and are tracked above or in :doc:`raspi-lab`.  Implementing the former RNG200
+and thermal gaps in this fork did not uncover a separate generic QEMU bug
+candidate.
 
 The defects found while reviewing the unmerged July 2026 PCIe series are kept
 in :doc:`raspi-pcie` and intentionally have no ``QP4-UP`` bug IDs.  They are

@@ -73,9 +73,17 @@ also validates PCI identities, USB topology, MSI activity, xHCI
 unbind/rebind recovery, and data integrity on a disposable USB mass-storage
 device on both machines.
 
-The BCM2711 V3D 4.2 graphics accelerator is not implemented.  The current
-display support is a firmware-configured framebuffer, so Raspberry Pi DRM/Mesa
-3D acceleration is unavailable.
+The BCM2711 HDMI service plane includes the DVP clock/reset controller and
+both HDMI DDC I2C engines.  HDMI0 has a standard QEMU virtual monitor at DDC
+address ``0x50``; HDMI1 defaults to disconnected.  The pinned Linux lab binds
+the production ``brcm2711-dvp`` and ``brcmstb-i2c`` drivers and reads a valid
+128-byte EDID through the first controller.  Reset, malformed transfers and
+live migration are covered by focused qtests.
+
+This does not yet implement the HVS, pixel valves, HDMI transmitters or V3D
+4.2 graphics accelerator.  Visible display output remains the
+firmware-configured framebuffer, so Raspberry Pi DRM/Mesa 3D acceleration,
+native HDMI scanout, hot-plug and CEC are unavailable.
 
 Raspberry Pi 5 is not supported. It uses a substantially different BCM2712
 SoC and RP1 I/O controller, neither of which this project currently models.
@@ -114,8 +122,9 @@ machine list contains only ``none``, ``raspi400`` and ``raspi4b``, runs the Pi
 4 qtests, and boots a SHA-256-pinned Raspberry Pi Linux kernel on both board
 models.  The boots check machine identity, usable physical RAM, PCIe/VL805,
 the board-specific USB topology, an external USB-storage transfer, and GENET
-DHCP.  The qtests also exercise GPIO event delivery and migration.  The
-separate Linux 7.2 lab adds xHCI MSI and rebind recovery checks.
+DHCP.  The qtests also exercise GPIO event delivery and HDMI DVP/DDC reset,
+EDID access and migration.  The separate Linux 7.2 lab adds production-driver
+DDC/EDID checks plus xHCI MSI and rebind recovery.
 
 Asset download is deliberately separate from test execution.  From a
 configured focused build directory, populate the content-addressed cache once
