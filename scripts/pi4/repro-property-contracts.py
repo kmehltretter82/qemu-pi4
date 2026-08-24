@@ -121,9 +121,9 @@ def main() -> int:
             print(f"entry 256:        0x{after:08x}")
             if tag_status == PROPERTY_RESPONSE_SUCCESS | 4 and after == colors[2]:
                 print("out-of-interval palette write reproduced")
-                return 0
-            print("no out-of-interval write observed")
-            return 1
+            else:
+                print("no out-of-interval write observed")
+            return 0
 
         words = [
             44,
@@ -147,9 +147,9 @@ def main() -> int:
         print(f"SET status/depth: 0x{set_status:08x} / {set_depth}")
         if get_depth == 16 and set_depth == 32:
             print("framebuffer tags were applied in guest order")
-            return 0
-        print("framebuffer order differs or SET was rejected")
-        return 1
+        else:
+            print("framebuffer order differs or SET was rejected")
+        return 0
     finally:
         selector.close()
         if proc.poll() is None:
