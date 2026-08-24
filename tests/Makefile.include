@@ -137,6 +137,7 @@ precache-pi4:
 
 PI4_NINJA_TARGETS = qemu-system-aarch64 \
 	tests/unit/test-qgraph \
+	tests/qtest/bcm2711-display-test \
 	tests/qtest/bcm2835-cprman-test \
 	tests/qtest/bcm2835-dma-test \
 	tests/qtest/bcm2835-i2c-test \
@@ -158,6 +159,7 @@ check-pi4:
 		qemu:qtest-aarch64/raspi4b-test
 	@$(MESON) test --no-rebuild --print-errorlogs \
 		qemu:test-qgraph \
+		qemu:qtest-aarch64/bcm2711-display-test \
 		qemu:qtest-aarch64/bcm2835-cprman-test \
 		qemu:qtest-aarch64/bcm2835-dma-test \
 		qemu:qtest-aarch64/bcm2835-i2c-test \
