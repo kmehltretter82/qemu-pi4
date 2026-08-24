@@ -23,6 +23,11 @@ AUDIO_SPEC = importlib.util.spec_from_file_location(
 AUDIO_TOOLS = importlib.util.module_from_spec(AUDIO_SPEC)
 AUDIO_SPEC.loader.exec_module(AUDIO_TOOLS)
 
+DISPLAY_SPEC = importlib.util.spec_from_file_location(
+    "pi4_test_display", PI4_SCRIPTS / "test-display.py")
+DISPLAY_TOOLS = importlib.util.module_from_spec(DISPLAY_SPEC)
+DISPLAY_SPEC.loader.exec_module(DISPLAY_TOOLS)
+
 
 class InitramfsTests(unittest.TestCase):
     def test_initramfs_is_deterministic(self):
@@ -213,6 +218,49 @@ class AudioCaptureTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "silent frames"):
                 AUDIO_TOOLS.validate_wav(capture)
+
+
+class DisplayCaptureTests(unittest.TestCase):
+    def write_composited_capture(self, path):
+        width = DISPLAY_TOOLS.DISPLAY_WIDTH
+        height = DISPLAY_TOOLS.DISPLAY_HEIGHT
+        primary = ((248, 0, 0), (0, 252, 0),
+                   (0, 0, 248), (248, 252, 248))
+        overlay = ((0, 252, 0), (0, 0, 248),
+                   (248, 252, 248), (0, 0, 0))
+        row = bytearray()
+
+        for x in range(width):
+            row.extend(primary[(x * 4) // width])
+        pixels = bytearray(row * height)
+        for y in range(200, 600):
+            for x in range(320, 960):
+                quadrant = (2 if y >= 400 else 0) + (x >= 640)
+                offset = (y * width + x) * 3
+                pixels[offset:offset + 3] = bytes(overlay[quadrant])
+        path.write_bytes(
+            f"P6\n{width} {height}\n255\n".encode("ascii") + pixels)
+
+    def test_display_validator_accepts_scaled_overlay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "capture.ppm"
+
+            self.write_composited_capture(capture)
+            DISPLAY_TOOLS.validate_pattern(capture)
+
+    def test_display_validator_rejects_bad_overlay_pixel(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "capture.ppm"
+
+            self.write_composited_capture(capture)
+            contents = bytearray(capture.read_bytes())
+            header_size = contents.index(b"255\n") + len(b"255\n")
+            offset = header_size + (300 * DISPLAY_TOOLS.DISPLAY_WIDTH + 480) * 3
+            contents[offset:offset + 3] = b"\x00\x00\x00"
+            capture.write_bytes(contents)
+            with self.assertRaisesRegex(RuntimeError,
+                                         "green overlay quadrant mismatch"):
+                DISPLAY_TOOLS.validate_pattern(capture)
 
 
 class ShellScriptTests(unittest.TestCase):

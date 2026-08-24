@@ -19,6 +19,7 @@ from pathlib import Path
 DISPLAY_WIDTH = 1280
 DISPLAY_HEIGHT = 800
 PATTERN_MARKER = "VC4 scanout deterministic RGB565 pattern ready"
+OVERLAY_MARKER = "VC4 DRM scaled RGB565 overlay ready"
 SUCCESS_MARKER = "PI4-LAB: upstream Linux boot successful"
 
 
@@ -103,9 +104,12 @@ def console_reader(stream, messages):
 def wait_for_guest(messages, process, timeout):
     deadline = time.monotonic() + timeout
     pattern_ready = False
+    overlay_ready = False
     success = False
 
-    while time.monotonic() < deadline and not (pattern_ready and success):
+    while time.monotonic() < deadline and not (
+        pattern_ready and overlay_ready and success
+    ):
         if process.poll() is not None:
             raise RuntimeError(
                 f"QEMU exited before display readiness ({process.returncode})"
@@ -120,11 +124,17 @@ def wait_for_guest(messages, process, timeout):
             if line.rstrip().endswith("FAIL"):
                 raise RuntimeError("guest failed to write the framebuffer pattern")
             pattern_ready = True
+        if OVERLAY_MARKER in line:
+            if line.rstrip().endswith("FAIL"):
+                raise RuntimeError("guest failed to configure the DRM overlay")
+            overlay_ready = True
         if SUCCESS_MARKER in line:
             success = True
 
     if not pattern_ready:
         raise TimeoutError("guest did not report a ready framebuffer pattern")
+    if not overlay_ready:
+        raise TimeoutError("guest did not report a ready DRM overlay")
     if not success:
         raise RuntimeError("guest display run did not pass the Linux acceptance checks")
 
@@ -157,15 +167,21 @@ def read_ppm(path):
 
 def validate_pattern(path):
     width, _height, pixels = read_ppm(path)
-    samples = (
+    primary_samples = (
         (width // 8, (248, 0, 0), "red"),
         (3 * width // 8, (0, 252, 0), "green"),
         (5 * width // 8, (0, 0, 248), "blue"),
         (7 * width // 8, (248, 252, 248), "white"),
     )
+    overlay_samples = (
+        (480, 300, (0, 252, 0), "green overlay quadrant"),
+        (800, 300, (0, 0, 248), "blue overlay quadrant"),
+        (480, 500, (248, 252, 248), "white overlay quadrant"),
+        (800, 500, (0, 0, 0), "black overlay quadrant"),
+    )
 
-    for y in (100, DISPLAY_HEIGHT // 2, DISPLAY_HEIGHT - 100):
-        for x, expected, name in samples:
+    for y in (100, DISPLAY_HEIGHT - 100):
+        for x, expected, name in primary_samples:
             offset = (y * width + x) * 3
             actual = tuple(pixels[offset : offset + 3])
             if any(abs(got - want) > 7 for got, want in zip(actual, expected)):
@@ -173,6 +189,15 @@ def validate_pattern(path):
                     f"{name} band mismatch at ({x}, {y}): "
                     f"got {actual}, expected approximately {expected}"
                 )
+
+    for x, y, expected, name in overlay_samples:
+        offset = (y * width + x) * 3
+        actual = tuple(pixels[offset : offset + 3])
+        if any(abs(got - want) > 7 for got, want in zip(actual, expected)):
+            raise RuntimeError(
+                f"{name} mismatch at ({x}, {y}): "
+                f"got {actual}, expected approximately {expected}"
+            )
 
 
 def main():
@@ -257,7 +282,7 @@ def main():
             validate_pattern(screenshot)
             print(
                 f"PI4-DISPLAY: {args.machine} native 1280x800 "
-                "RGB565 scanout verified"
+                "RGB565 primary plus scaled overlay verified"
             )
             if args.output:
                 args.output.parent.mkdir(parents=True, exist_ok=True)

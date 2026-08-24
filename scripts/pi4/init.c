@@ -69,6 +69,133 @@
 #define HDMI_AUDIO_RIGHT_PERIOD 24
 #define HDMI_AUDIO_LEFT_AMPLITUDE 0x400000
 #define HDMI_AUDIO_RIGHT_AMPLITUDE 0x200000
+#define DRM_OVERLAY_SOURCE_WIDTH 320
+#define DRM_OVERLAY_SOURCE_HEIGHT 200
+#define DRM_OVERLAY_DEST_X 320
+#define DRM_OVERLAY_DEST_Y 200
+#define DRM_OVERLAY_DEST_WIDTH 640
+#define DRM_OVERLAY_DEST_HEIGHT 400
+
+/* Minimal DRM/KMS UAPI subset used by the pinned Linux acceptance guest. */
+#define PI4_DRM_CLIENT_CAP_UNIVERSAL_PLANES 2
+#define PI4_DRM_FOURCC_CODE(a, b, c, d) \
+    ((uint32_t)(a) | ((uint32_t)(b) << 8) | \
+     ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
+#define PI4_DRM_FORMAT_RGB565 PI4_DRM_FOURCC_CODE('R', 'G', '1', '6')
+
+struct pi4_drm_set_client_cap {
+    uint64_t capability;
+    uint64_t value;
+};
+
+struct pi4_drm_mode_get_plane_res {
+    uint64_t plane_id_ptr;
+    uint32_t count_planes;
+};
+
+struct pi4_drm_mode_get_plane {
+    uint32_t plane_id;
+    uint32_t crtc_id;
+    uint32_t fb_id;
+    uint32_t possible_crtcs;
+    uint32_t gamma_size;
+    uint32_t count_format_types;
+    uint64_t format_type_ptr;
+};
+
+struct pi4_drm_mode_create_dumb {
+    uint32_t height;
+    uint32_t width;
+    uint32_t bpp;
+    uint32_t flags;
+    uint32_t handle;
+    uint32_t pitch;
+    uint64_t size;
+};
+
+struct pi4_drm_mode_map_dumb {
+    uint32_t handle;
+    uint32_t pad;
+    uint64_t offset;
+};
+
+struct pi4_drm_mode_destroy_dumb {
+    uint32_t handle;
+};
+
+struct pi4_drm_mode_fb_cmd2 {
+    uint32_t fb_id;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pixel_format;
+    uint32_t flags;
+    uint32_t handles[4];
+    uint32_t pitches[4];
+    uint32_t offsets[4];
+    uint64_t modifier[4];
+};
+
+struct pi4_drm_mode_set_plane {
+    uint32_t plane_id;
+    uint32_t crtc_id;
+    uint32_t fb_id;
+    uint32_t flags;
+    int32_t crtc_x;
+    int32_t crtc_y;
+    uint32_t crtc_w;
+    uint32_t crtc_h;
+    uint32_t src_x;
+    uint32_t src_y;
+    uint32_t src_h;
+    uint32_t src_w;
+};
+
+_Static_assert(sizeof(struct pi4_drm_set_client_cap) == 16,
+               "DRM client-cap UAPI size");
+_Static_assert(sizeof(struct pi4_drm_mode_get_plane_res) == 16,
+               "DRM plane-resource UAPI size");
+_Static_assert(sizeof(struct pi4_drm_mode_get_plane) == 32,
+               "DRM get-plane UAPI size");
+_Static_assert(sizeof(struct pi4_drm_mode_create_dumb) == 32,
+               "DRM create-dumb UAPI size");
+_Static_assert(sizeof(struct pi4_drm_mode_map_dumb) == 16,
+               "DRM map-dumb UAPI size");
+_Static_assert(sizeof(struct pi4_drm_mode_destroy_dumb) == 4,
+               "DRM destroy-dumb UAPI size");
+_Static_assert(sizeof(struct pi4_drm_mode_fb_cmd2) == 104,
+               "DRM addfb2 UAPI size");
+_Static_assert(sizeof(struct pi4_drm_mode_set_plane) == 48,
+               "DRM set-plane UAPI size");
+
+#define PI4_DRM_IOCTL_SET_CLIENT_CAP \
+    _IOW('d', 0x0d, struct pi4_drm_set_client_cap)
+#define PI4_DRM_IOCTL_MODE_RMFB _IOWR('d', 0xaf, uint32_t)
+#define PI4_DRM_IOCTL_MODE_CREATE_DUMB \
+    _IOWR('d', 0xb2, struct pi4_drm_mode_create_dumb)
+#define PI4_DRM_IOCTL_MODE_MAP_DUMB \
+    _IOWR('d', 0xb3, struct pi4_drm_mode_map_dumb)
+#define PI4_DRM_IOCTL_MODE_DESTROY_DUMB \
+    _IOWR('d', 0xb4, struct pi4_drm_mode_destroy_dumb)
+#define PI4_DRM_IOCTL_MODE_GETPLANERESOURCES \
+    _IOWR('d', 0xb5, struct pi4_drm_mode_get_plane_res)
+#define PI4_DRM_IOCTL_MODE_GETPLANE \
+    _IOWR('d', 0xb6, struct pi4_drm_mode_get_plane)
+#define PI4_DRM_IOCTL_MODE_SETPLANE \
+    _IOWR('d', 0xb7, struct pi4_drm_mode_set_plane)
+#define PI4_DRM_IOCTL_MODE_ADDFB2 \
+    _IOWR('d', 0xb8, struct pi4_drm_mode_fb_cmd2)
+
+struct drm_overlay_state {
+    int fd;
+    void *mapping;
+    size_t mapping_size;
+    uint32_t handle;
+    uint32_t framebuffer_id;
+};
+
+static struct drm_overlay_state drm_overlay = {
+    .fd = -1,
+};
 
 static void mount_fs(const char *source, const char *target,
                      const char *filesystem)
@@ -233,6 +360,253 @@ static int write_framebuffer_pattern(void)
     /* Let QEMU's display refresh timer consume the dirty guest pages. */
     usleep(500000);
     return 0;
+}
+
+static int get_drm_plane(int fd, uint32_t plane_id,
+                         struct pi4_drm_mode_get_plane *plane,
+                         uint32_t **formats)
+{
+    uint32_t format_capacity;
+    uint32_t *values;
+
+    memset(plane, 0, sizeof(*plane));
+    plane->plane_id = plane_id;
+    if (ioctl(fd, PI4_DRM_IOCTL_MODE_GETPLANE, plane)) {
+        return -1;
+    }
+    if (!formats) {
+        return 0;
+    }
+
+    *formats = NULL;
+    format_capacity = plane->count_format_types;
+    if (!format_capacity) {
+        return 0;
+    }
+    values = calloc(format_capacity, sizeof(*values));
+    if (!values) {
+        return -1;
+    }
+    plane->format_type_ptr = (uint64_t)(uintptr_t)values;
+    if (ioctl(fd, PI4_DRM_IOCTL_MODE_GETPLANE, plane)) {
+        free(values);
+        return -1;
+    }
+    if (plane->count_format_types > format_capacity) {
+        free(values);
+        errno = EOVERFLOW;
+        return -1;
+    }
+    *formats = values;
+    return 0;
+}
+
+static int setup_drm_overlay_pattern(void)
+{
+    static const uint16_t colors[2][2] = {
+        { 0x07e0, 0x001f }, /* green, blue */
+        { 0xffff, 0x0000 }, /* white, black */
+    };
+    struct pi4_drm_set_client_cap client_cap = {
+        .capability = PI4_DRM_CLIENT_CAP_UNIVERSAL_PLANES,
+        .value = 1,
+    };
+    struct pi4_drm_mode_get_plane_res resources = { 0 };
+    struct pi4_drm_mode_get_plane plane;
+    struct pi4_drm_mode_create_dumb create = {
+        .height = DRM_OVERLAY_SOURCE_HEIGHT,
+        .width = DRM_OVERLAY_SOURCE_WIDTH,
+        .bpp = 16,
+    };
+    struct pi4_drm_mode_map_dumb map = { 0 };
+    struct pi4_drm_mode_fb_cmd2 framebuffer = {
+        .width = DRM_OVERLAY_SOURCE_WIDTH,
+        .height = DRM_OVERLAY_SOURCE_HEIGHT,
+        .pixel_format = PI4_DRM_FORMAT_RGB565,
+    };
+    struct pi4_drm_mode_set_plane set_plane = {
+        .crtc_x = DRM_OVERLAY_DEST_X,
+        .crtc_y = DRM_OVERLAY_DEST_Y,
+        .crtc_w = DRM_OVERLAY_DEST_WIDTH,
+        .crtc_h = DRM_OVERLAY_DEST_HEIGHT,
+        .src_w = DRM_OVERLAY_SOURCE_WIDTH << 16,
+        .src_h = DRM_OVERLAY_SOURCE_HEIGHT << 16,
+    };
+    struct pi4_drm_mode_destroy_dumb destroy = { 0 };
+    const char *stage = "opening DRM card0";
+    uint32_t *plane_ids = NULL;
+    uint32_t *formats = NULL;
+    uint32_t plane_capacity;
+    uint32_t active_crtc = 0;
+    uint32_t active_crtc_mask = 0;
+    uint32_t overlay_plane = 0;
+    void *mapping = MAP_FAILED;
+    int fd = -1;
+    int saved_errno;
+
+    fd = open(DRM_CARD_PATH, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        goto fail;
+    }
+
+    stage = "enabling universal planes";
+    if (ioctl(fd, PI4_DRM_IOCTL_SET_CLIENT_CAP, &client_cap)) {
+        goto fail;
+    }
+
+    stage = "querying plane count";
+    if (ioctl(fd, PI4_DRM_IOCTL_MODE_GETPLANERESOURCES, &resources) ||
+        !resources.count_planes) {
+        if (!errno) {
+            errno = ENODEV;
+        }
+        goto fail;
+    }
+    plane_capacity = resources.count_planes;
+    plane_ids = calloc(plane_capacity, sizeof(*plane_ids));
+    if (!plane_ids) {
+        goto fail;
+    }
+    resources.plane_id_ptr = (uint64_t)(uintptr_t)plane_ids;
+    stage = "reading plane identifiers";
+    if (ioctl(fd, PI4_DRM_IOCTL_MODE_GETPLANERESOURCES, &resources)) {
+        goto fail;
+    }
+    if (resources.count_planes > plane_capacity) {
+        errno = EOVERFLOW;
+        goto fail;
+    }
+
+    stage = "finding the active CRTC";
+    for (uint32_t index = 0; index < resources.count_planes; index++) {
+        if (get_drm_plane(fd, plane_ids[index], &plane, NULL)) {
+            goto fail;
+        }
+        if (plane.crtc_id && plane.fb_id) {
+            active_crtc = plane.crtc_id;
+            active_crtc_mask = plane.possible_crtcs;
+            break;
+        }
+    }
+    if (!active_crtc || !active_crtc_mask ||
+        (active_crtc_mask & (active_crtc_mask - 1))) {
+        errno = ENODEV;
+        goto fail;
+    }
+
+    stage = "finding an RGB565 overlay plane";
+    for (uint32_t index = 0; index < resources.count_planes; index++) {
+        int supports_rgb565 = 0;
+
+        free(formats);
+        formats = NULL;
+        if (get_drm_plane(fd, plane_ids[index], &plane, &formats)) {
+            goto fail;
+        }
+        if (plane.crtc_id || plane.fb_id ||
+            !(plane.possible_crtcs & active_crtc_mask)) {
+            continue;
+        }
+        for (uint32_t format = 0;
+             format < plane.count_format_types; format++) {
+            if (formats[format] == PI4_DRM_FORMAT_RGB565) {
+                supports_rgb565 = 1;
+                break;
+            }
+        }
+        if (supports_rgb565) {
+            overlay_plane = plane.plane_id;
+            break;
+        }
+    }
+    if (!overlay_plane) {
+        errno = ENODEV;
+        goto fail;
+    }
+
+    stage = "creating the dumb buffer";
+    if (ioctl(fd, PI4_DRM_IOCTL_MODE_CREATE_DUMB, &create)) {
+        goto fail;
+    }
+    destroy.handle = create.handle;
+    if (create.pitch < DRM_OVERLAY_SOURCE_WIDTH * sizeof(uint16_t) ||
+        create.size < (uint64_t)create.pitch * DRM_OVERLAY_SOURCE_HEIGHT) {
+        errno = EOVERFLOW;
+        goto fail;
+    }
+
+    framebuffer.handles[0] = create.handle;
+    framebuffer.pitches[0] = create.pitch;
+    stage = "registering the overlay framebuffer";
+    if (ioctl(fd, PI4_DRM_IOCTL_MODE_ADDFB2, &framebuffer)) {
+        goto fail;
+    }
+
+    map.handle = create.handle;
+    stage = "mapping the dumb buffer";
+    if (ioctl(fd, PI4_DRM_IOCTL_MODE_MAP_DUMB, &map)) {
+        goto fail;
+    }
+    mapping = mmap(NULL, (size_t)create.size, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, (off_t)map.offset);
+    if (mapping == MAP_FAILED) {
+        goto fail;
+    }
+    for (uint32_t y = 0; y < DRM_OVERLAY_SOURCE_HEIGHT; y++) {
+        uint16_t *row = (uint16_t *)((uint8_t *)mapping +
+                                     (size_t)y * create.pitch);
+
+        for (uint32_t x = 0; x < DRM_OVERLAY_SOURCE_WIDTH; x++) {
+            row[x] = colors[y >= DRM_OVERLAY_SOURCE_HEIGHT / 2]
+                           [x >= DRM_OVERLAY_SOURCE_WIDTH / 2];
+        }
+    }
+    set_plane.plane_id = overlay_plane;
+    set_plane.crtc_id = active_crtc;
+    set_plane.fb_id = framebuffer.fb_id;
+    stage = "attaching the scaled overlay plane";
+    if (ioctl(fd, PI4_DRM_IOCTL_MODE_SETPLANE, &set_plane)) {
+        goto fail;
+    }
+
+    printf("PI4-LAB: DRM plane %u on CRTC %u scales %ux%u to "
+           "%ux%u at (%u,%u), pitch %u\n",
+           overlay_plane, active_crtc,
+           DRM_OVERLAY_SOURCE_WIDTH, DRM_OVERLAY_SOURCE_HEIGHT,
+           DRM_OVERLAY_DEST_WIDTH, DRM_OVERLAY_DEST_HEIGHT,
+           DRM_OVERLAY_DEST_X, DRM_OVERLAY_DEST_Y, create.pitch);
+
+    /* Retain every object and the DRM master until the host takes its dump. */
+    drm_overlay.fd = fd;
+    drm_overlay.mapping = mapping;
+    drm_overlay.mapping_size = (size_t)create.size;
+    drm_overlay.handle = create.handle;
+    drm_overlay.framebuffer_id = framebuffer.fb_id;
+    free(formats);
+    free(plane_ids);
+    usleep(500000);
+    return 0;
+
+fail:
+    saved_errno = errno ? errno : EIO;
+    if (mapping != MAP_FAILED) {
+        munmap(mapping, (size_t)create.size);
+    }
+    if (fd >= 0 && framebuffer.fb_id) {
+        ioctl(fd, PI4_DRM_IOCTL_MODE_RMFB, &framebuffer.fb_id);
+    }
+    if (fd >= 0 && destroy.handle) {
+        ioctl(fd, PI4_DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+    free(formats);
+    free(plane_ids);
+    fprintf(stderr, "pi4-lab: DRM overlay failed while %s: %s\n",
+            stage, strerror(saved_errno));
+    errno = saved_errno;
+    return -1;
 }
 
 static int pci_identity_present(const char *bdf, const char *vendor,
@@ -1474,8 +1848,13 @@ int main(void)
     dump_file("/proc/interrupts");
 
     if (display_test) {
+        int pattern_failed = write_framebuffer_pattern();
+
         report_check("VC4 scanout deterministic RGB565 pattern ready",
-                     write_framebuffer_pattern(), &failures);
+                     pattern_failed, &failures);
+        report_check("VC4 DRM scaled RGB565 overlay ready",
+                     pattern_failed || setup_drm_overlay_pattern(),
+                     &failures);
     }
 
     if (failures) {
