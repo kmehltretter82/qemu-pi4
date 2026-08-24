@@ -86,6 +86,7 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define V3D_OFFSET              0xc00000
 #define SDRAMC_OFFSET           0xe00000
 #define DMA15_OFFSET            0xE05000 /* DMA controller, channel 15 */
+#define AON_INTR_OFFSET         0xF00100 /* Always-on HDMI L2 interrupts */
 
 /* GPU interrupts */
 #define INTERRUPT_TIMER0               0

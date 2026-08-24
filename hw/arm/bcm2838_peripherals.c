@@ -100,6 +100,10 @@ static void bcm2838_peripherals_init(Object *obj)
     object_initialize_child(obj, "pcie", &s->pcie,
                             TYPE_BCM2711_PCIE_HOST);
 
+    /* BCM2711 always-on HDMI interrupt controller */
+    object_initialize_child(obj, "aon-intr", &s->aon_intr,
+                            TYPE_BCM2838_AON_INTR);
+
     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhci",
                                    OBJECT(&s_base->sdhci.sdbus));
     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhost",
@@ -269,6 +273,14 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(
         &s_base->peri_mr, GPIO_OFFSET,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpio), 0));
+
+    /* Always-on HDMI L2 interrupt controller */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->aon_intr), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s_base->peri_mr, AON_INTR_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->aon_intr), 0));
 
     /* RNG200 random number generator */
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->rng200), errp)) {

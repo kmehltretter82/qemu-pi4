@@ -12,6 +12,7 @@
 #include "hw/arm/bcm2835_peripherals.h"
 #include "hw/sd/sdhci.h"
 #include "hw/gpio/bcm2838_gpio.h"
+#include "hw/intc/bcm2838_aon_intr.h"
 #include "hw/misc/bcm2838_rng200.h"
 #include "hw/misc/bcm2838_thermal.h"
 #include "hw/net/bcm2838_genet.h"
@@ -28,6 +29,7 @@
 #define GIC_SPI_INTERRUPT_DMA_7_8      87
 #define GIC_SPI_INTERRUPT_DMA_9_10     88
 #define GIC_SPI_INTERRUPT_AUX_UART1    93
+#define GIC_SPI_INTERRUPT_AON          96
 #define GIC_SPI_INTERRUPT_GPIO_0       113
 #define GIC_SPI_INTERRUPT_GPIO_ALL     116
 #define GIC_SPI_INTERRUPT_I2C          117
@@ -86,6 +88,7 @@ struct BCM2838PeripheralState {
     BCM2838GenetState genet;
     BCM2711PcieHostState pcie;
     BCM2835PWMState pwm1;
+    BCM2838AonIntrState aon_intr;
 
     OrIRQState mmc_irq_orgate;
     OrIRQState dma_7_8_irq_orgate;

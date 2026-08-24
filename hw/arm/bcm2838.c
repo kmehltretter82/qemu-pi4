@@ -219,6 +219,10 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->aux), 0,
                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_AUX_UART1));
 
+    /* Connect the AON L2 CPU output; its PCI destination is not wired here. */
+    sysbus_connect_irq(SYS_BUS_DEVICE(&ps->aon_intr), 0,
+                       qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_AON));
+
     /* Connect the I2C interrupt to the interrupt controller */
     qdev_connect_gpio_out(DEVICE(&ps_base->orgated_i2c_irq_splitter), 1,
                           qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_I2C));

@@ -70,10 +70,19 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
     uint64_t ram_size;
     uint64_t upper_end;
 
-    /* Temporarily disable following devices until they are implemented */
+    /* Temporarily disable following devices until they are implemented. */
     const char *nodes_to_remove[] = {
-        "brcm,bcm2711-l2-intc",
+        "brcm,bcm2711-vc5",
+        "brcm,bcm2711-hvs",
+        "brcm,bcm2711-pixelvalve0",
+        "brcm,bcm2711-pixelvalve1",
+        "brcm,bcm2711-pixelvalve2",
+        "brcm,bcm2711-pixelvalve3",
+        "brcm,bcm2711-pixelvalve4",
+        "brcm,bcm2711-hdmi0",
+        "brcm,bcm2711-hdmi1",
         "brcm,bcm2711-hdmi-i2c",
+        "brcm,brcm2711-dvp",
         "brcm,2711-v3d",
     };
 
