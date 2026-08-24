@@ -30,6 +30,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(BCM2835OTPState, BCM2835_OTP)
 #define BCM2835_OTP_INIT_STATUS_REG                      0x24
 
 
+/* Factory-programmed board identity rows. */
+#define BCM2835_OTP_SERIAL_NUMBER                          28
+#define BCM2835_OTP_SERIAL_NUMBER_INVERTED                 29
+#define BCM2835_OTP_BOARD_REVISION                         30
+
 /* -- Row 32: Undocumented -- */
 
 #define BCM2835_OTP_ROW_32                                 32
@@ -64,5 +69,7 @@ struct BCM2835OTPState {
 
 uint32_t bcm2835_otp_get_row(BCM2835OTPState *s, unsigned int row);
 void bcm2835_otp_set_row(BCM2835OTPState *s, unsigned int row, uint32_t value);
+void bcm2835_otp_set_board_identity(BCM2835OTPState *s,
+                                    uint32_t serial, uint32_t revision);
 
 #endif

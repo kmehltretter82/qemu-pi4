@@ -36,6 +36,7 @@ struct BCM2835PropertyState {
 
     MACAddr macaddr;
     uint32_t board_rev;
+    uint32_t board_serial;
     uint32_t dma_channels;
     bool has_vl805;
     uint32_t addr;

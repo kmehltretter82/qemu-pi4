@@ -22,6 +22,7 @@
 #define VCHI_BUSADDR_SIZE       sizeof(uint32_t)
 #define RPI_EXP_GPIO_BASE       128
 #define RPI4_VL805_PCI_DEV_ADDR (1U << 20)
+#define RPI_FIRMWARE_DEFAULT_BOARD_SERIAL 0x51454d55
 
 #define RPI_FW_DOMAIN_DEFAULTS \
     (BIT(RPI_FIRMWARE_VIDEO_SCALER_DOMAIN_ID) | \
@@ -133,7 +134,12 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
             resplen = 4;
             break;
         case RPI_FWREQ_GET_BOARD_REVISION:
-            stl_le_phys(&s->dma_as, value + 12, s->board_rev);
+            if (bufsize < sizeof(uint32_t)) {
+                break;
+            }
+            stl_le_phys(&s->dma_as, value + 12,
+                        bcm2835_otp_get_row(s->otp,
+                                            BCM2835_OTP_BOARD_REVISION));
             resplen = 4;
             break;
         case RPI_FWREQ_GET_BOARD_MAC_ADDRESS:
@@ -142,9 +148,12 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
                              MEMTXATTRS_UNSPECIFIED);
             break;
         case RPI_FWREQ_GET_BOARD_SERIAL:
-            qemu_log_mask(LOG_UNIMP,
-                          "bcm2835_property: 0x%08x get board serial NYI\n",
-                          tag);
+            if (bufsize < sizeof(uint64_t)) {
+                break;
+            }
+            stq_le_phys(&s->dma_as, value + 12,
+                        bcm2835_otp_get_row(s->otp,
+                                            BCM2835_OTP_SERIAL_NUMBER));
             resplen = 8;
             break;
         case RPI_FWREQ_GET_ARM_MEMORY:
@@ -823,6 +832,7 @@ static void bcm2835_property_realize(DeviceState *dev, Error **errp)
 
     obj = object_property_get_link(OBJECT(dev), "otp", &error_abort);
     s->otp = BCM2835_OTP(obj);
+    bcm2835_otp_set_board_identity(s->otp, s->board_serial, s->board_rev);
 
     /* TODO: connect to MAC address of USB NIC device, once we emulate it */
     qemu_macaddr_default_if_unset(&s->macaddr);
@@ -832,6 +842,8 @@ static void bcm2835_property_realize(DeviceState *dev, Error **errp)
 
 static const Property bcm2835_property_props[] = {
     DEFINE_PROP_UINT32("board-rev", BCM2835PropertyState, board_rev, 0),
+    DEFINE_PROP_UINT32("board-serial", BCM2835PropertyState, board_serial,
+                       RPI_FIRMWARE_DEFAULT_BOARD_SERIAL),
     DEFINE_PROP_UINT32("dma-channels", BCM2835PropertyState, dma_channels,
                        0x003c),
     DEFINE_PROP_BOOL("has-vl805", BCM2835PropertyState, has_vl805, false),

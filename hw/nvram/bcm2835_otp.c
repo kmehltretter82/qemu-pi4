@@ -25,12 +25,20 @@ uint32_t bcm2835_otp_get_row(BCM2835OTPState *s, unsigned int row)
 }
 
 void bcm2835_otp_set_row(BCM2835OTPState *s, unsigned int row,
-                           uint32_t value)
+                         uint32_t value)
 {
     assert(row <= BCM2835_OTP_ROW_COUNT && row >= 1);
 
     /* Real OTP rows work as e-fuses */
     s->otp_rows[row - 1] |= value;
+}
+
+void bcm2835_otp_set_board_identity(BCM2835OTPState *s,
+                                    uint32_t serial, uint32_t revision)
+{
+    bcm2835_otp_set_row(s, BCM2835_OTP_SERIAL_NUMBER, serial);
+    bcm2835_otp_set_row(s, BCM2835_OTP_SERIAL_NUMBER_INVERTED, ~serial);
+    bcm2835_otp_set_row(s, BCM2835_OTP_BOARD_REVISION, revision);
 }
 
 static uint64_t bcm2835_otp_read(void *opaque, hwaddr addr, unsigned size)
