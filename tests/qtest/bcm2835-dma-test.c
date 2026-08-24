@@ -240,7 +240,7 @@ static void bcm2835_dma_test_dreq_and_width(void)
     qtest_set_irq_in(global_qtest, RASPI4_DMA_QOM_PATH, "dreq", 2, 1);
     g_assert_cmphex(readl(dma_base + BCM2708_DMA_CS) & BCM2708_DMA_DREQ,
                     ==, BCM2708_DMA_DREQ);
-    clock_step(1000);
+    /* A rising request executes one bounded slice immediately. */
     for (offset = 0; offset < 1024; offset += sizeof(uint32_t)) {
         g_assert_cmphex(readl(dest + offset), ==, check_data + offset);
     }
@@ -294,6 +294,36 @@ static void bcm2835_dma_test_dreq_zero_is_permanent(void)
     writel(dma_base + BCM2708_DMA_CS, BCM2708_DMA_RESET);
 }
 
+static void bcm2835_dma_test_stopped_dreq_waits(void)
+{
+    const uint64_t dma_base = RASPI4_DMA_BASE + 5 * 0x100;
+    const uint32_t cb = 0x1000;
+    const uint32_t source = 0x2000;
+    const uint32_t dest = 0x3000;
+    const uint32_t ti = BCM2708_DMA_D_DREQ | BCM2708_DMA_PERMAP(2);
+
+    writel(dma_base + BCM2708_DMA_CS, BCM2708_DMA_RESET);
+    qtest_set_irq_in(global_qtest, RASPI4_DMA_QOM_PATH, "dreq", 2, 0);
+    bcm2835_dma_write_cb(cb, ti, source, dest, sizeof(uint32_t), 0);
+    writel(source, check_data);
+    writel(dest, 0);
+    writel(dma_base + BCM2708_DMA_ADDR, cb);
+    writel(dma_base + BCM2708_DMA_CS, BCM2708_DMA_ACTIVE);
+
+    qtest_qmp_assert_success(global_qtest, "{ 'execute': 'stop' }");
+    qtest_set_irq_in(global_qtest, RASPI4_DMA_QOM_PATH, "dreq", 2, 1);
+    g_assert_cmphex(readl(dest), ==, 0);
+    g_assert_true(readl(dma_base + BCM2708_DMA_CS) & BCM2708_DMA_ACTIVE);
+
+    qtest_qmp_assert_success(global_qtest, "{ 'execute': 'cont' }");
+    clock_step(1000);
+    g_assert_cmphex(readl(dest), ==, check_data);
+    g_assert_true(readl(dma_base + BCM2708_DMA_CS) & BCM2708_DMA_END);
+
+    qtest_set_irq_in(global_qtest, RASPI4_DMA_QOM_PATH, "dreq", 2, 0);
+    writel(dma_base + BCM2708_DMA_CS, BCM2708_DMA_RESET);
+}
+
 static void bcm2835_dma_test_unaligned_bytes(void)
 {
     const uint64_t dma_base = RASPI4_DMA_BASE + 5 * 0x100;
@@ -341,6 +371,8 @@ int main(int argc, char **argv)
                    bcm2835_dma_test_dreq_and_width);
     qtest_add_func("/bcm2835/dma/dreq_zero_is_permanent",
                    bcm2835_dma_test_dreq_zero_is_permanent);
+    qtest_add_func("/bcm2835/dma/stopped_dreq_waits",
+                   bcm2835_dma_test_stopped_dreq_waits);
     qtest_add_func("/bcm2835/dma/unaligned_bytes",
                    bcm2835_dma_test_unaligned_bytes);
     qtest_start("-machine raspi4b");

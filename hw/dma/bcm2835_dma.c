@@ -13,6 +13,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "system/dma.h"
+#include "system/runstate.h"
 
 /* DMA CS Control and Status bits */
 #define BCM2708_DMA_ACTIVE      (1 << 0)
@@ -324,7 +325,18 @@ static void bcm2835_dma_set_dreq(void *opaque, int n, int level)
 
         if (level) {
             ch->cs &= ~BCM2708_DMA_ISHELD;
-            bcm2835_dma_schedule(ch);
+            /*
+             * A DREQ edge is already a hardware pacing point.  Service one
+             * bounded slice immediately so a streaming peripheral can refill
+             * inside its catch-up batch.  Persistent requests still yield via
+             * the channel timer when the slice budget is exhausted.
+             */
+            if (runstate_is_running()) {
+                bcm2835_dma_update(s, c);
+            } else {
+                /* Do not mutate guest memory while the VM is stopped. */
+                bcm2835_dma_schedule(ch);
+            }
         } else {
             timer_del(ch->timer);
             ch->cs &= ~BCM2708_DMA_ISPAUSED;
