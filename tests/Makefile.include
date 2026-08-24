@@ -145,11 +145,17 @@ PI4_NINJA_TARGETS = qemu-system-aarch64 \
 	tests/qtest/raspi400-test \
 	tests/qtest/raspi4b-test \
 	tests/qtest/qos-test
+
+# raspi4b-test repeatedly allocates a 2 GiB guest.  Meson's random malloc
+# perturbation physically dirties each allocation and can make the host kill
+# QEMU for memory pressure; keep perturbation on for every other test.
 .PHONY: check-pi4
 check-pi4:
 	+$(MAKE) $(PI4_NINJA_TARGETS)
 	@$(PYTHON) "$(SRC_PATH)/scripts/check-pi4-machines.py" \
 		"$(BUILD_DIR)/qemu-system-aarch64"
+	@env MALLOC_PERTURB_=0 $(MESON) test --no-rebuild --print-errorlogs \
+		qemu:qtest-aarch64/raspi4b-test
 	@$(MESON) test --no-rebuild --print-errorlogs \
 		qemu:test-qgraph \
 		qemu:qtest-aarch64/bcm2835-cprman-test \
@@ -158,7 +164,6 @@ check-pi4:
 		qemu:qtest-aarch64/bcm2835-i2s-test \
 		qemu:qtest-aarch64/bcm2835-pwm-test \
 		qemu:qtest-aarch64/raspi400-test \
-		qemu:qtest-aarch64/raspi4b-test \
 		qemu:qtest-aarch64/qos-test
 	@QEMU_TEST_QEMU_BINARY="$(BUILD_DIR)/qemu-system-aarch64" \
 	 QEMU_TEST_CACHE_DIR="$(PI4_TEST_CACHE_DIR)" \
