@@ -58,6 +58,26 @@
 #define RASPI4_DWC2_REG(_reg)     (RASPI4_DWC2_BASE + (_reg))
 #define RASPI4_DWC2_GIC_IRQ       73
 
+#define RASPI4_AON_BASE            0xfef00100
+#define RASPI4_AON_CPU_STATUS      (RASPI4_AON_BASE + 0x00)
+#define RASPI4_AON_CPU_SET         (RASPI4_AON_BASE + 0x04)
+#define RASPI4_AON_CPU_CLEAR       (RASPI4_AON_BASE + 0x08)
+#define RASPI4_AON_CPU_MASK_STATUS (RASPI4_AON_BASE + 0x0c)
+#define RASPI4_AON_CPU_MASK_SET    (RASPI4_AON_BASE + 0x10)
+#define RASPI4_AON_CPU_MASK_CLEAR  (RASPI4_AON_BASE + 0x14)
+#define RASPI4_AON_PCI_STATUS      (RASPI4_AON_BASE + 0x18)
+#define RASPI4_AON_PCI_SET         (RASPI4_AON_BASE + 0x1c)
+#define RASPI4_AON_PCI_CLEAR       (RASPI4_AON_BASE + 0x20)
+#define RASPI4_AON_PCI_MASK_STATUS (RASPI4_AON_BASE + 0x24)
+#define RASPI4_AON_PCI_MASK_SET    (RASPI4_AON_BASE + 0x28)
+#define RASPI4_AON_PCI_MASK_CLEAR  (RASPI4_AON_BASE + 0x2c)
+#define RASPI4_AON_QOM_PATH        "/machine/soc/peripherals/aon-intr"
+#define RASPI4_AON_GIC_IRQ         96
+#define AON_VALID_MASK             0x00000fffU
+#define RASPI4_GIC_ISPENDR4        0xff841210
+#define GIC_PENDING_GPIO_IRQ1      (1U << 18)
+#define GIC_PENDING_GPIO_ALL       (1U << 20)
+
 #define RASPI4_SPI0_BASE          0xfe204000
 #define RASPI4_SPI0_CS            RASPI4_SPI0_BASE
 #define RASPI4_SPI0_GIC_IRQ       118
@@ -626,6 +646,111 @@ static void raspi4b_watchdog_reset(void)
            RASPI4_PM_PASSWORD | RASPI4_PM_RSTC_FULL);
     qtest_clock_step(global_qtest, NANOSECONDS_PER_SECOND);
     qtest_qmp_eventwait(global_qtest, "RESET");
+}
+
+static void aon_set_input_qtest(QTestState *qts, unsigned int line, int level)
+{
+    qtest_set_irq_in(qts, RASPI4_AON_QOM_PATH, NULL, line, level);
+}
+
+static void aon_set_input(unsigned int line, int level)
+{
+    aon_set_input_qtest(global_qtest, line, level);
+}
+
+static void test_aon_interrupts_and_reset(void)
+{
+    const uint32_t line1 = 1U << 1;
+    const uint32_t line2 = 1U << 2;
+    const uint32_t line4 = 1U << 4;
+
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_MASK_STATUS), ==,
+                    AON_VALID_MASK);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_STATUS), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_MASK_STATUS), ==,
+                    AON_VALID_MASK);
+    g_assert_false(get_irq(RASPI4_AON_GIC_IRQ));
+
+    /* Action registers read as zero on the Pi 400. */
+    g_assert_cmphex(readl(RASPI4_AON_CPU_SET), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_CLEAR), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_MASK_SET), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_MASK_CLEAR), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_SET), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_CLEAR), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_MASK_SET), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_MASK_CLEAR), ==, 0);
+
+    /* A physical rising edge latches both independently masked banks. */
+    aon_set_input(4, 1);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, line4);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_STATUS), ==, line4);
+    g_assert_false(get_irq(RASPI4_AON_GIC_IRQ));
+
+    /* Pending state survives masking and asserts as soon as it is unmasked. */
+    writel(RASPI4_AON_CPU_MASK_CLEAR, line4);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_MASK_STATUS), ==,
+                    AON_VALID_MASK & ~line4);
+    g_assert_true(get_irq(RASPI4_AON_GIC_IRQ));
+    writel(RASPI4_AON_CPU_CLEAR, line4);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_STATUS), ==, line4);
+    g_assert_false(get_irq(RASPI4_AON_GIC_IRQ));
+
+    /* Clearing a high input does not relatch it without another edge. */
+    aon_set_input(4, 1);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, 0);
+    writel(RASPI4_AON_PCI_CLEAR, line4);
+    aon_set_input(4, 0);
+    aon_set_input(4, 1);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, line4);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_STATUS), ==, line4);
+    g_assert_true(get_irq(RASPI4_AON_GIC_IRQ));
+    writel(RASPI4_AON_CPU_CLEAR, line4);
+    writel(RASPI4_AON_PCI_CLEAR, line4);
+
+    /* Software SET/CLEAR operations affect only their selected bank. */
+    writel(RASPI4_AON_CPU_SET, line1);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, line1);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_STATUS), ==, 0);
+    writel(RASPI4_AON_PCI_SET, line2);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, line1);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_STATUS), ==, line2);
+    writel(RASPI4_AON_CPU_CLEAR, line1);
+    writel(RASPI4_AON_PCI_CLEAR, line2);
+
+    /* Only the twelve HDMI interrupt lines are implemented. */
+    writel(RASPI4_AON_CPU_SET, UINT32_MAX);
+    writel(RASPI4_AON_PCI_SET, UINT32_MAX);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, AON_VALID_MASK);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_STATUS), ==, AON_VALID_MASK);
+    writel(RASPI4_AON_CPU_CLEAR, UINT32_MAX);
+    writel(RASPI4_AON_PCI_CLEAR, UINT32_MAX);
+    writel(RASPI4_AON_CPU_MASK_SET, UINT32_MAX);
+
+    /* Reset clears both latches and masks every valid line. */
+    writel(RASPI4_AON_CPU_SET, line4);
+    writel(RASPI4_AON_PCI_SET, line2);
+    writel(RASPI4_AON_CPU_MASK_CLEAR, line4);
+    g_assert_true(get_irq(RASPI4_AON_GIC_IRQ));
+    raspi4b_watchdog_reset();
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_MASK_STATUS), ==,
+                    AON_VALID_MASK);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_STATUS), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_MASK_STATUS), ==,
+                    AON_VALID_MASK);
+    g_assert_false(get_irq(RASPI4_AON_GIC_IRQ));
+
+    /* The externally held-high level survives reset without a false edge. */
+    aon_set_input(4, 1);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, 0);
+    aon_set_input(4, 0);
+    aon_set_input(4, 1);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, line4);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_STATUS), ==, line4);
+    aon_set_input(4, 0);
 }
 
 static void test_aux_uart_modem_and_reset(void)
@@ -1383,6 +1508,16 @@ static void test_soc_peripheral_migration(void)
     writel(RASPI4_AUX_MU_SCRATCH, 0xa5);
     writel(RASPI4_AUX_ENABLES, 0);
 
+    /* Migrate distinct AON bank state and a held-high physical source. */
+    aon_set_input(8, 1);
+    writel(RASPI4_AON_PCI_CLEAR, 1U << 8);
+    writel(RASPI4_AON_PCI_SET, 1U << 6);
+    writel(RASPI4_AON_CPU_MASK_CLEAR, 1U << 8);
+    writel(RASPI4_AON_PCI_MASK_CLEAR, 1U << 6);
+    g_assert_cmphex(readl(RASPI4_AON_CPU_STATUS), ==, 1U << 8);
+    g_assert_cmphex(readl(RASPI4_AON_PCI_STATUS), ==, 1U << 6);
+    g_assert_true(get_irq(RASPI4_AON_GIC_IRQ));
+
     /* Leave a bounded DMA transfer half complete at the migration boundary. */
     writel(dma_cb, DMA_S_INC | DMA_D_INC);
     writel(dma_cb + 4, dma_source);
@@ -1424,9 +1559,20 @@ static void test_soc_peripheral_migration(void)
     g_assert_cmpint(ret, !=, -1);
     g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
                            net_sockets[1]);
-    g_string_append_printf(cmd_line, " -incoming %s", uri);
+    g_string_append(cmd_line, " -incoming defer");
     destination = qtest_init(cmd_line->str);
     close(net_sockets[1]);
+    qtest_irq_intercept_out_named(destination, RASPI4_AON_QOM_PATH,
+                                  "sysbus-irq");
+    qtest_writel(destination, RASPI4_AON_CPU_SET, 1U);
+    qtest_writel(destination, RASPI4_AON_CPU_MASK_CLEAR, 1U);
+    g_assert_true(qtest_get_irq(destination, 0));
+    qtest_writel(destination, RASPI4_AON_CPU_CLEAR, 1U);
+    qtest_writel(destination, RASPI4_AON_CPU_MASK_SET, 1U);
+    g_assert_false(qtest_get_irq(destination, 0));
+    qtest_qmp_assert_success(destination,
+        "{ 'execute': 'migrate-incoming', 'arguments': { "
+        "'uri': %s, 'exit-on-error': false } }", uri);
     raspi4b_wait_for_migration(destination);
 
     g_assert_cmphex(qtest_readl(destination, RASPI4_GPIO_GPAREN0), ==,
@@ -1438,15 +1584,44 @@ static void test_soc_peripheral_migration(void)
     g_assert_cmphex(qtest_readl(destination, RASPI4_GPIO_GPEDS0), ==,
                     GPIO_PIN30);
 
-    qtest_irq_intercept_in(destination, "/machine/soc/peripherals");
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AON_CPU_STATUS), ==,
+                    1U << 8);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AON_CPU_MASK_STATUS), ==,
+                    AON_VALID_MASK & ~(1U << 8));
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AON_PCI_STATUS), ==,
+                    1U << 6);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AON_PCI_MASK_STATUS), ==,
+                    AON_VALID_MASK & ~(1U << 6));
+    g_assert_true(qtest_get_irq(destination, 0));
+    g_assert_true(qtest_get_irq(destination, 1));
+    qtest_writel(destination, RASPI4_AON_CPU_CLEAR, 1U << 8);
+    g_assert_false(qtest_get_irq(destination, 0));
+    g_assert_true(qtest_get_irq(destination, 1));
+
+    /* Migrated input level prevents a duplicate high-to-high edge. */
+    aon_set_input_qtest(destination, 8, 1);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AON_CPU_STATUS), ==, 0);
+    aon_set_input_qtest(destination, 8, 0);
+    aon_set_input_qtest(destination, 8, 1);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AON_CPU_STATUS), ==,
+                    1U << 8);
+    g_assert_true(qtest_get_irq(destination, 0));
+    g_assert_true(qtest_get_irq(destination, 1));
+    qtest_writel(destination, RASPI4_AON_PCI_CLEAR, 1U << 6);
+    g_assert_false(qtest_get_irq(destination, 1));
+
     qtest_writel(destination, RASPI4_GPIO_GPEDS0, GPIO_PIN30);
-    g_assert_false(qtest_get_irq(destination, RASPI4_GPIO_GIC_IRQ1));
-    g_assert_false(qtest_get_irq(destination, RASPI4_GPIO_GIC_IRQ_ALL));
+    g_assert_false(qtest_readl(destination, RASPI4_GIC_ISPENDR4) &
+                   GIC_PENDING_GPIO_IRQ1);
+    g_assert_false(qtest_readl(destination, RASPI4_GIC_ISPENDR4) &
+                   GIC_PENDING_GPIO_ALL);
     qtest_set_irq_in(destination, RASPI4_GPIO_QOM_PATH, NULL, 30, 0);
     g_assert_cmphex(qtest_readl(destination, RASPI4_GPIO_GPEDS0), ==,
                     GPIO_PIN30);
-    g_assert_true(qtest_get_irq(destination, RASPI4_GPIO_GIC_IRQ1));
-    g_assert_true(qtest_get_irq(destination, RASPI4_GPIO_GIC_IRQ_ALL));
+    g_assert_true(qtest_readl(destination, RASPI4_GIC_ISPENDR4) &
+                  GIC_PENDING_GPIO_IRQ1);
+    g_assert_true(qtest_readl(destination, RASPI4_GIC_ISPENDR4) &
+                  GIC_PENDING_GPIO_ALL);
 
     g_assert_cmphex(qtest_readl(destination, RASPI4_RNG200_CTRL), ==,
                     RNG200_CTRL_RATE_1MHZ | RNG200_CTRL_ENABLE);
@@ -2519,6 +2694,8 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/powermgt/watchdog", test_powermgt_watchdog);
     raspi4b_add_test("/raspi4b/interrupts/system_timer",
                      test_system_timer_interrupts);
+    raspi4b_add_test("/raspi4b/interrupts/aon_l2",
+                     test_aon_interrupts_and_reset);
     raspi4b_add_test("/raspi4b/interrupts/spi0", test_spi0_interrupt);
     raspi4b_add_test("/raspi4b/aux/modem_and_reset",
                      test_aux_uart_modem_and_reset);
