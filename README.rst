@@ -42,9 +42,11 @@ The pinned upstream Linux lab exercises those commands during normal probe.
 
 The VideoCore property interface tracks firmware clock and power-domain state,
 accepts Linux's reboot notification, and resets pending mailbox responses
-cleanly.  The state survives live migration.  Clock and domain values are a
-firmware control-plane model only: they do not yet gate CPUs, clocks, or device
-MMIO in the emulator.
+cleanly.  It exposes the clock IDs and current, minimum and maximum rates
+captured from the project's Pi 400, clamps rate changes to those ranges, and
+migrates the resulting state.  Clock and domain values are a firmware
+control-plane model only: they do not yet gate CPUs, clocks, or device MMIO in
+the emulator.
 
 The BCM2835-compatible DMA engine runs linked control blocks in bounded
 virtual-clock slices instead of synchronously walking an entire chain.  Cyclic
@@ -73,17 +75,19 @@ also validates PCI identities, USB topology, MSI activity, xHCI
 unbind/rebind recovery, and data integrity on a disposable USB mass-storage
 device on both machines.
 
-The BCM2711 HDMI service plane includes the DVP clock/reset controller and
-both HDMI DDC I2C engines.  HDMI0 has a standard QEMU virtual monitor at DDC
-address ``0x50``; HDMI1 defaults to disconnected.  The pinned Linux lab binds
-the production ``brcm2711-dvp`` and ``brcmstb-i2c`` drivers and reads a valid
-128-byte EDID through the first controller.  Reset, malformed transfers and
-live migration are covered by focused qtests.
+The BCM2711 native display path includes a functional HVS subset, HDMI0 pixel
+valve 2, the HDMI0 transmitter, the DVP clock/reset controller and both HDMI
+DDC I2C engines.  HDMI0 has a standard QEMU virtual monitor at DDC address
+``0x50``; HDMI1 defaults to disconnected.  The pinned Linux lab binds the
+production VC4 DRM, ``brcm2711-dvp`` and ``brcmstb-i2c`` drivers, selects a
+1280x800 mode and presents a native RGB565 scanout to the QEMU display.  A
+separate pixel gate writes a deterministic framebuffer pattern and verifies
+the rendered colors through a QMP screendump.  Reset, vblank timing, malformed
+DDC transfers and live migration are covered by focused qtests.
 
-This does not yet implement the HVS, pixel valves, HDMI transmitters or V3D
-4.2 graphics accelerator.  Visible display output remains the
-firmware-configured framebuffer, so Raspberry Pi DRM/Mesa 3D acceleration,
-native HDMI scanout, hot-plug and CEC are unavailable.
+The display model does not yet implement HVS scaling, multi-plane composition
+or tiled formats, the other pixel valves, HDMI1 scanout, dynamic hot-plug, CEC
+or HDMI audio.  V3D 4.2 and Mesa 3D acceleration also remain unavailable.
 
 Raspberry Pi 5 is not supported. It uses a substantially different BCM2712
 SoC and RP1 I/O controller, neither of which this project currently models.
@@ -121,10 +125,11 @@ The focused regression gate builds the emulator, verifies that its public
 machine list contains only ``none``, ``raspi400`` and ``raspi4b``, runs the Pi
 4 qtests, and boots a SHA-256-pinned Raspberry Pi Linux kernel on both board
 models.  The boots check machine identity, usable physical RAM, PCIe/VL805,
-the board-specific USB topology, an external USB-storage transfer, and GENET
-DHCP.  The qtests also exercise GPIO event delivery and HDMI DVP/DDC reset,
-EDID access and migration.  The separate Linux 7.2 lab adds production-driver
-DDC/EDID checks plus xHCI MSI and rebind recovery.
+the board-specific USB topology, an external USB-storage transfer, GENET DHCP,
+and native VC4 DRM registration.  The qtests also exercise GPIO event delivery,
+the native display pipeline, HDMI DVP/DDC reset, EDID access and migration.  The
+separate Linux 7.2 lab adds visible-pixel validation, production-driver DDC/EDID
+checks plus xHCI MSI and rebind recovery.
 
 Asset download is deliberately separate from test execution.  From a
 configured focused build directory, populate the content-addressed cache once
