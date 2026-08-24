@@ -22,6 +22,13 @@
 #define RASPI4_MBOX_READ       (RASPI4_MBOX_BASE + 0x80)
 #define RASPI4_MBOX_WRITE      (RASPI4_MBOX_BASE + 0xa0)
 #define RASPI4_PROPERTY_BUFFER 0x1000
+#define RASPI4_BOARD_SERIAL    0x51454d55
+
+#if HOST_LONG_BITS == 32
+#define RASPI4B_BOARD_REVISION 0xa03111
+#else
+#define RASPI4B_BOARD_REVISION 0xb03115
+#endif
 
 #define RASPI4_PM_BASE          0xfe100000
 #define RASPI4_PM_RSTC          (RASPI4_PM_BASE + 0x1c)
@@ -1480,6 +1487,12 @@ static void test_soc_peripheral_migration(void)
     const uint32_t get_domain[] = {
         RPI_FIRMWARE_V3D_DOMAIN_ID, UINT32_MAX,
     };
+    const uint32_t set_customer_otp[] = {
+        1, 1, 0xa5c35a3c,
+    };
+    const uint32_t get_customer_otp[] = {
+        1, 1, 0,
+    };
 
     writel(RASPI4_GPIO_GPAREN0, GPIO_PIN30);
     writel(RASPI4_GPIO_GPAFEN0, GPIO_PIN30);
@@ -1512,6 +1525,15 @@ static void test_soc_peripheral_migration(void)
                            2 * sizeof(uint32_t));
     property_request_qtest(source, RPI_FWREQ_SET_DOMAIN_STATE, domain_on,
                            G_N_ELEMENTS(domain_on), sizeof(domain_on));
+    property_request_qtest(source, RPI_FWREQ_SET_CUSTOMER_OTP,
+                           set_customer_otp,
+                           G_N_ELEMENTS(set_customer_otp),
+                           sizeof(uint32_t));
+    property_request_qtest(source, RPI_FWREQ_GET_CUSTOMER_OTP,
+                           get_customer_otp,
+                           G_N_ELEMENTS(get_customer_otp),
+                           sizeof(get_customer_otp));
+    g_assert_cmphex(property_payload_qtest(source, 2), ==, 0xa5c35a3c);
     writel(RASPI4_AUX_ENABLES, AUX_ENABLE_UART);
     writel(RASPI4_AUX_MU_MCR, AUX_MCR_RTS);
     writel(RASPI4_AUX_MU_SCRATCH, 0xa5);
@@ -1676,6 +1698,11 @@ static void test_soc_peripheral_migration(void)
                            G_N_ELEMENTS(get_domain), sizeof(get_domain));
     g_assert_cmphex(property_payload_qtest(destination, 1), ==,
                     RPI_FIRMWARE_STATE_ENABLE);
+    property_request_qtest(destination, RPI_FWREQ_GET_CUSTOMER_OTP,
+                           get_customer_otp,
+                           G_N_ELEMENTS(get_customer_otp),
+                           sizeof(get_customer_otp));
+    g_assert_cmphex(property_payload_qtest(destination, 2), ==, 0xa5c35a3c);
 
     /* The FIFO payload itself, not just its count, must migrate. */
     source_word = qtest_readl(source, RASPI4_RNG200_FIFO_DATA);
@@ -2277,6 +2304,49 @@ static uint32_t property_payload(size_t word)
     return property_payload_qtest(global_qtest, word);
 }
 
+static void test_firmware_board_identity(void)
+{
+    const uint32_t get_revision[] = { UINT32_MAX };
+    const uint32_t get_serial[] = { UINT32_MAX, UINT32_MAX };
+    const uint32_t short_serial[] = { 0xdeadbeef };
+    const uint32_t set_customer_otp[] = { 0, 1, 0x13579bdf };
+    const uint32_t get_customer_otp[] = { 0, 1, 0 };
+
+    property_request(RPI_FWREQ_GET_BOARD_REVISION, get_revision,
+                     G_N_ELEMENTS(get_revision), sizeof(get_revision));
+    g_assert_cmphex(property_payload(0), ==, RASPI4B_BOARD_REVISION);
+
+    property_request(RPI_FWREQ_GET_BOARD_SERIAL, get_serial,
+                     G_N_ELEMENTS(get_serial), sizeof(get_serial));
+    g_assert_cmphex(property_payload(0), ==, RASPI4_BOARD_SERIAL);
+    g_assert_cmphex(property_payload(1), ==, 0);
+
+    property_request(RPI_FWREQ_GET_BOARD_SERIAL, short_serial,
+                     G_N_ELEMENTS(short_serial), 0);
+    g_assert_cmphex(property_payload(0), ==, 0xdeadbeef);
+
+    property_request(RPI_FWREQ_SET_CUSTOMER_OTP, set_customer_otp,
+                     G_N_ELEMENTS(set_customer_otp), sizeof(uint32_t));
+    property_request(RPI_FWREQ_GET_CUSTOMER_OTP, get_customer_otp,
+                     G_N_ELEMENTS(get_customer_otp),
+                     sizeof(get_customer_otp));
+    g_assert_cmphex(property_payload(2), ==, 0x13579bdf);
+
+    qtest_system_reset(global_qtest);
+
+    property_request(RPI_FWREQ_GET_BOARD_REVISION, get_revision,
+                     G_N_ELEMENTS(get_revision), sizeof(get_revision));
+    g_assert_cmphex(property_payload(0), ==, RASPI4B_BOARD_REVISION);
+    property_request(RPI_FWREQ_GET_BOARD_SERIAL, get_serial,
+                     G_N_ELEMENTS(get_serial), sizeof(get_serial));
+    g_assert_cmphex(property_payload(0), ==, RASPI4_BOARD_SERIAL);
+    g_assert_cmphex(property_payload(1), ==, 0);
+    property_request(RPI_FWREQ_GET_CUSTOMER_OTP, get_customer_otp,
+                     G_N_ELEMENTS(get_customer_otp),
+                     sizeof(get_customer_otp));
+    g_assert_cmphex(property_payload(2), ==, 0x13579bdf);
+}
+
 static void test_firmware_gpio(void)
 {
     const uint32_t gpio = 132;
@@ -2847,6 +2917,8 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/firmware_gpio", test_firmware_gpio);
     raspi4b_add_test("/raspi4b/firmware_dma_channels",
                      test_firmware_dma_channels);
+    raspi4b_add_test("/raspi4b/firmware/board_identity",
+                     test_firmware_board_identity);
     raspi4b_add_test("/raspi4b/firmware/clocks", test_firmware_clocks);
     raspi4b_add_test("/raspi4b/firmware/state_and_reboot",
                      test_firmware_state_and_reboot);
