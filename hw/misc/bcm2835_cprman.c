@@ -187,7 +187,7 @@ static void pll_channel_update(CprmanPllChannelState *channel)
          * It seems that when the divider value is 0, it is considered as
          * being maximum by the hardware (see the Linux driver).
          */
-        div = R_A2W_PLLx_CHANNELy_DIV_MASK;
+        div = R_A2W_PLLx_CHANNELy_DIV_MASK + 1;
     }
 
     /* Some channels have an additional fixed divider */
@@ -508,7 +508,7 @@ static inline void update_mux_from_cm(BCM2835CprmanState *s, size_t idx)
 
     for (i = 0; i < CPRMAN_NUM_CLOCK_MUX; i++) {
         if ((CLOCK_MUX_INIT_INFO[i].cm_offset == idx) ||
-            (CLOCK_MUX_INIT_INFO[i].cm_offset + 4 == idx)) {
+            (CLOCK_MUX_INIT_INFO[i].cm_offset + 1 == idx)) {
             /* matches CM_CTL or CM_DIV mux register */
             clock_mux_update(&s->clock_muxes[i]);
             return;
@@ -776,10 +776,31 @@ static void cprman_realize(DeviceState *dev, Error **errp)
     }
 }
 
+static int cprman_post_load(void *opaque, int version_id)
+{
+    BCM2835CprmanState *s = CPRMAN(opaque);
+    size_t i;
+
+    /* Rebuild every derived output from the migrated register bank. */
+    for (i = 0; i < CPRMAN_NUM_PLL; i++) {
+        pll_update(&s->plls[i]);
+    }
+    for (i = 0; i < CPRMAN_NUM_PLL_CHANNEL; i++) {
+        pll_channel_update(&s->channels[i]);
+    }
+    dsi0hsck_mux_update(&s->dsi0hsck_mux);
+    for (i = 0; i < CPRMAN_NUM_CLOCK_MUX; i++) {
+        clock_mux_update(&s->clock_muxes[i]);
+    }
+
+    return 0;
+}
+
 static const VMStateDescription cprman_vmstate = {
     .name = TYPE_BCM2835_CPRMAN,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = cprman_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, BCM2835CprmanState, CPRMAN_NUM_REGS),
         VMSTATE_END_OF_LIST()
