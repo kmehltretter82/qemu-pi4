@@ -63,6 +63,10 @@ static void test_board_identity(void)
 {
     QTestState *custom;
 
+    property_request(RPI_FWREQ_GET_BOARD_MODEL, UINT32_MAX,
+                     sizeof(uint32_t));
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 0);
+
     property_request(RPI_FWREQ_GET_BOARD_REVISION, 0, sizeof(uint32_t));
     g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==,
                     RASPI400_BOARD_REVISION);

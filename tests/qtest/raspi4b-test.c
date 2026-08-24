@@ -15,6 +15,7 @@
 #include "qemu/iov.h"
 #include "qemu/sockets.h"
 #include "qemu/timer.h"
+#include "qemu/units.h"
 #include "qobject/qdict.h"
 #include "qobject/qlist.h"
 
@@ -29,6 +30,11 @@
 #else
 #define RASPI4B_BOARD_REVISION 0xb03115
 #endif
+
+#define RASPI4_VCRAM_BASE      0x3c000000
+
+#define PROPERTY_RESPONSE_SUCCESS 0x80000000
+#define PROPERTY_RESPONSE_ERROR   0x80000001
 
 #define RASPI4_PM_BASE          0xfe100000
 #define RASPI4_PM_RSTC          (RASPI4_PM_BASE + 0x1c)
@@ -2294,6 +2300,17 @@ static void property_request(uint32_t tag, const uint32_t *payload,
     property_request_qtest(global_qtest, tag, payload, words, response_bytes);
 }
 
+static void property_submit_raw(void)
+{
+    uint32_t response;
+
+    writel(RASPI4_MBOX_WRITE,
+           RASPI4_PROPERTY_BUFFER | MBOX_CHAN_PROPERTY);
+    response = readl(RASPI4_MBOX_READ);
+    g_assert_cmphex(response, ==,
+                    RASPI4_PROPERTY_BUFFER | MBOX_CHAN_PROPERTY);
+}
+
 static uint32_t property_payload_qtest(QTestState *qts, size_t word)
 {
     return qtest_readl(qts, RASPI4_PROPERTY_BUFFER + 20 + word * 4);
@@ -2306,11 +2323,16 @@ static uint32_t property_payload(size_t word)
 
 static void test_firmware_board_identity(void)
 {
+    const uint32_t get_model[] = { UINT32_MAX };
     const uint32_t get_revision[] = { UINT32_MAX };
     const uint32_t get_serial[] = { UINT32_MAX, UINT32_MAX };
     const uint32_t short_serial[] = { 0xdeadbeef };
     const uint32_t set_customer_otp[] = { 0, 1, 0x13579bdf };
     const uint32_t get_customer_otp[] = { 0, 1, 0 };
+
+    property_request(RPI_FWREQ_GET_BOARD_MODEL, get_model,
+                     G_N_ELEMENTS(get_model), sizeof(get_model));
+    g_assert_cmphex(property_payload(0), ==, 0);
 
     property_request(RPI_FWREQ_GET_BOARD_REVISION, get_revision,
                      G_N_ELEMENTS(get_revision), sizeof(get_revision));
@@ -2322,8 +2344,8 @@ static void test_firmware_board_identity(void)
     g_assert_cmphex(property_payload(1), ==, 0);
 
     property_request(RPI_FWREQ_GET_BOARD_SERIAL, short_serial,
-                     G_N_ELEMENTS(short_serial), 0);
-    g_assert_cmphex(property_payload(0), ==, 0xdeadbeef);
+                     G_N_ELEMENTS(short_serial), sizeof(uint64_t));
+    g_assert_cmphex(property_payload(0), ==, RASPI4_BOARD_SERIAL);
 
     property_request(RPI_FWREQ_SET_CUSTOMER_OTP, set_customer_otp,
                      G_N_ELEMENTS(set_customer_otp), sizeof(uint32_t));
@@ -2345,6 +2367,304 @@ static void test_firmware_board_identity(void)
                      G_N_ELEMENTS(get_customer_otp),
                      sizeof(get_customer_otp));
     g_assert_cmphex(property_payload(2), ==, 0x13579bdf);
+}
+
+static void test_firmware_malformed_buffers(void)
+{
+    uint8_t message[64];
+    uint8_t response[64];
+    uint32_t get_palette[256] = { 0 };
+    const uint32_t test_palette[] = {
+        254, 2, 0x89abcdef, 0x76543210, 0, 0,
+    };
+    const uint32_t invalid_palette[] = {
+        255, 2, 0xaabbccdd, 0x55667788, 0, 0,
+    };
+    const uint32_t set_palette[] = {
+        254, 2, 0xaabbccdd, 0x55667788, 0, 0,
+    };
+    const uint32_t get_customer_otp[] = { 0, 2, 0, 0 };
+    const uint64_t palette_0 = RASPI4_VCRAM_BASE;
+    const uint64_t palette_254 = RASPI4_VCRAM_BASE + 254 * sizeof(uint32_t);
+    const uint64_t palette_255 = RASPI4_VCRAM_BASE + 255 * sizeof(uint32_t);
+    const uint64_t after_palette = RASPI4_VCRAM_BASE + 256 * sizeof(uint32_t);
+
+    /*
+     * Responses are truncated to each value-buffer capacity, while the
+     * response header reports the complete desired length.  Odd capacities
+     * still have four-byte-aligned tag padding.
+     */
+    memset(message, 0xa5, 44);
+    stl_le_p(message, 44);
+    stl_le_p(message + 4, 0);
+    stl_le_p(message + 8, RPI_FWREQ_GET_BOARD_REVISION);
+    stl_le_p(message + 12, 2);
+    stl_le_p(message + 16, 0);
+    stl_le_p(message + 24, RPI_FWREQ_GET_DMA_CHANNELS);
+    stl_le_p(message + 28, 3);
+    stl_le_p(message + 32, 0);
+    stl_le_p(message + 40, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 44);
+    property_submit_raw();
+    memread(RASPI4_PROPERTY_BUFFER, response, 44);
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 16), ==, 0x80000004);
+    g_assert_cmphex(response[20], ==, RASPI4B_BOARD_REVISION & 0xff);
+    g_assert_cmphex(response[21], ==, (RASPI4B_BOARD_REVISION >> 8) & 0xff);
+    g_assert_cmphex(response[22], ==, 0xa5);
+    g_assert_cmphex(response[23], ==, 0xa5);
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 32), ==, 0x80000004);
+    g_assert_cmphex(response[36], ==, 0xf5);
+    g_assert_cmphex(response[37], ==, 0x07);
+    g_assert_cmphex(response[38], ==, 0x00);
+    g_assert_cmphex(response[39], ==, 0xa5);
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 40), ==, 0);
+
+    /* Unknown and explicitly unimplemented tags must retain request form. */
+    memset(message, 0xa5, 44);
+    stl_le_p(message, 44);
+    stl_le_p(message + 4, 0);
+    stl_le_p(message + 8, 0x7f123456);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 16, 0);
+    stl_le_p(message + 20, 0x11223344);
+    stl_le_p(message + 24, RPI_FWREQ_GET_FIRMWARE_VARIANT);
+    stl_le_p(message + 28, 4);
+    stl_le_p(message + 32, 0);
+    stl_le_p(message + 36, 0x55667788);
+    stl_le_p(message + 40, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 44);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 0x11223344);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 32), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 36), ==, 0x55667788);
+
+    /* A zero-sized unknown tag still advances to the following valid tag. */
+    memset(message, 0xa5, 40);
+    stl_le_p(message, 40);
+    stl_le_p(message + 4, 0);
+    stl_le_p(message + 8, 0x7f123456);
+    stl_le_p(message + 12, 0);
+    stl_le_p(message + 16, 0);
+    stl_le_p(message + 20, RPI_FWREQ_GET_BOARD_MODEL);
+    stl_le_p(message + 24, 4);
+    stl_le_p(message + 28, 0);
+    stl_le_p(message + 32, UINT32_MAX);
+    stl_le_p(message + 36, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 40);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 28), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 32), ==, 0);
+
+    /* A declared buffer shorter than its header must not be overwritten. */
+    memset(message, 0xa5, sizeof(message));
+    stl_le_p(message, sizeof(uint32_t));
+    memwrite(RASPI4_PROPERTY_BUFFER, message, sizeof(message));
+    property_submit_raw();
+    memread(RASPI4_PROPERTY_BUFFER, response, sizeof(response));
+    for (size_t i = sizeof(uint32_t); i < sizeof(response); i++) {
+        g_assert_cmphex(response[i], ==, 0xa5);
+    }
+
+    /* Top-level reserved codes and non-word-aligned sizes are parse errors. */
+    memset(message, 0xa5, 16);
+    stl_le_p(message, 12);
+    stl_le_p(message + 4, 1);
+    stl_le_p(message + 8, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 16);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 8), ==,
+                    RPI_FWREQ_PROPERTY_END);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 12), ==, 0xa5a5a5a5);
+
+    memset(message, 0xa5, 16);
+    stl_le_p(message, 13);
+    stl_le_p(message + 4, 0);
+    stl_le_p(message + 8, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 16);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 8), ==,
+                    RPI_FWREQ_PROPERTY_END);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 12), ==, 0xa5a5a5a5);
+
+    /* A message without an end tag is an error and cannot escape its size. */
+    memset(message, 0xa5, sizeof(message));
+    stl_le_p(message, 20);
+    stl_le_p(message + 4, 0);
+    stl_le_p(message + 8, RPI_FWREQ_GET_FIRMWARE_REVISION);
+    stl_le_p(message + 12, 0);
+    stl_le_p(message + 16, 0);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, sizeof(message));
+    property_submit_raw();
+    memread(RASPI4_PROPERTY_BUFFER, response, sizeof(response));
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 16), ==, 0);
+    for (size_t i = 20; i < sizeof(response); i++) {
+        g_assert_cmphex(response[i], ==, 0xa5);
+    }
+
+    /* The old parser's exact zero-progress size is rejected without a walk. */
+    memset(message, 0xa5, sizeof(message));
+    stl_le_p(message, 24);
+    stl_le_p(message + 4, 0);
+    stl_le_p(message + 8, 0x7f123456);
+    stl_le_p(message + 12, UINT32_MAX - 11);
+    stl_le_p(message + 16, 0);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, sizeof(message));
+    property_submit_raw();
+    memread(RASPI4_PROPERTY_BUFFER, response, sizeof(response));
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 16), ==, 0);
+    for (size_t i = 20; i < sizeof(response); i++) {
+        g_assert_cmphex(response[i], ==, 0xa5);
+    }
+
+    /* Real firmware rejects property messages at or above one MiB. */
+    memset(message, 0xa5, sizeof(message));
+    stl_le_p(message, MiB);
+    stl_le_p(message + 4, 0);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, sizeof(message));
+    property_submit_raw();
+    memread(RASPI4_PROPERTY_BUFFER, response, sizeof(response));
+    g_assert_cmphex((uint32_t)ldl_le_p(response + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    for (size_t i = 8; i < sizeof(response); i++) {
+        g_assert_cmphex(response[i], ==, 0xa5);
+    }
+
+    /*
+     * Reserved request codes and incomplete required inputs are parse errors.
+     */
+    memset(message, 0xa5, 28);
+    stl_le_p(message, 28);
+    stl_le_p(message + 4, 0);
+    stl_le_p(message + 8, RPI_FWREQ_GET_FIRMWARE_REVISION);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 16, 1);
+    stl_le_p(message + 24, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 28);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 1);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 0xa5a5a5a5);
+
+    memset(message, 0, 28);
+    stl_le_p(message, 28);
+    stl_le_p(message + 8, RPI_FWREQ_GET_CLOCK_RATE);
+    stl_le_p(message + 12, 3);
+    message[20] = RPI_FIRMWARE_CORE_CLK_ID;
+    stl_le_p(message + 24, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 28);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 24), ==, 0);
+
+    /* A short GET_CLOCKS response still advertises all fifteen clock pairs. */
+    memset(message, 0xa5, 28);
+    stl_le_p(message, 28);
+    stl_le_p(message + 4, 0);
+    stl_le_p(message + 8, RPI_FWREQ_GET_CLOCKS);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 16, 0);
+    stl_le_p(message + 24, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 28);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==,
+                    0x80000000 | 15 * 2 * sizeof(uint32_t));
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 24), ==, 0);
+
+    /* Palette intervals must fit 256 entries and apply atomically. */
+    writel(palette_0, 0x00112233);
+    writel(palette_254, 0x01020304);
+    writel(palette_255, 0x11121314);
+    writel(after_palette, 0x21222324);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_GET_PALETTE, get_palette,
+                     G_N_ELEMENTS(get_palette), sizeof(get_palette));
+    g_assert_cmphex(property_payload(0), ==, 0x00112233);
+    g_assert_cmphex(property_payload(254), ==, 0x01020304);
+    g_assert_cmphex(property_payload(255), ==, 0x11121314);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_TEST_PALETTE, test_palette,
+                     G_N_ELEMENTS(test_palette), sizeof(uint32_t));
+    g_assert_cmphex(property_payload(0), ==, 0);
+    g_assert_cmphex(readl(palette_254), ==, 0x01020304);
+    g_assert_cmphex(readl(palette_255), ==, 0x11121314);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_PALETTE, invalid_palette,
+                     G_N_ELEMENTS(invalid_palette), sizeof(uint32_t));
+    g_assert_cmphex(property_payload(0), ==, 1);
+    g_assert_cmphex(readl(palette_254), ==, 0x01020304);
+    g_assert_cmphex(readl(palette_255), ==, 0x11121314);
+    g_assert_cmphex(readl(after_palette), ==, 0x21222324);
+
+    memset(message, 0, 36);
+    stl_le_p(message, 36);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_SET_PALETTE);
+    stl_le_p(message + 12, 12);
+    stl_le_p(message + 20, 254);
+    stl_le_p(message + 24, 2);
+    stl_le_p(message + 28, 0xaabbccdd);
+    stl_le_p(message + 32, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 36);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 1);
+    g_assert_cmphex(readl(palette_254), ==, 0x01020304);
+    g_assert_cmphex(readl(palette_255), ==, 0x11121314);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_PALETTE, set_palette,
+                     G_N_ELEMENTS(set_palette), sizeof(uint32_t));
+    g_assert_cmphex(property_payload(0), ==, 0);
+    g_assert_cmphex(readl(palette_254), ==, 0xaabbccdd);
+    g_assert_cmphex(readl(palette_255), ==, 0x55667788);
+    g_assert_cmphex(readl(after_palette), ==, 0x21222324);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_GET_PALETTE, get_palette,
+                     G_N_ELEMENTS(get_palette), sizeof(get_palette));
+    g_assert_cmphex(property_payload(0), ==, 0x00112233);
+    g_assert_cmphex(property_payload(254), ==, 0xaabbccdd);
+    g_assert_cmphex(property_payload(255), ==, 0x55667788);
+
+    /* An incomplete OTP write must not fuse even its first supplied row. */
+    memset(message, 0, 36);
+    stl_le_p(message, 36);
+    stl_le_p(message + 8, RPI_FWREQ_SET_CUSTOMER_OTP);
+    stl_le_p(message + 12, 12);
+    stl_le_p(message + 20, 0);
+    stl_le_p(message + 24, 2);
+    stl_le_p(message + 28, 0x89abcdef);
+    stl_le_p(message + 32, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 36);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0);
+    property_request(RPI_FWREQ_GET_CUSTOMER_OTP, get_customer_otp,
+                     G_N_ELEMENTS(get_customer_otp),
+                     sizeof(get_customer_otp));
+    g_assert_cmphex(property_payload(2), ==, 0);
+    g_assert_cmphex(property_payload(3), ==, 0);
 }
 
 static void test_firmware_gpio(void)
@@ -2919,6 +3239,8 @@ int main(int argc, char **argv)
                      test_firmware_dma_channels);
     raspi4b_add_test("/raspi4b/firmware/board_identity",
                      test_firmware_board_identity);
+    raspi4b_add_test("/raspi4b/firmware/malformed_buffers",
+                     test_firmware_malformed_buffers);
     raspi4b_add_test("/raspi4b/firmware/clocks", test_firmware_clocks);
     raspi4b_add_test("/raspi4b/firmware/state_and_reboot",
                      test_firmware_state_and_reboot);
