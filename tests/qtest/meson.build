@@ -231,7 +231,8 @@ qtests_aspeed64 = \
    'ast2700-smc-test']
 
 qtests_raspi4 = \
-  ['bcm2835-dma-test',
+  ['bcm2835-cprman-test',
+   'bcm2835-dma-test',
    'bcm2835-i2c-test',
    'raspi400-test',
    'raspi4b-test']

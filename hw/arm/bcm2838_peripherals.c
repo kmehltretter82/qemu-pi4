@@ -51,6 +51,11 @@ static void bcm2838_peripherals_init(Object *obj)
     BCM2838PeripheralClass *bc = BCM2838_PERIPHERALS_GET_CLASS(obj);
     BCMSocPeripheralBaseState *s_base = BCM_SOC_PERIPHERALS_BASE(obj);
 
+    object_property_set_bool(OBJECT(&s_base->cprman), "is-bcm2711", true,
+                             &error_abort);
+    object_property_set_uint(OBJECT(&s_base->cprman), "xosc-freq-hz",
+                             54000000, &error_abort);
+
     /* Lower memory region for peripheral devices (exported to the Soc) */
     memory_region_init(&s->peri_low_mr, obj, "bcm2838-peripherals",
                        bc->peri_low_size);

@@ -56,7 +56,9 @@
 static void pll_reset(DeviceState *dev)
 {
     CprmanPllState *s = CPRMAN_PLL(dev);
-    const PLLResetInfo *info = &PLL_RESET_INFO[s->id];
+    const PLLResetInfo *reset_info = s->cprman->is_bcm2711 ?
+        BCM2711_PLL_RESET_INFO : PLL_RESET_INFO;
+    const PLLResetInfo *info = &reset_info[s->id];
 
     *s->reg_cm = info->cm;
     *s->reg_a2w_ctrl = info->a2w_ctrl;
@@ -89,7 +91,8 @@ static void pll_update(CprmanPllState *pll)
     ndiv = FIELD_EX32(*pll->reg_a2w_ctrl, A2W_PLLx_CTRL, NDIV);
     fdiv = FIELD_EX32(*pll->reg_a2w_frac, A2W_PLLx_FRAC, FRAC);
 
-    if (pll->reg_a2w_ana[1] & pll->prediv_mask) {
+    if (!pll->cprman->is_bcm2711 &&
+        (pll->reg_a2w_ana[1] & pll->prediv_mask)) {
         /* The prescaler doubles the parent frequency */
         ndiv *= 2;
         fdiv *= 2;
@@ -155,7 +158,9 @@ static const TypeInfo cprman_pll_info = {
 static void pll_channel_reset(DeviceState *dev)
 {
     CprmanPllChannelState *s = CPRMAN_PLL_CHANNEL(dev);
-    const PLLChannelResetInfo *info = &PLL_CHANNEL_RESET_INFO[s->id];
+    const PLLChannelResetInfo *reset_info = s->cprman->is_bcm2711 ?
+        BCM2711_PLL_CHANNEL_RESET_INFO : PLL_CHANNEL_RESET_INFO;
+    const PLLChannelResetInfo *info = &reset_info[s->id];
 
     *s->reg_a2w_ctrl = info->a2w_ctrl;
 }
@@ -325,7 +330,9 @@ static void clock_mux_src_update(void *opaque, ClockEvent event)
 static void clock_mux_reset(DeviceState *dev)
 {
     CprmanClockMuxState *clock = CPRMAN_CLOCK_MUX(dev);
-    const ClockMuxResetInfo *info = &CLOCK_MUX_RESET_INFO[clock->id];
+    const ClockMuxResetInfo *reset_info = clock->cprman->is_bcm2711 ?
+        BCM2711_CLOCK_MUX_RESET_INFO : CLOCK_MUX_RESET_INFO;
+    const ClockMuxResetInfo *info = &reset_info[clock->id];
 
     *clock->reg_ctl = info->cm_ctl;
     *clock->reg_div = info->cm_div;
@@ -809,6 +816,7 @@ static const VMStateDescription cprman_vmstate = {
 
 static const Property cprman_properties[] = {
     DEFINE_PROP_UINT32("xosc-freq-hz", BCM2835CprmanState, xosc_freq, 19200000),
+    DEFINE_PROP_BOOL("is-bcm2711", BCM2835CprmanState, is_bcm2711, false),
 };
 
 static void cprman_class_init(ObjectClass *klass, const void *data)

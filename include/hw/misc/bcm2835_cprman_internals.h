@@ -287,6 +287,7 @@ static inline void set_pll_init_info(BCM2835CprmanState *s,
                                      CprmanPll id)
 {
     pll->id = id;
+    pll->cprman = s;
     pll->reg_cm = &s->regs[PLL_INIT_INFO[id].cm_offset];
     pll->reg_a2w_ctrl = &s->regs[PLL_INIT_INFO[id].a2w_ctrl_offset];
     pll->reg_a2w_ana = &s->regs[PLL_INIT_INFO[id].a2w_ana_offset];
@@ -405,6 +406,7 @@ static inline void set_pll_channel_init_info(BCM2835CprmanState *s,
 {
     channel->id = id;
     channel->parent = PLL_CHANNEL_INIT_INFO[id].parent;
+    channel->cprman = s;
     channel->reg_cm = &s->regs[PLL_CHANNEL_INIT_INFO[id].cm_offset];
     channel->hold_mask = PLL_CHANNEL_INIT_INFO[id].cm_hold_mask;
     channel->load_mask = PLL_CHANNEL_INIT_INFO[id].cm_load_mask;
@@ -723,7 +725,7 @@ static ClockMuxInitInfo CLOCK_MUX_INIT_INFO[] = {
         .name = "emmc2",
         .int_bits = 4,
         .frac_bits = 8,
-        FILL_CLOCK_MUX_INIT_INFO(EMMC2, unknown),
+        FILL_CLOCK_MUX_INIT_INFO(EMMC2, periph),
     },
 };
 
@@ -741,6 +743,7 @@ static inline void set_clock_mux_init_info(BCM2835CprmanState *s,
                                            CprmanClockMux id)
 {
     mux->id = id;
+    mux->cprman = s;
     mux->reg_ctl = &s->regs[CLOCK_MUX_INIT_INFO[id].cm_offset];
     mux->reg_div = &s->regs[CLOCK_MUX_INIT_INFO[id].cm_offset + 1];
     mux->int_bits = CLOCK_MUX_INIT_INFO[id].int_bits;
@@ -798,6 +801,41 @@ static const PLLResetInfo PLL_RESET_INFO[] = {
     }
 };
 
+/*
+ * Firmware-configured state captured through Linux clk debugfs on a
+ * Raspberry Pi 400.  BCM2711 uses a 54 MHz oscillator and repurposes the
+ * BCM2835 feedback-predivider bits as VCO-range controls.
+ */
+static const PLLResetInfo BCM2711_PLL_RESET_INFO[] = {
+    [CPRMAN_PLLA] = {
+        .cm = 0x00000000,
+        .a2w_ctrl = 0x00021037,
+        .a2w_frac = 0x0008e38e,
+        .a2w_ana = { 0x00000000, 0x0011c000, 0x00d04000, 0x00000052 }
+    },
+    [CPRMAN_PLLC] = {
+        .cm = 0x00000000,
+        .a2w_ctrl = 0x00021030,
+        .a2w_frac = 0x00000000,
+        .a2w_ana = { 0x00000000, 0x0011c000, 0x00d04000, 0x00000052 }
+    },
+    [CPRMAN_PLLD] = {
+        .cm = 0x00000000,
+        .a2w_ctrl = 0x00021037,
+        .a2w_frac = 0x0008e390,
+        .a2w_ana = { 0x00000000, 0x00118000, 0x00d00000, 0x00000052 }
+    },
+    [CPRMAN_PLLH] = {
+        /* PLLH is not present in the BCM2711 clock provider. */
+    },
+    [CPRMAN_PLLB] = {
+        .cm = 0x00000000,
+        .a2w_ctrl = 0x00021042,
+        .a2w_frac = 0x000aaaab,
+        .a2w_ana = { 0x00000000, 0x0011c000, 0x00d04000, 0x00000052 }
+    },
+};
+
 typedef struct PLLChannelResetInfo {
     /*
      * Even though a PLL channel has a CM register, it shares it with its
@@ -827,6 +865,29 @@ static const PLLChannelResetInfo PLL_CHANNEL_RESET_INFO[] = {
     [CPRMAN_PLLH_CHANNEL_PIX] = { .a2w_ctrl = 0x00000000 },
 
     [CPRMAN_PLLB_CHANNEL_ARM] = { .a2w_ctrl = 0x00000000 }, /* unknown */
+};
+
+static const PLLChannelResetInfo BCM2711_PLL_CHANNEL_RESET_INFO[] = {
+    [CPRMAN_PLLA_CHANNEL_DSI0] = { .a2w_ctrl = 0x00000000 },
+    [CPRMAN_PLLA_CHANNEL_CORE] = { .a2w_ctrl = 0x00000006 },
+    [CPRMAN_PLLA_CHANNEL_PER] = { .a2w_ctrl = 0x00000000 },
+    [CPRMAN_PLLA_CHANNEL_CCP2] = { .a2w_ctrl = 0x00000000 },
+
+    [CPRMAN_PLLC_CHANNEL_CORE2] = { .a2w_ctrl = 0x00000000 },
+    [CPRMAN_PLLC_CHANNEL_CORE1] = { .a2w_ctrl = 0x00000000 },
+    [CPRMAN_PLLC_CHANNEL_PER] = { .a2w_ctrl = 0x00000004 },
+    [CPRMAN_PLLC_CHANNEL_CORE0] = { .a2w_ctrl = 0x00000000 },
+
+    [CPRMAN_PLLD_CHANNEL_DSI0] = { .a2w_ctrl = 0x00000000 },
+    [CPRMAN_PLLD_CHANNEL_CORE] = { .a2w_ctrl = 0x00000005 },
+    [CPRMAN_PLLD_CHANNEL_PER] = { .a2w_ctrl = 0x00000004 },
+    [CPRMAN_PLLD_CHANNEL_DSI1] = { .a2w_ctrl = 0x00000000 },
+
+    [CPRMAN_PLLH_CHANNEL_AUX] = { .a2w_ctrl = 0x00000000 },
+    [CPRMAN_PLLH_CHANNEL_RCAL] = { .a2w_ctrl = 0x00000000 },
+    [CPRMAN_PLLH_CHANNEL_PIX] = { .a2w_ctrl = 0x00000000 },
+
+    [CPRMAN_PLLB_CHANNEL_ARM] = { .a2w_ctrl = 0x00000002 },
 };
 
 typedef struct ClockMuxResetInfo {
@@ -1013,6 +1074,55 @@ static const ClockMuxResetInfo CLOCK_MUX_RESET_INFO[] = {
     [CPRMAN_CLOCK_EMMC2] = {
         .cm_ctl = 0, /* unknown */
         .cm_div = 0
+    },
+};
+
+static const ClockMuxResetInfo BCM2711_CLOCK_MUX_RESET_INFO[] = {
+    [CPRMAN_CLOCK_VPU] = {
+        .cm_ctl = 0x00000254,
+        .cm_div = 0x00001000,
+    },
+    [CPRMAN_CLOCK_H264] = {
+        .cm_ctl = 0x00000244,
+        .cm_div = 0x00001000,
+    },
+    [CPRMAN_CLOCK_ISP] = {
+        .cm_ctl = 0x00000244,
+        .cm_div = 0x00001000,
+    },
+    [CPRMAN_CLOCK_CAM0] = { .cm_ctl = 0x00000200 },
+    [CPRMAN_CLOCK_CAM1] = { .cm_ctl = 0x00000200 },
+    [CPRMAN_CLOCK_DSI0E] = { .cm_ctl = 0x00000200 },
+    [CPRMAN_CLOCK_DPI] = { .cm_ctl = 0x00000200 },
+    [CPRMAN_CLOCK_GP0] = { .cm_ctl = 0x00000200 },
+    [CPRMAN_CLOCK_GP1] = { .cm_ctl = 0x00000200 },
+    [CPRMAN_CLOCK_GP2] = { .cm_ctl = 0x00000200 },
+    [CPRMAN_CLOCK_OTP] = {
+        .cm_ctl = 0x00000091,
+        .cm_div = 0x00004000,
+    },
+    [CPRMAN_CLOCK_PCM] = { .cm_ctl = 0x00000200 },
+    [CPRMAN_CLOCK_PWM] = { .cm_ctl = 0x00000200 },
+    [CPRMAN_CLOCK_SMI] = { .cm_ctl = 0x00000200 },
+    [CPRMAN_CLOCK_TSENS] = {
+        .cm_ctl = 0x00000091,
+        .cm_div = 0x00010000,
+    },
+    [CPRMAN_CLOCK_TIMER] = {
+        .cm_ctl = 0x00000291,
+        .cm_div = 0x00036000,
+    },
+    [CPRMAN_CLOCK_UART] = {
+        .cm_ctl = 0x00000296,
+        .cm_div = 0x0000fa00,
+    },
+    [CPRMAN_CLOCK_EMMC] = {
+        .cm_ctl = 0x00000296,
+        .cm_div = 0x00003000,
+    },
+    [CPRMAN_CLOCK_EMMC2] = {
+        .cm_ctl = 0x00000296,
+        .cm_div = 0x00007800,
     },
 };
 

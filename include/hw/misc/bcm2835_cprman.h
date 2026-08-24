@@ -123,6 +123,7 @@ typedef struct CprmanPllState {
 
     /*< public >*/
     CprmanPll id;
+    struct BCM2835CprmanState *cprman;
 
     uint32_t *reg_cm;
     uint32_t *reg_a2w_ctrl;
@@ -141,6 +142,7 @@ typedef struct CprmanPllChannelState {
     /*< public >*/
     CprmanPllChannel id;
     CprmanPll parent;
+    struct BCM2835CprmanState *cprman;
 
     uint32_t *reg_cm;
     uint32_t hold_mask;
@@ -158,6 +160,7 @@ typedef struct CprmanClockMuxState {
 
     /*< public >*/
     CprmanClockMux id;
+    struct BCM2835CprmanState *cprman;
 
     uint32_t *reg_ctl;
     uint32_t *reg_div;
@@ -202,6 +205,7 @@ struct BCM2835CprmanState {
 
     uint32_t regs[CPRMAN_NUM_REGS];
     uint32_t xosc_freq;
+    bool is_bcm2711;
 
     Clock *xosc;
     Clock *gnd;
