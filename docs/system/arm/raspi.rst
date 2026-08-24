@@ -39,6 +39,7 @@ Implemented devices
  * Clock and reset controller (CPRMAN), with BCM2711 oscillator, PLL and
    firmware-configured clock defaults
  * BCM2835-compatible PCM/I2S controller with playback, DMA and interrupts
+ * Both BCM2711 PWM controllers, with FIFO and DMA-paced stereo playback
  * System Timer
  * GPIO controller, including all 58 input/output lines, edge and level event
    detection, and the three bank interrupts plus the all-bank interrupt
@@ -77,7 +78,6 @@ Missing devices
    placeholder)
  * BCM2711 HDMI/display pipeline and HDMI DDC I2C controllers
  * BCM2711 always-on L2 interrupt controller used by HDMI
- * Pulse Width Modulation (PWM)
  * Remaining BCM2711 PCIe controller-event behavior
  * Consumer-control key-event production for the Pi 400 keyboard's second HID
    interface; its identity, descriptors, enumeration and migration already
@@ -255,6 +255,63 @@ individual external clock or frame-sync edges.  Standby settling time,
 bit-exact gray/PDM data paths and channel-slip recovery remain approximate.
 The hardware FIFOs, controller deadlines and pending control actions migrate;
 samples already staged only in the host audio backend do not.
+
+PWM controllers and audio
+-------------------------
+
+BCM2711 has two two-channel PWM controllers.  ``PWM0`` is mapped at
+``0xfe20c000`` and drives DMA request 5.  ``PWM1`` is mapped at
+``0xfe20c800`` and drives DMA request 1, matching the reset selection of the
+BCM2711 DMA request mux.  Both blocks use the CPRMAN PWM clock and have the
+BCM2711 64-word shared FIFO.  Reset values, the two FIFO read identifiers and
+the 64-word full boundary were checked against the project's Pi 400.  A
+single-word timing probe also showed that enabling a FIFO-driven channel
+immediately moves its queued word into the channel: the FIFO reports empty
+while the channel reports active.  The model follows that observed boundary
+and likewise claims a new word immediately when an enabled, idle channel is
+waiting for data.
+
+The model implements the control, status, DMA-threshold, range, data and FIFO
+registers.  This includes FIFO full and empty state, sticky write and gap
+errors, write-one-to-clear status, the one-shot FIFO clear, data-register and
+FIFO modes, polarity, silence state, repeat-last behavior, PWM and serialiser
+average output, and locked-step FIFO sharing between both channels.  DREQ is
+asserted at the programmed FIFO threshold and can pace the BCM2835-compatible
+DMA engine.  FIFO contents, current channel data, period phase and output state
+migrate with the VM.
+
+Each channel exposes read-only ``freq[0]``, ``freq[1]``, ``duty[0]`` and
+``duty[1]`` QOM properties.  Duty uses a scale of zero to one million.  The
+same value is emitted on the device's ``duty-gpio-out`` lines, allowing a
+board or test fixture to consume the functional average output without
+requiring bit-level transitions at the PWM source clock.
+
+On Pi 4-family boards the analogue headphone output is driven by ``PWM1``.
+Its synchronized, two-channel FIFO stream can be sent to any normal QEMU
+playback backend.  The embedded I2S device must also have a backend when an
+explicit PWM backend is selected.  For example, this captures PWM audio while
+leaving I2S disconnected::
+
+  -audiodev none,id=i2s \
+  -global bcm2835-i2s.audiodev=i2s \
+  -audiodev wav,id=pwm,path=pi4-pwm.wav,out.frequency=48000,out.channels=2 \
+  -global bcm2835-pwm.audiodev=pwm
+
+The source sample rate is derived from the CPRMAN PWM clock and the common
+channel range; QEMU's audio core converts it to the configured backend rate
+and format.  Circle 51's PWM driver and cyclic-DMA sound path run on both
+``raspi4b`` and ``raspi400``.  With its 48 kHz configuration, the captured
+stereo stream contains the expected modulated tone near 440 Hz without
+steady-state FIFO gaps.
+
+This is a functional period and average-duty model, not a 125 MHz pin-edge
+waveform model.  Host audio currently requires two FIFO-driven PWM-mode
+channels with equal nonzero ranges.  Differing ranges in a shared FIFO are
+paced at the slower channel, approximating the documented locked-step gaps.
+The alternative DSI0 selection for DMA request 1, DMA panic priority, APB
+synchronizer bus-error timing and GPIO alternate-function routing are not yet
+modeled.  Reading the write-only FIFO returns the observed ``pwm0`` or
+``pwm1`` bus identifier; there is no FIFO read-data path.
 
 Firmware clock and power state
 ------------------------------

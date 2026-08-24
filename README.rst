@@ -58,6 +58,13 @@ BCM2711 54 MHz oscillator and firmware clock profile.  Circle's I2S example
 runs its cyclic-DMA path on both board models and produces a clean 48 kHz host
 capture with its modulated tone near 440 Hz.
 
+Both BCM2711 PWM controllers expose their 64-word FIFO, DMA pacing, functional
+average output, reset and migration state.  PWM1 can send its synchronized
+stereo stream to a QEMU audio backend.  Circle's PWM driver runs its cyclic-DMA
+path on both board models and produces a clean 48 kHz stereo capture near
+440 Hz.  FIFO depth, identifiers, status and immediate word claim on enable
+were checked against the project's Pi 400.
+
 Both boards expose the BCM2711 PCIe root complex and the fixed VIA VL805 xHCI
 controller used for their external USB ports.  The model includes private PCI
 DMA, MSI, multi-segment xHCI event rings, the VIA four-port USB 2 hub, and the
