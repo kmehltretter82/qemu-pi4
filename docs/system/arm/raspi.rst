@@ -36,7 +36,9 @@ Implemented devices
  * GIC-400 and legacy VideoCore interrupt controllers
  * DMA controller with bounded asynchronous control-block execution,
    byte-aligned transfers, DREQ pacing, pause/abort, and active migration
- * Clock and reset controller (CPRMAN)
+ * Clock and reset controller (CPRMAN), with BCM2711 oscillator, PLL and
+   firmware-configured clock defaults
+ * BCM2835-compatible PCM/I2S controller with playback, DMA and interrupts
  * System Timer
  * GPIO controller, including all 58 input/output lines, edge and level event
    detection, and the three bank interrupts plus the all-bank interrupt
@@ -76,7 +78,6 @@ Missing devices
  * BCM2711 HDMI/display pipeline and HDMI DDC I2C controllers
  * BCM2711 always-on L2 interrupt controller used by HDMI
  * Pulse Width Modulation (PWM)
- * BCM2835 PCM/I2S audio controller
  * Remaining BCM2711 PCIe controller-event behavior
  * Consumer-control key-event production for the Pi 400 keyboard's second HID
    interface; its identity, descriptors, enumeration and migration already
@@ -189,7 +190,9 @@ channel-disable state also pauses and resumes active work.
 
 Named DREQ inputs implement the control block's ``PERMAP``, source and
 destination pacing fields.  A low selected request holds the channel and a
-rising request schedules more work; DREQ 0 is permanently active as specified.
+rising request executes one bounded slice immediately.  If the request remains
+active after that slice, the channel yields and continues from its timer; DREQ
+0 is permanently active as specified.
 ``CS.DREQ`` and ``CS.ISHELD`` report the resulting state.  The model accepts
 the wide-memory flags used by Circle and preserves their guest-visible byte
 stream, although QEMU memory regions do not expose individual AXI beat widths.
@@ -203,11 +206,55 @@ continuation delay is an emulation scheduling quantum, not a claim about exact
 DMA bus throughput.  AXI burst shape, wait-cycle timing, panic priority and
 bus arbitration remain approximate.
 
-Circle 51's I2S sound sample now reaches its ``Playing modulated 440 Hz tone``
-loop on both ``raspi4b`` and ``raspi400``, and QEMU remains responsive.  This
-is currently a forward-progress test only: the PCM/I2S register and FIFO block
-is still an unimplemented placeholder, so no samples reach a host audio
-backend yet.
+PCM/I2S audio and BCM2711 clocks
+--------------------------------
+
+The PCM/I2S block implements its separate 64-word transmit and receive FIFOs,
+channel layouts and sample widths, packed stereo mode, FIFO thresholds and
+status, sticky errors, interrupt status, DMA requests, delayed FIFO-clear and
+``SYNC`` actions, reset, and migration.  In clock-master mode it is driven by
+the CPRMAN PCM output.  The ``raspi4b`` and ``raspi400`` machines use the
+BCM2711 firmware clock profile measured on the project's Pi 400: a 54 MHz
+oscillator, 3 GHz PLLD and 750 MHz ``plld_per``.  BCM2711 also omits the older
+feedback predivider, whose register bits have a different purpose on this SoC.
+
+Transmit samples can be sent to any normal QEMU playback backend.  The backend
+must be bound to the embedded device explicitly.  For example, this captures
+48 kHz stereo playback to a WAV file::
+
+  -audiodev wav,id=i2s,path=pi4-i2s.wav,out.frequency=48000,out.channels=2 \
+  -global bcm2835-i2s.audiodev=i2s
+
+Replace ``wav`` with a supported live backend such as ``coreaudio`` when
+audible playback is wanted.  The model derives the source sample rate from the
+PCM bit clock and frame length; QEMU's audio core converts it to the configured
+backend rate and format.
+
+Realtime TCG can deliver a 48 kHz frame timer late.  The model retains an
+absolute hardware-frame deadline, catches up elapsed frames in bounded batches
+and gives DREQ-paced DMA a chance to refill between FIFO boundaries.  It does
+not silently slow the emulated PCM clock to the host callback rate.  This is a
+functional timing model, not bit-level emulation of the serial pins.
+
+Circle 51's ``sample/34-sounddevices`` runs through its cyclic DMA I2S path on
+both ``raspi4b`` and ``raspi400``.  The pinned 48 kHz sample produces a clean
+host WAV stream at the programmed rate, with its modulated tone measured near
+440 Hz and without steady-state FIFO underruns.  This exercises the CPRMAN
+PLLD divider, two-channel 24-bit PCM framing, cyclic DMA and DREQ pacing rather
+than merely proving emulator forward progress.
+
+Receive currently supplies zero samples; host capture is not connected.  PDM
+and gray-code modes expose only shallow control/status behavior.  External PCM
+clock and frame-sync pins are not modeled, so slave mode needs an explicit
+nominal bit-clock frequency, for example::
+
+  -global bcm2835-i2s.slave-clock-frequency=3072000
+
+This advances frames periodically at the configured rate and does not model
+individual external clock or frame-sync edges.  Standby settling time,
+bit-exact gray/PDM data paths and channel-slip recovery remain approximate.
+The hardware FIFOs, controller deadlines and pending control actions migrate;
+samples already staged only in the host audio backend do not.
 
 Firmware clock and power state
 ------------------------------

@@ -162,14 +162,21 @@ QP4-UP-007: self-linked BCM2835 DMA control blocks can hang the emulator
   AArch64 sample image (SHA-256
   ``772aff938605164b3211fb934bf2470ac4f1449e08ef78b550a58ffbc4aaf041``)
   reaches ``Playing modulated 440 Hz tone`` on both ``raspi4b`` and
-  ``raspi400`` and QEMU exits immediately on SIGINT.  Because I2S remains a
-  placeholder, this proves forward progress rather than audible output.
+  ``raspi400`` and QEMU exits immediately on SIGINT.  With the fork's PCM/I2S
+  model connected, the same path produces a 48 kHz host capture whose
+  positive-crossing frequency is near 440 Hz and has no steady-state FIFO
+  underruns.  It is
+  therefore an end-to-end cyclic-DMA, DREQ and audio workload rather than only
+  a forward-progress probe.
 :Fork change: Execute at most 256 transfer operations per slice and continue
   on a migratable virtual-clock timer.  Add ACTIVE pause/resume, ABORT,
   channel-enable, DREQ/PERMAP and status behavior, byte-aligned transfers,
   functional wide-memory flags, aligned control-block pointers, bus-error
   handling, reset and migration.  Six focused DMA subtests and an active
-  Pi 4 migration test cover the state transitions and deadline.
+  Pi 4 migration test cover the state transitions and deadline.  The later
+  PCM/I2S integration performs one bounded slice immediately on a DREQ rise
+  and timer-yields any persistent request, preserving both device progress and
+  host responsiveness.
 :Report status: The outer research bundle references QEMU GitLab issue 4221,
   but its current external state was not independently retrievable during this
   documentation update.  No external submission or reply was made.
@@ -221,15 +228,42 @@ QP4-UP-011: BCM2711 CPU feature and timer defaults do not match Pi 4 silicon
 :Before sending: Split the CPU-feature and timer corrections and address
   machine-version compatibility explicitly.
 
-QP4-UP-012: BCM2711 clock, OTP, and eMMC2 data are stale
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+QP4-UP-012: BCM2711 CPRMAN uses the BCM2835 clock profile
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:Classification: bug candidate
+:Classification: bug candidate; E1 for the oscillator and PLL semantic
+  mismatch, with the captured firmware profile treated as an enhancement
 :Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
-:Observed issue: Hardware comparison found old assumptions for the 54 MHz
-  oscillator, OTP rows, and eMMC2 capabilities.
-:Before sending: Split into independently tested patches and attach Pi 400
-  register dumps with documented BCM2711 definitions.
+:Contract: The device tree QEMU supplies declares a
+  ``brcm,bcm2711-cprman`` driven by a 54 MHz ``clk-osc``.  Current QEMU instead
+  gives its internal CPRMAN clock graph the BCM2835 19.2 MHz oscillator and
+  applies the older feedback-predivider meaning to ANA1 bits 13 and 14.  The
+  maintained Linux driver explicitly disables that predivider interpretation
+  for BCM2711 because those bits select VCO range instead.
+:Observed issue: The guest-visible Linux clock graph is rooted at 54 MHz while
+  the QEMU clock graph feeding emulated devices is rooted at 19.2 MHz.  Loading
+  the BCM2711 ANA1 values also makes QEMU double PLLA, PLLB and PLLC even
+  though those bits do not select a predivider on this SoC.
+:Hardware evidence: A Pi 400 register capture plus Linux ``clk_summary`` found
+  a 54 MHz oscillator, PLLA 3 GHz, PLLB 3.6 GHz, PLLC 2.592 GHz and PLLD
+  3 GHz.  The captured ndiv, pdiv and fractional fields reproduce every rate
+  with a 54 MHz parent, and the set VCO-range bits do not double the rates.
+:Fork change: Give CPRMAN a BCM2711 profile, use the 54 MHz oscillator, omit
+  the legacy feedback predivider and initialize its PLLs, channels and muxes
+  from the captured Pi 400 firmware state.  EMMC2 then receives 100 MHz from
+  PLLD_PER divided by 7.5.  A direct qtest checks the reset registers and live
+  QEMU clock outputs; the Circle audio workload exercises PLLD_PER and the PCM
+  mux at 48 kHz.
+:Scope caveat: The oscillator and repurposed ANA bits have independent SoC
+  contracts.  The live Pi 400 dump is firmware-configured state, not proof of
+  raw silicon power-on defaults; using it as QEMU's direct-kernel-boot profile
+  is a fidelity enhancement.  Earlier OTP-row and eMMC2-capability
+  observations are separate and remain unimplemented.
+:Before sending: Separate the 54 MHz and no-predivider correctness changes
+  from the firmware-profile enhancement and from the unrelated OTP and eMMC2
+  capability observations.  The user must personally validate all register
+  evidence; this fork's AI-derived implementation and qtest cannot be sent
+  upstream.
 
 QP4-UP-013: legacy Pi interrupt outputs are not routed to BCM2711 GIC SPIs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -797,6 +831,110 @@ QP4-UP-032: BCM2835 AUX IER reports FIFO bits belonging to IIR
   disclose the automated assistance in any report.  Do not submit this fork's
   AI-derived code or test upstream; any patch must be independently produced
   by a human under QEMU's live provenance policy.
+
+QP4-UP-033: CPRMAN clock-divider writes leave derived outputs stale
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate; E1, with no demonstrated E2 or E3 failure
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Environment: ``qemu-system-aarch64`` 11.1.50
+  (``v11.1.0-453-geea8fe61b8``), a clean native arm64 current-master build on
+  macOS 14.8.7, ``-machine raspi4b -accel qtest``.  No guest CPU instructions
+  are involved.
+:Contract: CPRMAN exposes adjacent CTL and DIV words for each mux.  The model
+  stores both guest writes and its own source comment says either word must
+  call ``clock_mux_update()`` so the QEMU clock output agrees with the register
+  bank.  Its write matcher uses word indices, but tests ``cm_offset + 4`` for
+  DIV instead of the adjacent ``cm_offset + 1``.
+:Observed issue: The local research aid enabled VPU from the upstream
+  19.2 MHz oscillator with divisor 9 and observed 2,133,333 Hz.  It then stored
+  divisor 18 in ``CM_VPUDIV``; the register held ``0x00012000`` but the output
+  remained 2,133,333 Hz instead of changing to 1,066,666 Hz.  The erroneous
+  ``+ 4`` match can also make a later mux's CTL write collide with an earlier
+  mux and update the wrong output.
+:History and impact: The index error was introduced with the clock-mux skeleton
+  in commit ``7281362484a``.  Exact GitLab, qemu-devel and recent-history
+  searches on 2026-08-24 found the original 2020 CPRMAN series but no separate
+  report or later fix.  No maintained workload or external test suite is
+  currently known to fail, so the evidence stops at E1.
+:Reproducer: ``scripts/pi4/repro-cprman-derived-clocks.py`` drives MMIO and
+  reads QEMU's qtest-only clock property.  On 2026-08-24 the clean upstream
+  build reproduced the stale output, while the fork changed 6 MHz to 3 MHz
+  with its BCM2711 54 MHz oscillator.  The script is AI-derived, local-only
+  research evidence and not an upstream submission artifact.
+:Fork change: Match the actual adjacent DIV word and add an independent qtest
+  covering CTL, DIV, password rejection and disable behavior without relying
+  on the PCM/I2S model.
+:Before sending: The user must personally inspect and rerun a minimal auditable
+  reproducer on current master and disclose the automated assistance in any
+  issue.  This fork's implementation, reproducer and qtest must not be sent as
+  an upstream patch or test under QEMU's current provenance policy.
+
+QP4-UP-034: CPRMAN zero PLL-channel divider selects 255 instead of 256
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate; E1, with no demonstrated E2 or E3 failure
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Environment: The clean current-master build and qtest environment are the
+  same as QP4-UP-033.
+:Contract: Linux commit ``af5e34a41cd6`` marks BCM2835 PLL-channel dividers
+  with ``CLK_DIVIDER_MAX_AT_ZERO``.  Its generic divider implementation defines
+  a zero field as ``clk_div_mask(width) + 1``, which is 256 for the eight-bit
+  field.  QEMU's own source comment says zero is the hardware's maximum value,
+  but assigns the eight-bit mask itself, or 255.
+:Observed issue: With upstream PLLD at 2 GHz, writing zero to PLLD_PER produced
+  7,843,137 Hz, exactly the model's integer rate for PLLD divided by 255; the
+  required divide-by-256 rate is 7,812,500 Hz.  Against the fork's 3 GHz PLLD,
+  the same write produces 11,718,750 Hz as expected for division by 256.
+:History and impact: The off-by-one dates to PLL-channel implementation commit
+  ``95745811128``.  The duplicate searches described for QP4-UP-033 found no
+  exact report or later fix.  The direct qtest is synthetic and no maintained
+  workload is currently known to select zero, so the evidence stops at E1.
+:Reproducer: ``scripts/pi4/repro-cprman-derived-clocks.py`` compares the exact
+  QEMU clock period with both candidate divisors.  It is AI-derived local
+  research evidence and cannot be submitted upstream.
+:Fork change: Use mask plus one for a zero-encoded divider and cover the result
+  through a direct clock-output qtest.
+:Before sending: The user must personally validate the Linux flag, generic
+  divider semantics and current-master output and disclose the assisted
+  discovery.  Any upstream implementation and regression test must be written
+  independently by a human under the live QEMU provenance policy.
+
+QP4-UP-035: CPRMAN migration loses derived output clocks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:Classification: bug candidate; E1 migration-contract failure, with no
+  demonstrated E2 or E3 failure
+:Upstream source checked: ``eea8fe61b8be8f3016e522e6af24924a0266ca95``
+:Environment: The clean current-master build and qtest environment are the
+  same as QP4-UP-033; the test uses QEMU's file migration transport.
+:Contract: CPRMAN's version-one migration state transfers its register bank
+  and child input clocks.  Its PLL, channel and mux output clocks are derived
+  state, so the destination must reconstruct them from those migrated values
+  before execution resumes.  Restoring the registers while exposing a
+  different device clock leaves one migrated device in internally
+  contradictory state.
+:Observed issue: The research aid configured VPU for 2,133,333 Hz, migrated
+  the machine and read back the expected ``VPUCTL=0x00000091`` and
+  ``VPUDIV=0x00009000``.  The destination VPU output was nevertheless stopped
+  at zero Hz.  The fork reconstructs every PLL, channel, DSI and clock-mux
+  output after load and preserves its configured 6 MHz output.
+:History and impact: The parent register VMState has existed without a
+  post-load reconstruction hook since commit ``fc14176ba23``.  The exact
+  searches described for QP4-UP-033 found no report or later fix.  No external
+  migration workload is currently known to exercise a CPRMAN-fed device, so
+  the evidence stops at E1.
+:Reproducer: ``scripts/pi4/repro-cprman-derived-clocks.py`` performs a complete
+  source/destination migration and checks both the migrated MMIO values and
+  the qtest-only clock output.  It is AI-derived, local-only research evidence
+  and not an upstream submission artifact.
+:Fork change: Add a parent post-load callback which rebuilds all outputs in
+  dependency order, plus a direct migration qtest that changes both a PLL
+  channel and a downstream mux before migration.
+:Before sending: The user must personally rerun and inspect the migration
+  sequence, audit migration ordering and search live upstream again.  The
+  fork's AI-derived code and tests cannot be proposed upstream; any patch and
+  regression test must be independently implemented by a human.
 
 Rejected and research-only findings
 ------------------------------------

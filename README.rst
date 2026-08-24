@@ -51,9 +51,12 @@ virtual-clock slices instead of synchronously walking an entire chain.  Cyclic
 DMA therefore leaves the vCPU and event loop responsive.  The model supports
 pause/resume and abort, level-sensitive peripheral DREQ pacing, byte-aligned
 lengths, the wide-memory flags used by Circle, reset, and migration of active
-progress and its timer.  Circle's I2S example reaches its playback loop on
-both board models, but the PCM/I2S block itself is still a placeholder and no
-host audio is produced yet.
+progress and its timer.  The BCM2835-compatible PCM/I2S model provides FIFO,
+DMA-request, interrupt, framing, clock, reset and migration behavior and can
+send playback to a QEMU audio backend.  The Pi 4 machines use the measured
+BCM2711 54 MHz oscillator and firmware clock profile.  Circle's I2S example
+runs its cyclic-DMA path on both board models and produces a clean 48 kHz host
+capture with its modulated tone near 440 Hz.
 
 Both boards expose the BCM2711 PCIe root complex and the fixed VIA VL805 xHCI
 controller used for their external USB ports.  The model includes private PCI
