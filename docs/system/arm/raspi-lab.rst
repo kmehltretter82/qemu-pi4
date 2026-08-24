@@ -70,11 +70,12 @@ one, and deletes it when QEMU exits.  The guest receives no physical disk or
 user-supplied disk image; only that temporary file is modified.
 
 The runner captures the complete QEMU console and exits successfully only if
-QEMU exits cleanly and the guest prints ``PI4-LAB: upstream Linux boot
-successful``.  The guest also verifies that the USB block device can service
-a sector read before starting the integrity checks; seeing its ``/dev`` node
-alone is not considered sufficient because Linux can publish it before disk
-initialization has completed.
+QEMU exits cleanly, the guest prints ``PI4-LAB: upstream Linux boot
+successful``, and Linux reports that it registered the BCM2711 AON L2
+interrupt controller.  The guest also requires two successful target-range
+sector reads in consecutive polling intervals before starting the integrity
+checks; seeing the block device's ``/dev`` node alone is not sufficient
+because Linux can publish it while disk initialization is still in progress.
 
 The initramfs verifies that upstream Linux selected ``iproc-rng200``, obtains
 64 bytes through ``/dev/hwrng``, and reports the modeled 35050-millidegree
@@ -168,6 +169,32 @@ On 2026-08-23, the pinned upstream Linux 7.2 acceptance image passed on both
 ``raspi4b`` and ``raspi400`` with the RNG200 and thermal checks enabled.  The
 same boots also retained all PCIe, VL805, USB-storage, MSI, GENET, and Pi 400
 keyboard acceptance gates.
+
+AON L2 interrupt-controller reference evidence
+-----------------------------------------------
+
+Controlled Pi 400 probes on 2026-08-24 established the behavior used by the
+BCM2711 AON model.  With Raspberry Pi OS running, the CPU bank reported status
+``0x008`` and mask ``0x24c`` while the PCI bank reported status ``0x009`` and
+mask ``0xfff``.  The software set and clear registers acted independently in
+the two banks, mask-set and mask-clear were write-one operations, action
+registers read as zero, and only the low twelve bits were implemented.
+
+A second, cleanup-guarded probe masked child zero, generated a CEC transmit
+through the normal Linux CEC interface, and observed bit zero latch in both
+status banks.  Clearing the bit and restoring the masks returned the CPU bank
+to status ``0x008``/mask ``0x24c`` and the PCI bank to status ``0x008``/mask
+``0xfff``.  This supplies physical-source evidence that the two banks are
+independent destinations for the same twelve edge-latched inputs; it does not
+claim undocumented behavior for the absent HDMI blocks beyond that measured
+contract.
+
+On 2026-08-24, the pinned unmodified Linux 7.2 image registered
+``irq_brcmstb_l2`` at ``/soc/interrupt-controller@7ef00100`` and completed the
+full acceptance run on both ``raspi4b`` and ``raspi400``.  Focused qtests also
+proved bank-local software events, dual-bank physical events, mask and clear
+behavior, held-high edge handling, watchdog reset and migration with asserted
+outputs.
 
 GPIO reference evidence
 -----------------------

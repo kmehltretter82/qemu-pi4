@@ -96,8 +96,10 @@ QP4-UP-004: unimplemented BCM2711 DT nodes can abort recent Linux guests
   Linux probes these nodes early and can take synchronous external aborts.
   The original compatible-node loop can also miss repeated compatibles after
   nopping a node.
-:Fork change: Hide every matching unimplemented node and restart each libfdt
-  search after a successful ``fdt_nop_node()``.
+:Fork change: Model the BCM2711 always-on L2 interrupt controller and keep its
+  node.  Hide every matching unimplemented VC4, HVS, pixel-valve, HDMI, HDMI
+  DDC, DVP and V3D node, and restart each libfdt search after a successful
+  ``fdt_nop_node()``.
 :Before sending: Capture a short failing Linux console log on unmodified QEMU
   11.1.0, identify the smallest necessary node set, and decide with Raspberry
   Pi maintainers whether setting ``status = "disabled"`` is preferable to

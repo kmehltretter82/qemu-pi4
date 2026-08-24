@@ -40,6 +40,8 @@ Implemented devices
    firmware-configured clock defaults
  * BCM2835-compatible PCM/I2S controller with playback, DMA and interrupts
  * Both BCM2711 PWM controllers, with FIFO and DMA-paced stereo playback
+ * BCM2711 always-on edge-latched L2 interrupt controller, with independently
+   masked CPU and PCI banks
  * System Timer
  * GPIO controller, including all 58 input/output lines, edge and level event
    detection, and the three bank interrupts plus the all-bank interrupt
@@ -77,7 +79,6 @@ Missing devices
  * V3D 4.2 graphics accelerator (its MMIO range is an unimplemented
    placeholder)
  * BCM2711 HDMI/display pipeline and HDMI DDC I2C controllers
- * BCM2711 always-on L2 interrupt controller used by HDMI
  * Remaining BCM2711 PCIe controller-event behavior
  * Consumer-control key-event production for the Pi 400 keyboard's second HID
    interface; its identity, descriptors, enumeration and migration already
@@ -312,6 +313,40 @@ The alternative DSI0 selection for DMA request 1, DMA panic priority, APB
 synchronizer bus-error timing and GPIO alternate-function routing are not yet
 modeled.  Reading the write-only FIFO returns the observed ``pwm0`` or
 ``pwm1`` bus identifier; there is no FIFO read-data path.
+
+Always-on HDMI L2 interrupt controller
+--------------------------------------
+
+The BCM2711 always-on interrupt controller is mapped at ARM physical address
+``0xfef00100`` and is exposed through the upstream device-tree node at GPU bus
+address ``0x7ef00100``.  It has twelve edge-latched sources and two register
+banks, one for the CPU destination and one for the PCI destination.  Each bank
+has independent status, software-set, clear, mask-status, mask-set and
+mask-clear registers.  A physical rising edge latches its bit in both banks;
+software set and clear operations affect only the selected bank.  An output is
+asserted while its bank contains any unmasked pending bit.
+
+The twelve-bit implemented mask, write-one set/clear behavior and read-as-zero
+action registers were checked against the project's Pi 400.  A CEC transmit
+probe with the corresponding child interrupt masked showed the same physical
+edge latched in both the CPU and PCI status banks.  The model exposes all
+twelve physical inputs and both bank outputs.  The CPU output is connected to
+GIC SPI 96; the PCI output remains available at the device boundary but has no
+board-level destination until the corresponding consumer is modeled.
+
+Reset clears both status banks, masks every implemented source and preserves
+the externally driven input levels without inventing another edge.  Pending
+state, masks and input levels migrate, and destination-side outputs are
+reconstructed after loading.  Focused qtests cover physical and software
+events, masking, clearing a held-high source, reset and migration.
+
+The node remains present in supplied Pi 4-family device trees, and the pinned
+upstream Linux 7.2 image registers its ``irq_brcmstb_l2`` driver on both
+``raspi4b`` and ``raspi400``.  The unsupported VC4, HVS, pixel-valve, HDMI,
+HDMI DDC, DVP and V3D nodes are removed from the guest tree.  Consequently no
+HDMI source is wired to the controller yet: this model removes a Linux boot
+blocker and provides the interrupt foundation for later HDMI work, but does
+not by itself provide display or CEC emulation.
 
 Firmware clock and power state
 ------------------------------
