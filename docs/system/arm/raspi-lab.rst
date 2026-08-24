@@ -113,11 +113,14 @@ for each board model::
   scripts/pi4/test-display.py \
       --qemu build/qemu-system-aarch64 --machine raspi400
 
-The guest fills ``/dev/fb0`` with four deterministic RGB565 bands.  The gate
-waits for all Linux acceptance checks, requests a QMP screendump and validates
-red, green, blue and white samples at three different scanlines.  This
-distinguishes a merely bound DRM driver from an HVS path that actually reaches
-QEMU's display surface.
+The guest fills ``/dev/fb0`` with four deterministic RGB565 bands, enables
+universal planes through the production DRM UAPI, and attaches an otherwise
+unused RGB565 overlay plane to the active CRTC.  Linux programs the HVS to
+scale the 320x200 overlay to 640x400 at ``(320, 200)``.  The gate waits for all
+Linux acceptance checks, requests a QMP screendump, validates unobscured
+primary samples at the top and bottom, and checks every colored quadrant in
+the scaled overlay.  This distinguishes a merely bound DRM driver from an HVS
+composition path that actually reaches QEMU's display surface.
 
 To validate HDMI0 audio through the production VC4 driver and the host audio
 backend, run the dedicated gate for each board model::
@@ -271,8 +274,18 @@ The native scanout milestone intentionally uses the virtual HDMI0 monitor
 rather than pretending the disconnected physical capture supplied a display
 contract.  On both machine models the same pinned Linux image bound HVS,
 HDMI0, TXP and pixel valve 2, registered VC4 DRM, selected the virtual
-monitor's 1280x800 mode and created an RGB565 framebuffer.  The pixel gate
-then verified the framebuffer's four color bands in a QMP screendump.
+monitor's 1280x800 mode and created an RGB565 framebuffer.  The first pixel
+gate verified the framebuffer's four color bands in a QMP screendump.
+
+The 2026-08-24 composition extension exercised the production VC4 plane path
+on both ``raspi4b`` and ``raspi400``.  Linux selected plane 68 on CRTC 67,
+created a pitch-640 320x200 RGB565 dumb buffer and programmed a 640x400
+destination at ``(320, 200)``.  Host screendumps retained the unobscured
+primary bands and showed the expected green, blue, white and black overlay
+quadrants.  Focused qtests separately cover two-plane composition,
+nearest-neighbor scaling, RGB888 byte order, coverage and premultiplied alpha,
+plane-alpha mixing, horizontal and vertical reflection, live display-list
+updates and visible post-migration reconstruction.
 
 Focused qtests cover HVS display-list memory and channel state, the pixel
 valve's masked write-one-to-clear vblank interrupt and stable frame deadline,
@@ -281,11 +294,13 @@ system reset and migration while the pixel-valve timer and DDC repeated-start
 session are active.  No raw HVS, pixel-valve or HDMI-transmitter register
 writes were made on the physical Pi for this milestone.  The implemented
 register subset is justified by the upstream Linux driver path and virtual
-display contract, not claimed as a complete BCM2711 hardware reproduction.
+display contract.  Nearest-neighbor sampling is explicitly an approximation;
+neither these tests nor the physical capture establish the undocumented HVS
+filter datapath as a complete BCM2711 hardware reproduction.
 
 The same Linux driver registered the ``vc4-hdmi-0`` IEC958 playback device and
 completed the MAI/DMA 48 kHz stereo workload on both machines.  The final
-acceptance run captured 48,236 active frames on ``raspi4b`` and 47,919 on
+acceptance run captured 48,279 active frames on ``raspi4b`` and 48,221 on
 ``raspi400``;
 the measured channels were approximately 1 kHz and 2 kHz with the intended
 2.0001 RMS ratio and no internal silent frames.  The functional endpoint is
@@ -294,7 +309,7 @@ audio packets, and the physical Pi 400's disconnected ports supplied no
 monitor-derived audio comparison for this milestone.
 
 On 2026-08-24 the complete Pi-focused gate passed all eight qtest binaries and
-all 83 subtests: nine display, four CPRMAN, seven DMA, ten I2S, nine PWM,
+all 84 subtests: ten display, four CPRMAN, seven DMA, ten I2S, nine PWM,
 three I2C, five Pi 400 and 36 Pi 4B tests.  Both boards then passed the full
 Linux USB-storage/GENET/DRM acceptance boot and the separate visible-pixel
 and HDMI-audio gates.

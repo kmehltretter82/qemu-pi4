@@ -42,8 +42,9 @@ Implemented devices
  * Both BCM2711 PWM controllers, with FIFO and DMA-paced stereo playback
  * BCM2711 always-on edge-latched L2 interrupt controller, with independently
    masked CPU and PCI banks
- * BCM2711 HVS, HDMI0 pixel valve and HDMI0 transmitter, sufficient for a
-   native Linux VC4 DRM scanout to a QEMU display
+ * BCM2711 HVS, HDMI0 pixel valve and HDMI0 transmitter, including linear RGB
+   multi-plane composition and functional scaling for native Linux VC4 DRM
+   scanout to a QEMU display
  * BCM2711 HDMI DVP clock/reset controller and both HDMI DDC I2C controllers,
    with a connected virtual EDID monitor on HDMI0
  * BCM2711 HDMI0 MAI audio, with a 64-word FIFO, DMA DREQ pacing and PCM
@@ -84,9 +85,9 @@ Missing devices
 
  * V3D 4.2 graphics accelerator (its MMIO range is an unimplemented
    placeholder)
- * Remaining native-display features: HVS scaling, multi-plane composition and
-   tiled formats; pixel valves other than HDMI0's; HDMI1; dynamic hotplug, CEC
-   and signal-level TMDS and HDMI audio-packet transport
+ * Remaining native-display features: HVS tiled, compressed and YUV formats,
+   hardware filter and LBM behavior; pixel valves other than HDMI0's; HDMI1;
+   dynamic hotplug, CEC and signal-level TMDS and HDMI audio-packet transport
  * Remaining BCM2711 PCIe controller-event behavior
  * Consumer-control key-event production for the Pi 400 keyboard's second HID
    interface; its identity, descriptors, enumeration and migration already
@@ -366,14 +367,23 @@ device-tree nodes remain visible, while the other four pixel valves, HDMI1
 and V3D stay hidden.
 
 The HVS consumes the channel display list programmed by the Linux VC4 driver
-and redirects a supported primary plane to QEMU's existing Raspberry Pi
-framebuffer console.  The implemented subset is a top-left, full-screen,
-unity-size, linear single plane in RGB565, RGB888 or RGBA8888 format with the
-channel orders used by Linux.  The display-list RAM, channel controls and
-active-list pointers are guest visible and migrate.  An unsupported primary
-plane leaves the previous scanout unchanged.  If more planes follow a
-supported primary plane, multi-plane composition is reported as unimplemented
-and only that first plane is displayed.
+and redirects supported planes to QEMU's existing Raspberry Pi framebuffer
+console.  The implemented HVS5 subset composites multiple linear RGB565,
+RGB888 or RGBA8888 planes in display-list order.  It supports nonnegative
+positions with output clipping, independent horizontal and vertical
+reflection, and the fixed-alpha and pipeline-alpha modes emitted by Linux,
+including coverage, premultiplied and plane-alpha mixing behavior.  Unity
+planes use the existing dirty-page scanout fast path when possible; other
+lists use a software compositor.
+
+Scaled planes use deterministic nearest-neighbor sampling.  This is a
+functional VC4/KMS contract, not a reproduction of the HVS's PPF and TPZ
+filters, phase calculations, coefficient tables or line-buffer-memory
+behavior.  The display-list RAM, channel controls and active-list pointers are
+guest visible and migrate; destination post-load reconstructs the composite
+scanout from those registers and migrated guest RAM.  A list containing an
+unsupported format, tiling mode or alpha mode leaves the previous scanout
+unchanged.
 
 Pixel valve 2 retains its programmed register state and supplies the
 write-one-to-clear VFP-start interrupt used by Linux.  While both video-enable
@@ -433,20 +443,23 @@ The pinned upstream Linux 7.2 image binds HVS, HDMI0, TXP and pixel valve 2,
 registers ``/dev/dri/card0`` and creates a 1280x800 RGB565 ``/dev/fb0`` on
 both machines.  The acceptance init checks the connector, preferred mode and
 framebuffer geometry.  A separate end-to-end gate writes deterministic red,
-green, blue and white bands, takes a QMP screendump and validates pixels from
-each band::
+green, blue and white bands to the primary framebuffer, uses the production
+DRM UAPI to attach a second RGB565 plane, and asks VC4 to scale that 320x200
+source to 640x400 at ``(320, 200)``.  It takes a QMP screendump and validates
+unobscured primary samples plus green, blue, white and black overlay
+quadrants::
 
   scripts/pi4/test-display.py --qemu build/qemu-system-aarch64 \
       --machine raspi4b
   scripts/pi4/test-display.py --qemu build/qemu-system-aarch64 \
       --machine raspi400
 
-This is native Linux-programmed scanout, but it remains a deliberately small
-display-pipeline subset.  Scaling, arbitrary plane positions, composition,
-tiled and compressed formats, mode-derived timings, HDMI1, dynamic HPD, CEC,
-signal-level TMDS and audio-packet transport, and V3D are not modeled.  The
-DDC controller also omits the combined hardware DTF encodings and ten-bit I2C
-addressing.
+This is native Linux-programmed scanout, but it remains a deliberately bounded
+display-pipeline subset.  Tiled, compressed and YUV formats, negative
+destination coordinates, hardware scaling filters and phases, mode-derived
+timings, HDMI1, dynamic HPD, CEC, signal-level TMDS and audio-packet transport,
+and V3D are not modeled.  The DDC controller also omits the combined hardware
+DTF encodings and ten-bit I2C addressing.
 
 HDMI0 MAI audio
 ---------------
