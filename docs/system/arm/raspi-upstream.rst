@@ -249,24 +249,39 @@ QP4-UP-009: framebuffer palette tag has an interval bounds-check gap
   assisted discovery.  Do not submit this fork's AI-derived code or tests;
   any upstream fix must be independently implemented by a human.
 
-QP4-UP-037: framebuffer property tags are processed in guest order
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+QP4-UP-037: upstream processes framebuffer property tags in guest order
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:Classification: bug candidate; E1 contract mismatch pending independent
-  specification review
+:Classification: needs specification; E0 observation pending independent
+  contract review and human reproducer validation
 :Upstream source checked: ``2be159078ea26feac4c9c9902acf8906f1a05c2a``
 :Contract: The published framebuffer section says all tags in one operation
   are processed together, Get tags are processed after all Set tags, and Test
   tags must not be mixed with Get/Set tags.
 :Observed issue: A complete request containing ``GET_DEPTH`` followed by
   ``SET_DEPTH(32)`` returns the initial depth (16) for the Get tag and 32 for
-  the Set tag on both clean upstream and the fork.  The source switch handles
-  tags strictly in buffer order.  The focused observation is
+  the Set tag on clean upstream and on the pre-fix fork.  The upstream source
+  switch handles tags strictly in buffer order.  The focused observation is
   ``scripts/pi4/repro-property-contracts.py QEMU framebuffer-order``.
-:Disposition: This is tracked separately from the malformed-buffer and
-  palette safety fixes.  It needs a human review of the firmware contract,
-  especially for all framebuffer Set/Test/Palette combinations, before the
-  fork changes its response ordering or an upstream report is considered.
+:Fork change: Structurally validate the complete request before dispatch,
+  reject Test and Get/Set mixtures without tag effects, reject prohibited
+  duplicate framebuffer IDs, combine modeled configuration inputs before one
+  pass through the existing validator, stage palette inputs, and make
+  framebuffer Gets observe the final staged state while responses remain in
+  guest order.  Focused qtests cover combined modeled configuration, depth and
+  palette ordering, ordinary-tag ordering, short-payload rollback, tag-level
+  palette rejection, direct request/palette alias rejection, duplicate
+  rejection, and the separate VCHIQ namespace.  The fork additionally discards
+  staged framebuffer state when a later ordinary tag fails input validation or
+  memory access; that is a hardening policy, not a behavior claimed from the
+  firmware wiki.  This change does not claim complete configuration validation
+  or implement the documented buffer-allocation rule for every framebuffer
+  tag.
+:Disposition: The fork-side fidelity limitation is closed.  An upstream report
+  remains gated on independent human review of the firmware contract,
+  especially all framebuffer Set/Test/Palette combinations, reproduction on
+  current upstream master, duplicate searches, and the project criteria in
+  :doc:`raspi-upstream-criteria`.
 
 QP4-UP-010: framebuffer migration restores geometry without post-load checks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

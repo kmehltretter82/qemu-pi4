@@ -554,16 +554,35 @@ all-or-nothing short-buffer behavior as a documented compatibility exception.
 
 Framebuffer palette Test/Set requests require the published 24..1032-byte
 value area, validate ``offset + length`` as one interval within 256 entries,
-and stage all colors before a Set changes the emulated palette.  Invalid or
-truncated requests therefore do not partially modify palette memory.
+and stage all colors until tag dispatch completes and the palette request is
+accepted.  Invalid or truncated requests therefore do not partially modify
+palette memory.  A Set whose palette destination directly overlaps its own
+property message is rejected because the update and response cannot both
+occupy those bytes.
+
+Framebuffer operation handling implements the published ordering and
+tag-combination rules for modeled configuration fields and palette state.  All
+modeled state-changing Set inputs are staged before any framebuffer Get
+response, regardless of their order in the request, so a Get observes the
+resulting configuration and palette.  The generic tag walker still dispatches
+tags in guest order.  Mixing framebuffer Test tags with Get or Set tags is
+rejected with response code ``0x80000001`` without applying or returning any
+tag, as are duplicate framebuffer tag IDs.  Modeled Test/Set fields are
+collected into one temporary configuration and passed together through the
+existing configuration validator.  As a fork hardening policy, a later
+ordinary-tag input-validation or memory-access failure also discards staged
+framebuffer state; this is not claimed as a firmware guarantee.  Ordinary
+property groups such as VCHIQ retain normal in-order processing.  Grouping a
+framebuffer/display tag does not make an otherwise unhandled tag implemented,
+and this work does not remove existing configuration-validation or allocation
+limitations.
 
 The project's Pi 400 probes show that short responses are tag-specific in the
 real firmware: some tags truncate, some preserve the request, and some return
 an error without touching the buffer.  The fork follows the published safe
-mailbox contract rather than reproducing firmware padding overruns.  One
-remaining fidelity limitation is tracked as :doc:`raspi-upstream` item
-``QP4-UP-037``: framebuffer Get/Set grouping is not yet separated from the
-generic in-order tag walker.
+mailbox contract rather than reproducing firmware padding overruns.  The
+corresponding current-upstream framebuffer ordering mismatch remains recorded
+as :doc:`raspi-upstream` item ``QP4-UP-037``.
 
 Firmware clock and power state
 ------------------------------
