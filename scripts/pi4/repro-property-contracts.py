@@ -10,9 +10,9 @@ against an unmodified QEMU build and this fork separately:
 
 The palette mode checks the documented no-partial-apply rule by placing a
 sentinel immediately after the 256-entry palette.  The framebuffer-order mode
-is an observation of QEMU's tag-order handling against the firmware wiki's
-"Get tags ... after all Set tags" description; it is not classified as an
-upstream bug until the specification interpretation is reviewed.
+observes whether a Get tag sees a later Set in the same framebuffer operation.
+It remains evidence only until its contract interpretation and output are
+independently reviewed and manually validated.
 """
 
 import selectors
@@ -139,14 +139,23 @@ def main() -> int:
             0,
         ]
         submit(words)
+        response_status = readl(PROPERTY_BUFFER + 4)
         get_status = readl(PROPERTY_BUFFER + 16)
         get_depth = readl(PROPERTY_BUFFER + 20)
         set_status = readl(PROPERTY_BUFFER + 32)
         set_depth = readl(PROPERTY_BUFFER + 36)
+        print(f"response status:  0x{response_status:08x}")
         print(f"GET status/depth: 0x{get_status:08x} / {get_depth}")
         print(f"SET status/depth: 0x{set_status:08x} / {set_depth}")
-        if get_depth == 16 and set_depth == 32:
+        tags_accepted = (
+            response_status == PROPERTY_RESPONSE_SUCCESS
+            and get_status == (PROPERTY_RESPONSE_SUCCESS | 4)
+            and set_status == (PROPERTY_RESPONSE_SUCCESS | 4)
+        )
+        if tags_accepted and get_depth == 16 and set_depth == 32:
             print("framebuffer tags were applied in guest order")
+        elif tags_accepted and get_depth == 32 and set_depth == 32:
+            print("framebuffer GET observed the final SET state")
         else:
             print("framebuffer order differs or SET was rejected")
         return 0
