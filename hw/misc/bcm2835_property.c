@@ -26,6 +26,7 @@
 #define RPI4_VL805_PCI_DEV_ADDR (1U << 20)
 #define RPI_FIRMWARE_DEFAULT_BOARD_SERIAL 0x51454d55
 #define RPI_FIRMWARE_MAX_PROPERTY_SIZE MiB
+#define BCM2835_GPU_RAM_ALIAS_COUNT 4
 
 #define RPI_FW_DOMAIN_DEFAULTS \
     (BIT(RPI_FIRMWARE_VIDEO_SCALER_DOMAIN_ID) | \
@@ -205,15 +206,295 @@ static bool bcm2835_property_otp_range_valid(uint32_t start, uint32_t number,
     return start <= row_count && number <= row_count - start;
 }
 
+typedef struct BCM2835PropertyTag {
+    hwaddr address;
+    uint32_t id;
+    uint32_t bufsize;
+    uint32_t palette_response;
+} BCM2835PropertyTag;
+
+static bool bcm2835_property_is_framebuffer_tag(uint32_t tag)
+{
+    switch (tag) {
+    case RPI_FWREQ_FRAMEBUFFER_ALLOCATE:
+    case RPI_FWREQ_FRAMEBUFFER_BLANK:
+    case RPI_FWREQ_FRAMEBUFFER_GET_PHYSICAL_WIDTH_HEIGHT:
+    case RPI_FWREQ_FRAMEBUFFER_GET_VIRTUAL_WIDTH_HEIGHT:
+    case RPI_FWREQ_FRAMEBUFFER_GET_DEPTH:
+    case RPI_FWREQ_FRAMEBUFFER_GET_PIXEL_ORDER:
+    case RPI_FWREQ_FRAMEBUFFER_GET_ALPHA_MODE:
+    case RPI_FWREQ_FRAMEBUFFER_GET_PITCH:
+    case RPI_FWREQ_FRAMEBUFFER_GET_VIRTUAL_OFFSET:
+    case RPI_FWREQ_FRAMEBUFFER_GET_OVERSCAN:
+    case RPI_FWREQ_FRAMEBUFFER_GET_PALETTE:
+    case RPI_FWREQ_FRAMEBUFFER_GET_LAYER:
+    case RPI_FWREQ_FRAMEBUFFER_GET_TRANSFORM:
+    case RPI_FWREQ_FRAMEBUFFER_GET_VSYNC:
+    case RPI_FWREQ_FRAMEBUFFER_GET_TOUCHBUF:
+    case RPI_FWREQ_FRAMEBUFFER_GET_GPIOVIRTBUF:
+    case RPI_FWREQ_FRAMEBUFFER_RELEASE:
+    case RPI_FWREQ_FRAMEBUFFER_GET_DISPLAY_ID:
+    case RPI_FWREQ_FRAMEBUFFER_SET_DISPLAY_NUM:
+    case RPI_FWREQ_FRAMEBUFFER_GET_NUM_DISPLAYS:
+    case RPI_FWREQ_FRAMEBUFFER_GET_DISPLAY_SETTINGS:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_PHYSICAL_WIDTH_HEIGHT:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_VIRTUAL_WIDTH_HEIGHT:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_DEPTH:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_PIXEL_ORDER:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_ALPHA_MODE:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_VIRTUAL_OFFSET:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_OVERSCAN:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_PALETTE:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_LAYER:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_TRANSFORM:
+    case RPI_FWREQ_FRAMEBUFFER_TEST_VSYNC:
+    case RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT:
+    case RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT:
+    case RPI_FWREQ_FRAMEBUFFER_SET_DEPTH:
+    case RPI_FWREQ_FRAMEBUFFER_SET_PIXEL_ORDER:
+    case RPI_FWREQ_FRAMEBUFFER_SET_ALPHA_MODE:
+    case RPI_FWREQ_FRAMEBUFFER_SET_PITCH:
+    case RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_OFFSET:
+    case RPI_FWREQ_FRAMEBUFFER_SET_OVERSCAN:
+    case RPI_FWREQ_FRAMEBUFFER_SET_PALETTE:
+    case RPI_FWREQ_FRAMEBUFFER_SET_TOUCHBUF:
+    case RPI_FWREQ_FRAMEBUFFER_SET_GPIOVIRTBUF:
+    case RPI_FWREQ_FRAMEBUFFER_SET_VSYNC:
+    case RPI_FWREQ_FRAMEBUFFER_SET_LAYER:
+    case RPI_FWREQ_FRAMEBUFFER_SET_TRANSFORM:
+    case RPI_FWREQ_FRAMEBUFFER_SET_BACKLIGHT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool bcm2835_property_is_framebuffer_test_tag(uint32_t tag)
+{
+    return bcm2835_property_is_framebuffer_tag(tag) &&
+           (tag & 0xc000) ==
+           (RPI_FWREQ_FRAMEBUFFER_TEST_DEPTH & 0xc000);
+}
+
+static bool bcm2835_property_stage_framebuffer_config(
+    BCM2835PropertyState *s, const GArray *tags, BCM2835FBConfig *config,
+    bool *config_updated)
+{
+    bool config_tag_found = false;
+
+    for (guint i = 0; i < tags->len; i++) {
+        const BCM2835PropertyTag *property_tag =
+            &g_array_index(tags, BCM2835PropertyTag, i);
+        hwaddr payload = property_tag->address +
+                         sizeof(rpi_firmware_prop_request_t);
+        uint32_t tag = property_tag->id;
+        uint32_t first;
+        uint32_t second;
+
+        switch (tag) {
+        case RPI_FWREQ_FRAMEBUFFER_TEST_PHYSICAL_WIDTH_HEIGHT:
+        case RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT:
+            if (!bcm2835_property_tag_read_u32(
+                    s, payload, property_tag->bufsize, 0, &first) ||
+                !bcm2835_property_tag_read_u32(
+                    s, payload, property_tag->bufsize, sizeof(uint32_t),
+                    &second)) {
+                return false;
+            }
+            config->xres = first;
+            config->yres = second;
+            break;
+        case RPI_FWREQ_FRAMEBUFFER_TEST_VIRTUAL_WIDTH_HEIGHT:
+        case RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT:
+            if (!bcm2835_property_tag_read_u32(
+                    s, payload, property_tag->bufsize, 0, &first) ||
+                !bcm2835_property_tag_read_u32(
+                    s, payload, property_tag->bufsize, sizeof(uint32_t),
+                    &second)) {
+                return false;
+            }
+            config->xres_virtual = first;
+            config->yres_virtual = second;
+            break;
+        case RPI_FWREQ_FRAMEBUFFER_TEST_DEPTH:
+        case RPI_FWREQ_FRAMEBUFFER_SET_DEPTH:
+            if (!bcm2835_property_tag_read_u32(
+                    s, payload, property_tag->bufsize, 0, &first)) {
+                return false;
+            }
+            config->bpp = first;
+            break;
+        case RPI_FWREQ_FRAMEBUFFER_TEST_PIXEL_ORDER:
+        case RPI_FWREQ_FRAMEBUFFER_SET_PIXEL_ORDER:
+            if (!bcm2835_property_tag_read_u32(
+                    s, payload, property_tag->bufsize, 0, &first)) {
+                return false;
+            }
+            config->pixo = first;
+            break;
+        case RPI_FWREQ_FRAMEBUFFER_TEST_ALPHA_MODE:
+        case RPI_FWREQ_FRAMEBUFFER_SET_ALPHA_MODE:
+            if (!bcm2835_property_tag_read_u32(
+                    s, payload, property_tag->bufsize, 0, &first)) {
+                return false;
+            }
+            config->alpha = first;
+            break;
+        case RPI_FWREQ_FRAMEBUFFER_TEST_VIRTUAL_OFFSET:
+        case RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_OFFSET:
+            if (!bcm2835_property_tag_read_u32(
+                    s, payload, property_tag->bufsize, 0, &first) ||
+                !bcm2835_property_tag_read_u32(
+                    s, payload, property_tag->bufsize, sizeof(uint32_t),
+                    &second)) {
+                return false;
+            }
+            config->xoffset = first;
+            config->yoffset = second;
+            break;
+        default:
+            continue;
+        }
+
+        config_tag_found = true;
+        if (!bcm2835_property_is_framebuffer_test_tag(tag)) {
+            *config_updated = true;
+        }
+    }
+
+    if (config_tag_found) {
+        bcm2835_fb_validate_config(config);
+    }
+    return true;
+}
+
+static bool bcm2835_property_load_framebuffer_palette(
+    BCM2835PropertyState *s, uint32_t *palette)
+{
+    for (size_t i = 0; i < 256; i++) {
+        if (!bcm2835_property_read_u32(
+                s, s->fbdev->vcram_base + i * sizeof(uint32_t),
+                &palette[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool bcm2835_property_palette_update_overlaps_request(
+    BCM2835PropertyState *s, uint32_t offset, uint32_t length,
+    uint32_t request_length)
+{
+    uint64_t update_offset = (s->fbdev->vcram_base +
+                              offset * sizeof(uint32_t)) & (GiB - 1);
+    uint64_t update_length = length * sizeof(uint32_t);
+    uint64_t request_start = s->addr;
+    uint64_t request_end = request_start + request_length;
+
+    /* The GPU bus maps the same RAM through four 1 GiB cache aliases. */
+    for (unsigned int i = 0; i < BCM2835_GPU_RAM_ALIAS_COUNT; i++) {
+        uint64_t update_start = update_offset + i * GiB;
+        uint64_t update_end = update_start + update_length;
+
+        if (update_start < request_end && request_start < update_end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool bcm2835_property_stage_framebuffer_palette(
+    BCM2835PropertyState *s, GArray *tags, uint32_t *palette,
+    bool *palette_loaded, bool *palette_updated, uint32_t *update_offset,
+    uint32_t *update_length, uint32_t request_length)
+{
+    for (guint i = 0; i < tags->len; i++) {
+        BCM2835PropertyTag *property_tag =
+            &g_array_index(tags, BCM2835PropertyTag, i);
+        hwaddr payload = property_tag->address +
+                         sizeof(rpi_firmware_prop_request_t);
+        uint32_t colors[256];
+        uint32_t offset;
+        uint32_t length;
+
+        if (property_tag->id == RPI_FWREQ_FRAMEBUFFER_GET_PALETTE) {
+            if (!*palette_loaded &&
+                !bcm2835_property_load_framebuffer_palette(s, palette)) {
+                return false;
+            }
+            *palette_loaded = true;
+            continue;
+        }
+        if (property_tag->id != RPI_FWREQ_FRAMEBUFFER_TEST_PALETTE &&
+            property_tag->id != RPI_FWREQ_FRAMEBUFFER_SET_PALETTE) {
+            continue;
+        }
+
+        if (!bcm2835_property_tag_read_u32(
+                s, payload, property_tag->bufsize, 0, &offset) ||
+            !bcm2835_property_tag_read_u32(
+                s, payload, property_tag->bufsize, sizeof(uint32_t),
+                &length)) {
+            return false;
+        }
+
+        property_tag->palette_response = 1;
+        if (property_tag->bufsize < 6 * sizeof(uint32_t) ||
+            property_tag->bufsize > 2 * sizeof(uint32_t) + sizeof(colors) ||
+            length == 0 || offset >= 256 || length > 256 - offset ||
+            property_tag->bufsize < 2 * sizeof(uint32_t) +
+                                    length * sizeof(uint32_t)) {
+            continue;
+        }
+
+        for (size_t j = 0; j < length; j++) {
+            if (!bcm2835_property_tag_read_u32(
+                    s, payload, property_tag->bufsize,
+                    (j + 2) * sizeof(uint32_t), &colors[j])) {
+                return false;
+            }
+        }
+        property_tag->palette_response = 0;
+
+        if (property_tag->id == RPI_FWREQ_FRAMEBUFFER_SET_PALETTE) {
+            /* A response and a palette update cannot occupy the same bytes. */
+            if (bcm2835_property_palette_update_overlaps_request(
+                    s, offset, length, request_length)) {
+                property_tag->palette_response = 1;
+                continue;
+            }
+            if (!*palette_loaded &&
+                !bcm2835_property_load_framebuffer_palette(s, palette)) {
+                return false;
+            }
+            *palette_loaded = true;
+            for (size_t j = 0; j < length; j++) {
+                palette[offset + j] = colors[j];
+            }
+            *palette_updated = true;
+            *update_offset = offset;
+            *update_length = length;
+        }
+    }
+
+    return true;
+}
+
 static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
                                        uint32_t mbox_value)
 {
+    g_autoptr(GArray) tags =
+        g_array_new(false, false, sizeof(BCM2835PropertyTag));
+    g_autoptr(GHashTable) framebuffer_tag_ids =
+        g_hash_table_new(g_direct_hash, g_direct_equal);
     uint32_t tot_len;
     uint32_t request_code;
     uint64_t end;
     hwaddr value;
     bool end_tag_found = false;
     bool parse_error = false;
+    bool framebuffer_test_tags = false;
+    bool framebuffer_get_set_tags = false;
 
     /*
      * Copy the current state of the framebuffer config; we will update
@@ -222,6 +503,11 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
      */
     BCM2835FBConfig fbconfig = s->fbdev->config;
     bool fbconfig_updated = false;
+    uint32_t fbpalette[256];
+    bool fbpalette_loaded = false;
+    bool fbpalette_updated = false;
+    uint32_t fbpalette_update_offset = 0;
+    uint32_t fbpalette_update_length = 0;
 
     s->addr = mbox_value & ~0xf;
 
@@ -245,15 +531,12 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
     end = (uint64_t)s->addr + tot_len;
     value = s->addr + 8;
     while (!parse_error) {
+        BCM2835PropertyTag property_tag;
         uint32_t tag;
         uint32_t bufsize;
         uint32_t tag_code;
-        uint32_t resplen = 0;
         uint64_t padded;
         uint64_t next;
-        hwaddr payload;
-        bool handled = true;
-        bool tag_error = false;
 
         if (value > end || end - value < sizeof(tag) ||
             !bcm2835_property_read_u32(s, value, &tag)) {
@@ -278,7 +561,58 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
             parse_error = true;
             break;
         }
-        payload = value + sizeof(rpi_firmware_prop_request_t);
+
+        property_tag = (BCM2835PropertyTag) {
+            .address = value,
+            .id = tag,
+            .bufsize = bufsize,
+            .palette_response = 0,
+        };
+        if (bcm2835_property_is_framebuffer_test_tag(tag)) {
+            framebuffer_test_tags = true;
+        } else if (bcm2835_property_is_framebuffer_tag(tag)) {
+            framebuffer_get_set_tags = true;
+        }
+        if (bcm2835_property_is_framebuffer_tag(tag) &&
+            !g_hash_table_add(framebuffer_tag_ids, GUINT_TO_POINTER(tag))) {
+            parse_error = true;
+            break;
+        }
+        g_array_append_val(tags, property_tag);
+        value = next;
+    }
+
+    if (!end_tag_found ||
+        (framebuffer_test_tags && framebuffer_get_set_tags)) {
+        parse_error = true;
+    }
+    if (parse_error) {
+        goto response;
+    }
+    if (!bcm2835_property_stage_framebuffer_config(
+            s, tags, &fbconfig, &fbconfig_updated)) {
+        parse_error = true;
+        goto response;
+    }
+    if (!bcm2835_property_stage_framebuffer_palette(
+            s, tags, fbpalette, &fbpalette_loaded, &fbpalette_updated,
+            &fbpalette_update_offset, &fbpalette_update_length, tot_len)) {
+        parse_error = true;
+        goto response;
+    }
+
+    for (guint i = 0; !parse_error && i < tags->len; i++) {
+        const BCM2835PropertyTag *property_tag =
+            &g_array_index(tags, BCM2835PropertyTag, i);
+        uint32_t tag = property_tag->id;
+        uint32_t bufsize = property_tag->bufsize;
+        uint32_t resplen = 0;
+        hwaddr payload = property_tag->address +
+                         sizeof(rpi_firmware_prop_request_t);
+        bool handled = true;
+        bool tag_error = false;
+
+        value = property_tag->address;
 
         /* @(value + 8) : Request/response indicator */
         switch (tag) {
@@ -536,9 +870,6 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
             resplen = 0;
             break;
         case RPI_FWREQ_FRAMEBUFFER_BLANK:
-        case RPI_FWREQ_FRAMEBUFFER_TEST_DEPTH:
-        case RPI_FWREQ_FRAMEBUFFER_TEST_PIXEL_ORDER:
-        case RPI_FWREQ_FRAMEBUFFER_TEST_ALPHA_MODE:
         {
             uint32_t requested;
 
@@ -551,71 +882,29 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
             resplen = 4;
             break;
         }
+        case RPI_FWREQ_FRAMEBUFFER_TEST_DEPTH:
+            resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.bpp, &tag_error);
+            break;
+        case RPI_FWREQ_FRAMEBUFFER_TEST_PIXEL_ORDER:
+            resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.pixo, &tag_error);
+            break;
+        case RPI_FWREQ_FRAMEBUFFER_TEST_ALPHA_MODE:
+            resplen = 4;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.alpha, &tag_error);
+            break;
         case RPI_FWREQ_FRAMEBUFFER_TEST_PHYSICAL_WIDTH_HEIGHT:
+            resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xres, &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yres, &tag_error);
+            break;
         case RPI_FWREQ_FRAMEBUFFER_TEST_VIRTUAL_WIDTH_HEIGHT:
-        case RPI_FWREQ_FRAMEBUFFER_TEST_VIRTUAL_OFFSET:
-        {
-            uint32_t first;
-            uint32_t second;
-
-            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
-                                               &first) ||
-                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
-                                               &second)) {
-                tag_error = true;
-                break;
-            }
-            (void)first;
-            (void)second;
-            resplen = 8;
-            break;
-        }
-        case RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT:
-        {
-            uint32_t xres;
-            uint32_t yres;
-
-            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
-                                               &xres) ||
-                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
-                                               &yres)) {
-                tag_error = true;
-                break;
-            }
-            fbconfig.xres = xres;
-            fbconfig.yres = yres;
-            bcm2835_fb_validate_config(&fbconfig);
-            fbconfig_updated = true;
-            resplen = 8;
-            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
-                                           fbconfig.xres, &tag_error);
-            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
-                                           fbconfig.yres, &tag_error);
-            break;
-        }
-        case RPI_FWREQ_FRAMEBUFFER_GET_PHYSICAL_WIDTH_HEIGHT:
-            resplen = 8;
-            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
-                                           fbconfig.xres, &tag_error);
-            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
-                                           fbconfig.yres, &tag_error);
-            break;
-        case RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT:
-        {
-            uint32_t xres;
-            uint32_t yres;
-
-            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
-                                               &xres) ||
-                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
-                                               &yres)) {
-                tag_error = true;
-                break;
-            }
-            fbconfig.xres_virtual = xres;
-            fbconfig.yres_virtual = yres;
-            bcm2835_fb_validate_config(&fbconfig);
-            fbconfig_updated = true;
             resplen = 8;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
                                            fbconfig.xres_virtual,
@@ -624,7 +913,36 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
                                            fbconfig.yres_virtual,
                                            &tag_error);
             break;
-        }
+        case RPI_FWREQ_FRAMEBUFFER_TEST_VIRTUAL_OFFSET:
+            resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xoffset, &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yoffset, &tag_error);
+            break;
+        case RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT:
+            resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xres, &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yres, &tag_error);
+            break;
+        case RPI_FWREQ_FRAMEBUFFER_GET_PHYSICAL_WIDTH_HEIGHT:
+            resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xres, &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yres, &tag_error);
+            break;
+        case RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT:
+            resplen = 8;
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
+                                           fbconfig.xres_virtual,
+                                           &tag_error);
+            bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
+                                           fbconfig.yres_virtual,
+                                           &tag_error);
+            break;
         case RPI_FWREQ_FRAMEBUFFER_GET_VIRTUAL_WIDTH_HEIGHT:
             resplen = 8;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
@@ -635,66 +953,30 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
                                            &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_SET_DEPTH:
-        {
-            uint32_t depth;
-
-            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
-                                               &depth)) {
-                tag_error = true;
-                break;
-            }
-            fbconfig.bpp = depth;
-            bcm2835_fb_validate_config(&fbconfig);
-            fbconfig_updated = true;
             resplen = 4;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
                                            fbconfig.bpp, &tag_error);
             break;
-        }
         case RPI_FWREQ_FRAMEBUFFER_GET_DEPTH:
             resplen = 4;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
                                            fbconfig.bpp, &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_SET_PIXEL_ORDER:
-        {
-            uint32_t pixel_order;
-
-            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
-                                               &pixel_order)) {
-                tag_error = true;
-                break;
-            }
-            fbconfig.pixo = pixel_order;
-            bcm2835_fb_validate_config(&fbconfig);
-            fbconfig_updated = true;
             resplen = 4;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
                                            fbconfig.pixo, &tag_error);
             break;
-        }
         case RPI_FWREQ_FRAMEBUFFER_GET_PIXEL_ORDER:
             resplen = 4;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
                                            fbconfig.pixo, &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_SET_ALPHA_MODE:
-        {
-            uint32_t alpha;
-
-            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
-                                               &alpha)) {
-                tag_error = true;
-                break;
-            }
-            fbconfig.alpha = alpha;
-            bcm2835_fb_validate_config(&fbconfig);
-            fbconfig_updated = true;
             resplen = 4;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
                                            fbconfig.alpha, &tag_error);
             break;
-        }
         case RPI_FWREQ_FRAMEBUFFER_GET_ALPHA_MODE:
             resplen = 4;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
@@ -707,28 +989,12 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
                 &tag_error);
             break;
         case RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_OFFSET:
-        {
-            uint32_t xoffset;
-            uint32_t yoffset;
-
-            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
-                                               &xoffset) ||
-                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
-                                               &yoffset)) {
-                tag_error = true;
-                break;
-            }
-            fbconfig.xoffset = xoffset;
-            fbconfig.yoffset = yoffset;
-            bcm2835_fb_validate_config(&fbconfig);
-            fbconfig_updated = true;
             resplen = 8;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
                                            fbconfig.xoffset, &tag_error);
             bcm2835_property_tag_write_u32(s, payload, bufsize, 4,
                                            fbconfig.yoffset, &tag_error);
             break;
-        }
         case RPI_FWREQ_FRAMEBUFFER_GET_VIRTUAL_OFFSET:
             resplen = 8;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0,
@@ -759,74 +1025,24 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
             }
             break;
         case RPI_FWREQ_FRAMEBUFFER_GET_PALETTE:
-        {
-            uint32_t colors[256];
-
-            for (size_t i = 0; i < G_N_ELEMENTS(colors); i++) {
-                if (!bcm2835_property_read_u32(
-                        s, s->fbdev->vcram_base + i * sizeof(uint32_t),
-                        &colors[i])) {
-                    tag_error = true;
-                    break;
-                }
-            }
-            resplen = sizeof(colors);
-            if (!tag_error) {
-                for (size_t i = 0; i < G_N_ELEMENTS(colors); i++) {
+            resplen = sizeof(fbpalette);
+            if (!fbpalette_loaded) {
+                tag_error = true;
+            } else {
+                for (size_t i = 0; i < G_N_ELEMENTS(fbpalette); i++) {
                     bcm2835_property_tag_write_u32(
-                        s, payload, bufsize, i * sizeof(uint32_t), colors[i],
-                        &tag_error);
+                        s, payload, bufsize, i * sizeof(uint32_t),
+                        fbpalette[i], &tag_error);
                 }
             }
             break;
-        }
         case RPI_FWREQ_FRAMEBUFFER_TEST_PALETTE:
         case RPI_FWREQ_FRAMEBUFFER_SET_PALETTE:
-        {
-            uint32_t colors[256];
-            uint32_t offset;
-            uint32_t length;
-            uint32_t resp = 1;
-
-            if (!bcm2835_property_tag_read_u32(s, payload, bufsize, 0,
-                                               &offset) ||
-                !bcm2835_property_tag_read_u32(s, payload, bufsize, 4,
-                                               &length)) {
-                tag_error = true;
-                break;
-            }
-            if (bufsize >= 6 * sizeof(uint32_t) &&
-                length > 0 && offset < G_N_ELEMENTS(colors) &&
-                length <= G_N_ELEMENTS(colors) - offset &&
-                bufsize >= 2 * sizeof(uint32_t) +
-                           length * sizeof(uint32_t)) {
-                for (size_t i = 0; i < length; i++) {
-                    if (!bcm2835_property_tag_read_u32(
-                            s, payload, bufsize,
-                            (i + 2) * sizeof(uint32_t), &colors[i])) {
-                        tag_error = true;
-                        break;
-                    }
-                }
-                if (!tag_error) {
-                    resp = 0;
-                }
-            }
-            if (resp == 0 && tag == RPI_FWREQ_FRAMEBUFFER_SET_PALETTE) {
-                for (size_t i = 0; i < length; i++) {
-                    if (!bcm2835_property_write_u32(
-                            s, s->fbdev->vcram_base +
-                               (offset + i) * sizeof(uint32_t), colors[i])) {
-                        tag_error = true;
-                        break;
-                    }
-                }
-            }
             resplen = 4;
-            bcm2835_property_tag_write_u32(s, payload, bufsize, 0, resp,
-                                           &tag_error);
+            bcm2835_property_tag_write_u32(
+                s, payload, bufsize, 0, property_tag->palette_response,
+                &tag_error);
             break;
-        }
         case RPI_FWREQ_FRAMEBUFFER_GET_NUM_DISPLAYS:
             resplen = 4;
             bcm2835_property_tag_write_u32(s, payload, bufsize, 0, 1,
@@ -1238,16 +1454,26 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
             parse_error = true;
             break;
         }
-        value = next;
-    }
-
-    if (!end_tag_found) {
-        parse_error = true;
     }
 
 response:
-    /* Reconfigure framebuffer if required */
-    if (fbconfig_updated) {
+    if (!parse_error && fbpalette_updated) {
+        for (size_t i = 0; i < fbpalette_update_length; i++) {
+            size_t index = fbpalette_update_offset + i;
+
+            fbpalette[index] = cpu_to_le32(fbpalette[index]);
+        }
+        if (!bcm2835_property_memory_write(
+                s, s->fbdev->vcram_base +
+                   fbpalette_update_offset * sizeof(uint32_t),
+                &fbpalette[fbpalette_update_offset],
+                fbpalette_update_length * sizeof(uint32_t))) {
+            parse_error = true;
+        }
+    }
+
+    /* Reconfigure only after tag dispatch completes without a request error. */
+    if (!parse_error && fbconfig_updated) {
         bcm2835_fb_reconfigure(s->fbdev, &fbconfig);
     }
 
