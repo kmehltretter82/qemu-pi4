@@ -32,6 +32,7 @@
 #endif
 
 #define RASPI4_VCRAM_BASE      0x3c000000
+#define RASPI4_GPU_RAM_ALIAS   0x40000000
 
 #define PROPERTY_RESPONSE_SUCCESS 0x80000000
 #define PROPERTY_RESPONSE_ERROR   0x80000001
@@ -2300,15 +2301,18 @@ static void property_request(uint32_t tag, const uint32_t *payload,
     property_request_qtest(global_qtest, tag, payload, words, response_bytes);
 }
 
-static void property_submit_raw(void)
+static void property_submit_raw_at(uint32_t address)
 {
     uint32_t response;
 
-    writel(RASPI4_MBOX_WRITE,
-           RASPI4_PROPERTY_BUFFER | MBOX_CHAN_PROPERTY);
+    writel(RASPI4_MBOX_WRITE, address | MBOX_CHAN_PROPERTY);
     response = readl(RASPI4_MBOX_READ);
-    g_assert_cmphex(response, ==,
-                    RASPI4_PROPERTY_BUFFER | MBOX_CHAN_PROPERTY);
+    g_assert_cmphex(response, ==, address | MBOX_CHAN_PROPERTY);
+}
+
+static void property_submit_raw(void)
+{
+    property_submit_raw_at(RASPI4_PROPERTY_BUFFER);
 }
 
 static uint32_t property_payload_qtest(QTestState *qts, size_t word)
@@ -2665,6 +2669,345 @@ static void test_firmware_malformed_buffers(void)
                      sizeof(get_customer_otp));
     g_assert_cmphex(property_payload(2), ==, 0);
     g_assert_cmphex(property_payload(3), ==, 0);
+}
+
+static void test_firmware_framebuffer_operation(void)
+{
+    uint8_t message[1084];
+    const uint32_t get_depth[] = { UINT32_MAX };
+    const uint32_t set_depth_16[] = { 16 };
+    const uint32_t set_depth_32[] = { 32 };
+    const uint32_t size_640x480[] = { 640, 480 };
+    const uint64_t palette_254 = RASPI4_VCRAM_BASE + 254 * sizeof(uint32_t);
+    const uint64_t palette_255 = RASPI4_VCRAM_BASE + 255 * sizeof(uint32_t);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_DEPTH, set_depth_16,
+                     G_N_ELEMENTS(set_depth_16), sizeof(set_depth_16));
+    g_assert_cmphex(property_payload(0), ==, 16);
+
+    /* Framebuffer Get tags observe all Set tags in the same operation. */
+    memset(message, 0, 44);
+    stl_le_p(message, 44);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_GET_DEPTH);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 20, UINT32_MAX);
+    stl_le_p(message + 24, RPI_FWREQ_FRAMEBUFFER_SET_DEPTH);
+    stl_le_p(message + 28, 4);
+    stl_le_p(message + 36, 32);
+    stl_le_p(message + 40, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 44);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 32);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 32), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 36), ==, 32);
+
+    /* Ordinary tags retain their original position around framebuffer Gets. */
+    memset(message, 0, 40);
+    stl_le_p(message, 40);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_GET_DEPTH);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 20, UINT32_MAX);
+    stl_le_p(message + 24, RPI_FWREQ_GET_TEMPERATURE);
+    stl_le_p(message + 28, 0);
+    stl_le_p(message + 36, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 40);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 32);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 32), ==, 0);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT,
+                     size_640x480, G_N_ELEMENTS(size_640x480),
+                     sizeof(size_640x480));
+    g_assert_cmphex(property_payload(0), ==, 640);
+    g_assert_cmphex(property_payload(1), ==, 480);
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT,
+                     size_640x480, G_N_ELEMENTS(size_640x480),
+                     sizeof(size_640x480));
+    g_assert_cmphex(property_payload(0), ==, 640);
+    g_assert_cmphex(property_payload(1), ==, 480);
+
+    /* All configuration setters are combined before validation. */
+    memset(message, 0, 92);
+    stl_le_p(message, 92);
+    stl_le_p(message + 8,
+             RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT);
+    stl_le_p(message + 12, 8);
+    stl_le_p(message + 28,
+             RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT);
+    stl_le_p(message + 32, 8);
+    stl_le_p(message + 40, 800);
+    stl_le_p(message + 44, 600);
+    stl_le_p(message + 48,
+             RPI_FWREQ_FRAMEBUFFER_GET_VIRTUAL_WIDTH_HEIGHT);
+    stl_le_p(message + 52, 8);
+    stl_le_p(message + 68,
+             RPI_FWREQ_FRAMEBUFFER_GET_PHYSICAL_WIDTH_HEIGHT);
+    stl_le_p(message + 72, 8);
+    stl_le_p(message + 88, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 92);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0x80000008);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 800);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 24), ==, 600);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 36), ==, 0x80000008);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 40), ==, 800);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 44), ==, 600);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 56), ==, 0x80000008);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 60), ==, 800);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 64), ==, 600);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 76), ==, 0x80000008);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 80), ==, 800);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 84), ==, 600);
+
+    /* Mixing Test with Set/Get is invalid and returns no tag responses. */
+    memset(message, 0, 44);
+    stl_le_p(message, 44);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_SET_DEPTH);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 20, 16);
+    stl_le_p(message + 24, RPI_FWREQ_FRAMEBUFFER_TEST_DEPTH);
+    stl_le_p(message + 28, 4);
+    stl_le_p(message + 36, 16);
+    stl_le_p(message + 40, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 44);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 32), ==, 0);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_GET_DEPTH, get_depth,
+                     G_N_ELEMENTS(get_depth), sizeof(get_depth));
+    g_assert_cmphex(property_payload(0), ==, 32);
+
+    /* Other 0x0004xxxx properties are not part of the framebuffer group. */
+    memset(message, 0, 44);
+    stl_le_p(message, 44);
+    stl_le_p(message + 8, RPI_FWREQ_VCHIQ_INIT);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 20, UINT32_MAX);
+    stl_le_p(message + 24, RPI_FWREQ_FRAMEBUFFER_TEST_DEPTH);
+    stl_le_p(message + 28, 4);
+    stl_le_p(message + 36, 16);
+    stl_le_p(message + 40, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 44);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 32), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 36), ==, 16);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_GET_DEPTH, get_depth,
+                     G_N_ELEMENTS(get_depth), sizeof(get_depth));
+    g_assert_cmphex(property_payload(0), ==, 32);
+
+    memset(message, 0, 44);
+    stl_le_p(message, 44);
+    stl_le_p(message + 8, RPI_FWREQ_VCHIQ_INIT);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 20, UINT32_MAX);
+    stl_le_p(message + 24, RPI_FWREQ_VCHIQ_INIT);
+    stl_le_p(message + 28, 4);
+    stl_le_p(message + 36, UINT32_MAX);
+    stl_le_p(message + 40, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 44);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 32), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 36), ==, 0);
+
+    /* Duplicate framebuffer tags are rejected deterministically. */
+    memset(message, 0, 44);
+    stl_le_p(message, 44);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_SET_DEPTH);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 20, 16);
+    stl_le_p(message + 24, RPI_FWREQ_FRAMEBUFFER_SET_DEPTH);
+    stl_le_p(message + 28, 4);
+    stl_le_p(message + 36, 24);
+    stl_le_p(message + 40, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 44);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 32), ==, 0);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_GET_DEPTH, get_depth,
+                     G_N_ELEMENTS(get_depth), sizeof(get_depth));
+    g_assert_cmphex(property_payload(0), ==, 32);
+
+    /* A later invalid framebuffer tag prevents earlier Set side effects. */
+    memset(message, 0, 44);
+    stl_le_p(message, 44);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_SET_DEPTH);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 20, 16);
+    stl_le_p(message + 24, RPI_FWREQ_FRAMEBUFFER_SET_PALETTE);
+    stl_le_p(message + 28, 4);
+    stl_le_p(message + 36, 254);
+    stl_le_p(message + 40, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 44);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 32), ==, 0);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_GET_DEPTH, get_depth,
+                     G_N_ELEMENTS(get_depth), sizeof(get_depth));
+    g_assert_cmphex(property_payload(0), ==, 32);
+
+    /* A palette rejection does not contradict another successful Set. */
+    memset(message, 0, 64);
+    stl_le_p(message, 64);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_SET_DEPTH);
+    stl_le_p(message + 12, 4);
+    stl_le_p(message + 20, 16);
+    stl_le_p(message + 24, RPI_FWREQ_FRAMEBUFFER_SET_PALETTE);
+    stl_le_p(message + 28, 6 * sizeof(uint32_t));
+    stl_le_p(message + 36, 256);
+    stl_le_p(message + 40, 1);
+    stl_le_p(message + 44, 0xdeadbeef);
+    stl_le_p(message + 60, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 64);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 16);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 32), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 36), ==, 1);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_GET_DEPTH, get_depth,
+                     G_N_ELEMENTS(get_depth), sizeof(get_depth));
+    g_assert_cmphex(property_payload(0), ==, 16);
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_DEPTH, set_depth_32,
+                     G_N_ELEMENTS(set_depth_32), sizeof(set_depth_32));
+    g_assert_cmphex(property_payload(0), ==, 32);
+
+    /* Palette staging must not rewrite untouched, aliased request words. */
+    memset(message, 0, 48);
+    stl_le_p(message, 48);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_SET_PALETTE);
+    stl_le_p(message + 12, 6 * sizeof(uint32_t));
+    stl_le_p(message + 20, 254);
+    stl_le_p(message + 24, 2);
+    stl_le_p(message + 28, 0xaabbccdd);
+    stl_le_p(message + 32, 0x55667788);
+    stl_le_p(message + 44, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_VCRAM_BASE, message, 48);
+    property_submit_raw_at(RASPI4_VCRAM_BASE);
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE + 16), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE + 20), ==, 0);
+    g_assert_cmphex(readl(palette_254), ==, 0xaabbccdd);
+    g_assert_cmphex(readl(palette_255), ==, 0x55667788);
+
+    /* Reject a palette update that would overwrite its own response. */
+    memset(message, 0, 48);
+    stl_le_p(message, 48);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_SET_PALETTE);
+    stl_le_p(message + 12, 6 * sizeof(uint32_t));
+    stl_le_p(message + 20, 1);
+    stl_le_p(message + 24, 1);
+    stl_le_p(message + 28, 0xdeadbeef);
+    stl_le_p(message + 44, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_VCRAM_BASE, message, 48);
+    property_submit_raw_at(RASPI4_VCRAM_BASE);
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE + 16), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE + 20), ==, 1);
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE + 4), !=, 0xdeadbeef);
+
+    /* The overlap check covers the GPU bus's other RAM aliases too. */
+    memwrite(RASPI4_VCRAM_BASE, message, 48);
+    property_submit_raw_at(RASPI4_VCRAM_BASE + RASPI4_GPU_RAM_ALIAS);
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE + 16), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE + 20), ==, 1);
+
+    /* Palette Get tags likewise observe a later Set in the same operation. */
+    writel(palette_254, 0x01020304);
+    writel(palette_255, 0x11121314);
+
+    /* Fork hardening: an ordinary-tag failure rolls back a staged palette. */
+    memset(message, 0, 60);
+    stl_le_p(message, 60);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_SET_PALETTE);
+    stl_le_p(message + 12, 6 * sizeof(uint32_t));
+    stl_le_p(message + 20, 254);
+    stl_le_p(message + 24, 1);
+    stl_le_p(message + 28, 0xdeadbeef);
+    stl_le_p(message + 44, RPI_FWREQ_GET_TEMPERATURE);
+    stl_le_p(message + 48, 0);
+    stl_le_p(message + 56, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 60);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_ERROR);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 0);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 52), ==, 0);
+    g_assert_cmphex(readl(palette_254), ==, 0x01020304);
+
+    /* The published palette value area is bounded at 1032 bytes. */
+    memset(message, 0, 1060);
+    stl_le_p(message, 1060);
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_SET_PALETTE);
+    stl_le_p(message + 12, 1036);
+    stl_le_p(message + 20, 254);
+    stl_le_p(message + 24, 1);
+    stl_le_p(message + 28, 0xdeadbeef);
+    stl_le_p(message + 1056, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 1060);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 1);
+    g_assert_cmphex(readl(palette_254), ==, 0x01020304);
+
+    memset(message, 0, sizeof(message));
+    stl_le_p(message, sizeof(message));
+    stl_le_p(message + 8, RPI_FWREQ_FRAMEBUFFER_GET_PALETTE);
+    stl_le_p(message + 12, 256 * sizeof(uint32_t));
+    stl_le_p(message + 1044, RPI_FWREQ_FRAMEBUFFER_SET_PALETTE);
+    stl_le_p(message + 1048, 6 * sizeof(uint32_t));
+    stl_le_p(message + 1056, 254);
+    stl_le_p(message + 1060, 2);
+    stl_le_p(message + 1064, 0xaabbccdd);
+    stl_le_p(message + 1068, 0x55667788);
+    stl_le_p(message + 1080, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, sizeof(message));
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0x80000400);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20 + 254 * 4), ==,
+                    0xaabbccdd);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20 + 255 * 4), ==,
+                    0x55667788);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 1052), ==, 0x80000004);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 1056), ==, 0);
+    g_assert_cmphex(readl(palette_254), ==, 0xaabbccdd);
+    g_assert_cmphex(readl(palette_255), ==, 0x55667788);
 }
 
 static void test_firmware_gpio(void)
@@ -3241,6 +3584,8 @@ int main(int argc, char **argv)
                      test_firmware_board_identity);
     raspi4b_add_test("/raspi4b/firmware/malformed_buffers",
                      test_firmware_malformed_buffers);
+    raspi4b_add_test("/raspi4b/firmware/framebuffer_operation",
+                     test_firmware_framebuffer_operation);
     raspi4b_add_test("/raspi4b/firmware/clocks", test_firmware_clocks);
     raspi4b_add_test("/raspi4b/firmware/state_and_reboot",
                      test_firmware_state_and_reboot);
