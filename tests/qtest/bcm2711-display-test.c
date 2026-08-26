@@ -7,8 +7,15 @@
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
 #include "qemu/bswap.h"
+#include "hw/arm/raspberrypi-fw-defs.h"
+#include "hw/misc/bcm2835_mbox_defs.h"
 #include "libqtest.h"
 #include "qobject/qdict.h"
+
+#define MBOX_BASE                   0xfe00b800
+#define MBOX_READ                   (MBOX_BASE + 0x80)
+#define MBOX_WRITE                  (MBOX_BASE + 0xa0)
+#define PROPERTY_BUFFER             0x1000
 
 #define DVP_BASE                    0xfef00000
 #define DVP_CONTROL                 (DVP_BASE + 0x00)
@@ -167,6 +174,53 @@ static QTestState *display_start(void)
     return qtest_init("-machine raspi4b -nic none");
 }
 
+static void framebuffer_property_request(QTestState *qts, uint32_t tag,
+                                         const uint32_t *payload,
+                                         size_t words, size_t response_bytes)
+{
+    uint32_t payload_bytes = words * sizeof(*payload);
+    uint32_t total_bytes = 24 + payload_bytes;
+
+    qtest_writel(qts, PROPERTY_BUFFER, total_bytes);
+    qtest_writel(qts, PROPERTY_BUFFER + 4, 0);
+    qtest_writel(qts, PROPERTY_BUFFER + 8, tag);
+    qtest_writel(qts, PROPERTY_BUFFER + 12, payload_bytes);
+    qtest_writel(qts, PROPERTY_BUFFER + 16, 0);
+    for (size_t i = 0; i < words; i++) {
+        qtest_writel(qts, PROPERTY_BUFFER + 20 + i * sizeof(uint32_t),
+                     payload[i]);
+    }
+    qtest_writel(qts, PROPERTY_BUFFER + 20 + payload_bytes,
+                 RPI_FWREQ_PROPERTY_END);
+
+    qtest_writel(qts, MBOX_WRITE, PROPERTY_BUFFER | MBOX_CHAN_PROPERTY);
+    g_assert_cmphex(qtest_readl(qts, MBOX_READ), ==,
+                    PROPERTY_BUFFER | MBOX_CHAN_PROPERTY);
+    g_assert_cmphex(qtest_readl(qts, PROPERTY_BUFFER + 4), ==, 0x80000000);
+    g_assert_cmphex(qtest_readl(qts, PROPERTY_BUFFER + 16), ==,
+                    0x80000000 | response_bytes);
+}
+
+static bool hdmi_get_connected(QTestState *qts)
+{
+    g_autoptr(QDict) response = qtest_qmp(
+        qts, "{ 'execute': 'qom-get',"
+        "  'arguments': { 'path': %s, 'property': 'connected' } }",
+        HDMI0_QOM_PATH);
+
+    g_assert_false(qdict_haskey(response, "error"));
+    return qdict_get_bool(response, "return");
+}
+
+static void hdmi_set_connected(QTestState *qts, bool value)
+{
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'qom-set',"
+        "  'arguments': { 'path': %s, 'property': 'connected',"
+        "                 'value': %i } }",
+        HDMI0_QOM_PATH, value);
+}
+
 static void test_hvs_registers_and_reset(void)
 {
     QTestState *qts = display_start();
@@ -221,7 +275,7 @@ static void hvs_write_dlist(QTestState *qts, unsigned int index,
     qtest_writel(qts, HVS_DLIST_BASE + index * sizeof(uint32_t), value);
 }
 
-static char *hvs_screendump(QTestState *qts, size_t *length)
+static char *display_screendump(QTestState *qts, size_t *length)
 {
     g_autoptr(GError) error = NULL;
     g_autofree char *path = NULL;
@@ -254,6 +308,72 @@ static void hvs_assert_ppm_pixel(const char *contents, size_t length,
     g_assert_cmphex((uint8_t)contents[offset], ==, red);
     g_assert_cmphex((uint8_t)contents[offset + 1], ==, green);
     g_assert_cmphex((uint8_t)contents[offset + 2], ==, blue);
+}
+
+static void assert_ppm_header(const char *contents, size_t length,
+                              const char *header)
+{
+    size_t header_length = strlen(header);
+
+    g_assert_cmpuint(length, >=, header_length);
+    g_assert_cmpmem(contents, header_length, header, header_length);
+}
+
+static void test_legacy_framebuffer_viewport(void)
+{
+    static const char header[] = "P6\n4 1\n255\n";
+    const uint32_t physical_size[] = { 4, 1 };
+    const uint32_t virtual_size[] = { 5, 1 };
+    const uint32_t depth[] = { 24 };
+    const uint32_t pixel_order[] = { 1 };
+    const uint32_t offset[] = { 1, 0 };
+    const uint32_t allocate[] = { 16, 0 };
+    const uint8_t pixels[] = {
+        0x10, 0x20, 0x30,
+        0x40, 0x50, 0x60,
+        0x70, 0x80, 0x90,
+        0xa0, 0xb0, 0xc0,
+        0xd0, 0xe0, 0xf0,
+    };
+    QTestState *qts = display_start();
+    g_autofree char *contents = NULL;
+    size_t length;
+    uint32_t base;
+
+    framebuffer_property_request(
+        qts, RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT,
+        physical_size, G_N_ELEMENTS(physical_size), sizeof(physical_size));
+    framebuffer_property_request(
+        qts, RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT,
+        virtual_size, G_N_ELEMENTS(virtual_size), sizeof(virtual_size));
+    framebuffer_property_request(qts, RPI_FWREQ_FRAMEBUFFER_SET_DEPTH,
+                                 depth, G_N_ELEMENTS(depth), sizeof(depth));
+    framebuffer_property_request(qts, RPI_FWREQ_FRAMEBUFFER_SET_PIXEL_ORDER,
+                                 pixel_order, G_N_ELEMENTS(pixel_order),
+                                 sizeof(pixel_order));
+    framebuffer_property_request(qts, RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_OFFSET,
+                                 offset, G_N_ELEMENTS(offset), sizeof(offset));
+    framebuffer_property_request(qts, RPI_FWREQ_FRAMEBUFFER_ALLOCATE,
+                                 allocate, G_N_ELEMENTS(allocate),
+                                 sizeof(allocate));
+    base = qtest_readl(qts, PROPERTY_BUFFER + 20);
+    g_assert_cmphex(qtest_readl(qts, PROPERTY_BUFFER + 24), ==,
+                    sizeof(pixels));
+
+    qtest_memwrite(qts, base, pixels, sizeof(pixels));
+    contents = display_screendump(qts, &length);
+
+    g_assert_cmpuint(length, ==, sizeof(header) - 1 + 4 * 3);
+    g_assert_cmpmem(contents, sizeof(header) - 1,
+                    header, sizeof(header) - 1);
+    g_assert_cmpmem(contents + sizeof(header) - 1, 4 * 3,
+                    pixels + 3, 4 * 3);
+
+    qtest_system_reset(qts);
+    g_clear_pointer(&contents, g_free);
+    contents = display_screendump(qts, &length);
+    assert_ppm_header(contents, length, "P6\n640 480\n255\n");
+    qtest_quit(qts);
 }
 
 static void hvs_program_scaled_rgb565(QTestState *qts)
@@ -314,7 +434,7 @@ static void test_hvs_scaled_composition(void)
     qtest_writel(qts, HVS_DISPLIST0, 0);
     qtest_writel(qts, HVS_DISPCTRL0,
                  HVS_DISPCTRL_ENABLE | (8U << 16) | 8);
-    contents = hvs_screendump(qts, &length);
+    contents = display_screendump(qts, &length);
 
     hvs_assert_ppm_pixel(contents, length, 0, 0, 248, 0, 0);
     hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 252, 0);
@@ -327,7 +447,7 @@ static void test_hvs_scaled_composition(void)
     g_clear_pointer(&contents, g_free);
     hvs_write_dlist(qts, 9,
                     HVS_POS0_HFLIP | (2U << HVS_POS0_Y_SHIFT) | 2);
-    contents = hvs_screendump(qts, &length);
+    contents = display_screendump(qts, &length);
     hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 0, 248);
     hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 252, 0);
     hvs_assert_ppm_pixel(contents, length, 2, 5, 0, 0, 0);
@@ -352,7 +472,7 @@ static void test_hvs_scaled_composition(void)
                     HVS_CTL_FORMAT_RGB888);
     hvs_write_dlist(qts, 9, (2U << HVS_POS0_Y_SHIFT) | 2);
     hvs_write_dlist(qts, 16, 2 * 3);
-    contents = hvs_screendump(qts, &length);
+    contents = display_screendump(qts, &length);
     hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 255, 0);
     hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 255);
     hvs_assert_ppm_pixel(contents, length, 2, 5, 255, 255, 255);
@@ -378,7 +498,7 @@ static void test_hvs_scaled_composition(void)
     hvs_write_dlist(qts, 10,
                     HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT);
     hvs_write_dlist(qts, 16, 2 * sizeof(uint32_t));
-    contents = hvs_screendump(qts, &length);
+    contents = display_screendump(qts, &length);
     hvs_assert_ppm_pixel(contents, length, 2, 2, 124, 128, 0);
     hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 255);
     hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 0, 0);
@@ -389,7 +509,7 @@ static void test_hvs_scaled_composition(void)
     hvs_write_dlist(qts, 10,
                     HVS_CTL2_ALPHA_MIX |
                     (0x800U << HVS_CTL2_ALPHA_SHIFT));
-    contents = hvs_screendump(qts, &length);
+    contents = display_screendump(qts, &length);
     hvs_assert_ppm_pixel(contents, length, 2, 2, 186, 64, 0);
     hvs_assert_ppm_pixel(contents, length, 5, 2, 124, 0, 128);
     hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 0, 0);
@@ -411,7 +531,7 @@ static void test_hvs_scaled_composition(void)
     hvs_write_dlist(qts, 10,
                     HVS_CTL2_ALPHA_PREMULT |
                     (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
-    contents = hvs_screendump(qts, &length);
+    contents = display_screendump(qts, &length);
     hvs_assert_ppm_pixel(contents, length, 2, 2, 124, 128, 0);
     hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 255);
     hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 0, 0);
@@ -422,7 +542,7 @@ static void test_hvs_scaled_composition(void)
     hvs_write_dlist(qts, 9,
                     HVS_POS0_VFLIP | HVS_POS0_HFLIP |
                     (2U << HVS_POS0_Y_SHIFT) | 2);
-    contents = hvs_screendump(qts, &length);
+    contents = display_screendump(qts, &length);
     hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 0, 0);
     hvs_assert_ppm_pixel(contents, length, 5, 2, 248, 0, 0);
     hvs_assert_ppm_pixel(contents, length, 2, 5, 0, 0, 255);
@@ -449,7 +569,7 @@ static void test_hvs_scaled_composition(void)
         hvs_write_dlist(qts, word + 7, 8 * sizeof(uint16_t));
     }
     hvs_write_dlist(qts, 16 * 8, HVS_CTL_END);
-    contents = hvs_screendump(qts, &length);
+    contents = display_screendump(qts, &length);
     hvs_assert_ppm_pixel(contents, length, 0, 0, 248, 0, 0);
     hvs_assert_ppm_pixel(contents, length, 7, 7, 248, 0, 0);
     qtest_quit(qts);
@@ -964,6 +1084,79 @@ static void wait_for_migration(QTestState *qts)
     g_error("timed out waiting for BCM2711 display migration");
 }
 
+static void test_legacy_framebuffer_migration(void)
+{
+    static const char header[] = "P6\n4 1\n255\n";
+    const uint32_t physical_size[] = { 4, 1 };
+    const uint32_t virtual_size[] = { 4, 1 };
+    const uint32_t depth[] = { 24 };
+    const uint32_t pixel_order[] = { 1 };
+    const uint32_t offset[] = { 0, 0 };
+    const uint32_t allocate[] = { 16, 0 };
+    const uint8_t pixels[] = {
+        0x11, 0x22, 0x33,
+        0x44, 0x55, 0x66,
+        0x77, 0x88, 0x99,
+        0xaa, 0xbb, 0xcc,
+    };
+    g_autoptr(GError) error = NULL;
+    g_autofree char *contents = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autofree char *destination_args = NULL;
+    QTestState *source = display_start();
+    QTestState *destination;
+    size_t length;
+    uint32_t base;
+
+    framebuffer_property_request(
+        source, RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT,
+        physical_size, G_N_ELEMENTS(physical_size), sizeof(physical_size));
+    framebuffer_property_request(
+        source, RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT,
+        virtual_size, G_N_ELEMENTS(virtual_size), sizeof(virtual_size));
+    framebuffer_property_request(source, RPI_FWREQ_FRAMEBUFFER_SET_DEPTH,
+                                 depth, G_N_ELEMENTS(depth), sizeof(depth));
+    framebuffer_property_request(source, RPI_FWREQ_FRAMEBUFFER_SET_PIXEL_ORDER,
+                                 pixel_order, G_N_ELEMENTS(pixel_order),
+                                 sizeof(pixel_order));
+    framebuffer_property_request(source,
+                                 RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_OFFSET,
+                                 offset, G_N_ELEMENTS(offset), sizeof(offset));
+    framebuffer_property_request(source, RPI_FWREQ_FRAMEBUFFER_ALLOCATE,
+                                 allocate, G_N_ELEMENTS(allocate),
+                                 sizeof(allocate));
+    base = qtest_readl(source, PROPERTY_BUFFER + 20);
+    qtest_memwrite(source, base, pixels, sizeof(pixels));
+
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("bcm2711-fb-migration-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    wait_for_migration(source);
+
+    destination_args = g_strdup_printf(
+        "-machine raspi4b -nic none -incoming %s", uri);
+    destination = qtest_init(destination_args);
+    wait_for_migration(destination);
+
+    contents = display_screendump(destination, &length);
+    assert_ppm_header(contents, length, header);
+    g_assert_cmpuint(length, ==, sizeof(header) - 1 + sizeof(pixels));
+    g_assert_cmpmem(contents + sizeof(header) - 1, sizeof(pixels),
+                    pixels, sizeof(pixels));
+
+    qtest_quit(destination);
+    qtest_quit(source);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
 static void test_display_migration(void)
 {
     g_autoptr(GError) error = NULL;
@@ -1004,6 +1197,9 @@ static void test_display_migration(void)
     qtest_writel(source, HDMI_SCHEDULER_CONTROL,
                  HDMI_SCHEDULER_MODE_HDMI);
     qtest_writel(source, HDMI0_PHY_BASE, 0x89abcdef);
+    hdmi_set_connected(source, false);
+    g_assert_false(hdmi_get_connected(source));
+    g_assert_cmphex(qtest_readl(source, HDMI_HOTPLUG), ==, 0);
 
     /*
      * Migrate a live stereo MAI stream with two frames queued and a DMA
@@ -1066,7 +1262,7 @@ static void test_display_migration(void)
                     hvs_control);
     g_assert_cmphex(qtest_readl(destination, HVS_DISPSTAT0), ==,
                     HVS_DISPSTAT_RUN);
-    contents = hvs_screendump(destination, &length);
+    contents = display_screendump(destination, &length);
     hvs_assert_ppm_pixel(contents, length, 0, 0, 248, 0, 0);
     hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 252, 0);
     hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 248);
@@ -1077,6 +1273,8 @@ static void test_display_migration(void)
                     BIT(16) | 0x55aa);
     g_assert_cmphex(qtest_readl(destination, HDMI_RAM_PACKET_STATUS), ==,
                     0x55aa);
+    g_assert_false(hdmi_get_connected(destination));
+    g_assert_cmphex(qtest_readl(destination, HDMI_HOTPLUG), ==, 0);
     g_assert_cmphex(qtest_readl(destination, HDMI_SCHEDULER_CONTROL), ==,
                     HDMI_SCHEDULER_MODE_HDMI |
                     HDMI_SCHEDULER_HDMI_ACTIVE);
@@ -1121,6 +1319,8 @@ static void test_display_migration(void)
     g_assert_cmphex(qtest_readl(destination,
                                BSC_DATA_IN(HDMI0_DDC_BASE, 0)), ==, 0x10);
 
+    hdmi_set_connected(destination, true);
+
     /* The migrated bus session and EDID cursor remain usable immediately. */
     status = ddc_transfer(destination, HDMI0_DDC_BASE,
                           EDID_ADDRESS_READ, true, 1, 0);
@@ -1142,6 +1342,8 @@ int main(int argc, char **argv)
     qtest_add_func("/bcm2711/display/hvs", test_hvs_registers_and_reset);
     qtest_add_func("/bcm2711/display/hvs/scaled_composition",
                    test_hvs_scaled_composition);
+    qtest_add_func("/bcm2711/display/framebuffer/viewport",
+                   test_legacy_framebuffer_viewport);
     qtest_add_func("/bcm2711/display/pixelvalve/vblank",
                    test_pixelvalve_vblank_and_reset);
     qtest_add_func("/bcm2711/display/hdmi/transmitter",
@@ -1155,6 +1357,8 @@ int main(int argc, char **argv)
                    test_ddc_registers_reset_and_nack);
     qtest_add_func("/bcm2711/display/ddc/edid", test_ddc_edid);
 #ifndef _WIN32
+    qtest_add_func("/bcm2711/display/framebuffer/migration",
+                   test_legacy_framebuffer_migration);
     qtest_add_func("/bcm2711/display/migration", test_display_migration);
 #endif
     return g_test_run();

@@ -42,6 +42,7 @@
 /* Maximum permitted framebuffer size; experimentally determined on an rpi2 */
 #define XRES_MAX 3840
 #define YRES_MAX 2560
+#define BPP_MAX 32
 /* Framebuffer size used if guest requests zero size */
 #define XRES_SMALL 592
 #define YRES_SMALL 488
@@ -83,7 +84,7 @@ static void draw_line_src16(void *opaque, uint8_t *dst, const uint8_t *src,
             src += 2;
             break;
         case 24:
-            rgb888 = ldl_le_p(src);
+            rgb888 = bcm2835_fb_read_rgb24(src);
             r = (rgb888 >> 0) & 0xff;
             g = (rgb888 >> 8) & 0xff;
             b = (rgb888 >> 16) & 0xff;
@@ -420,7 +421,9 @@ static bool fb_update_display(void *opaque)
     }
 
     if (s->invalidate) {
-        hwaddr base = s->config.base + xoff + (hwaddr)yoff * src_width;
+        hwaddr base = s->config.base +
+                      (hwaddr)xoff * (s->config.bpp >> 3) +
+                      (hwaddr)yoff * src_width;
         framebuffer_update_memory_section(&s->fbsection, s->dma_mr,
                                           base,
                                           s->config.yres, src_width);
@@ -451,6 +454,7 @@ void bcm2835_fb_validate_config(BCM2835FBConfig *config)
     config->xres_virtual = MIN(config->xres_virtual, XRES_MAX);
     config->yres = MIN(config->yres, YRES_MAX);
     config->yres_virtual = MIN(config->yres_virtual, YRES_MAX);
+    config->bpp = MIN(config->bpp, BPP_MAX);
 
     /*
      * These are not minima: a 40x40 framebuffer will be accepted.
@@ -470,11 +474,13 @@ void bcm2835_fb_validate_config(BCM2835FBConfig *config)
     }
 
     if (fb_use_offsets(config)) {
-        /* Clip the offsets so the viewport is within the physical screen */
+        /* Clip the offsets so the physical viewport stays in the buffer. */
         config->xoffset = MIN(config->xoffset,
-                              config->xres_virtual - config->xres);
+                              MAX(config->xres_virtual, config->xres) -
+                              config->xres);
         config->yoffset = MIN(config->yoffset,
-                              config->yres_virtual - config->yres);
+                              MAX(config->yres_virtual, config->yres) -
+                              config->yres);
     }
 }
 
@@ -605,10 +611,33 @@ static const MemoryRegionOps bcm2835_fb_ops = {
     .valid.max_access_size = 4,
 };
 
+static int bcm2835_fb_post_load(void *opaque, int version_id)
+{
+    BCM2835FBState *s = opaque;
+
+    if (version_id != 1) {
+        return -EINVAL;
+    }
+
+    /* A migrated config may have been produced before validation tightened. */
+    bcm2835_fb_validate_config(&s->config);
+
+    /* lock is a local redraw guard, not guest-visible state. */
+    s->lock = true;
+    if (s->con) {
+        qemu_console_resize(s->con, s->config.xres, s->config.yres);
+    }
+    s->lock = false;
+    s->invalidate = true;
+    qemu_set_irq(s->mbox_irq, s->pending);
+    return 0;
+}
+
 static const VMStateDescription vmstate_bcm2835_fb = {
     .name = TYPE_BCM2835_FB,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bcm2835_fb_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL(lock, BCM2835FBState),
         VMSTATE_BOOL(invalidate, BCM2835FBState),
@@ -647,13 +676,18 @@ static void bcm2835_fb_reset(DeviceState *dev)
 {
     BCM2835FBState *s = BCM2835_FB(dev);
 
+    s->lock = true;
     s->pending = false;
+    qemu_set_irq(s->mbox_irq, 0);
 
     s->config = s->initial_config;
 
     s->hvs_mode = false;
     s->hvs_layer_count = 0;
     s->invalidate = true;
+    if (s->con) {
+        qemu_console_resize(s->con, s->config.xres, s->config.yres);
+    }
     s->lock = false;
 }
 
@@ -683,6 +717,7 @@ static void bcm2835_fb_realize(DeviceState *dev, Error **errp)
     s->initial_config.xoffset = 0;
     s->initial_config.yoffset = 0;
     s->initial_config.base = s->vcram_base + BCM2835_FB_OFFSET;
+    bcm2835_fb_validate_config(&s->initial_config);
 
     s->dma_mr = MEMORY_REGION(obj);
     address_space_init(&s->dma_as, s->dma_mr, TYPE_BCM2835_FB "-memory");

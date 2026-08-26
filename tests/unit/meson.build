@@ -128,6 +128,7 @@ endif
 if have_system
   tests += {
     'ptimer-test': ['ptimer-test-stubs.c', meson.project_source_root() / 'hw/core/ptimer.c'],
+    'test-bcm2835-fb': [],
     'test-iov': [],
     'test-opts-visitor': [testqapi],
     'test-xs-node': [qom],

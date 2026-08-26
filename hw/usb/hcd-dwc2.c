@@ -1310,8 +1310,8 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
                  (GHWCFG2_INT_DMA_ARCH << GHWCFG2_ARCHITECTURE_SHIFT) |
                  (GHWCFG2_OP_MODE_NO_SRP_CAPABLE_HOST << GHWCFG2_OP_MODE_SHIFT);
     s->ghwcfg3 = (4096 << GHWCFG3_DFIFO_DEPTH_SHIFT) |
-                 (4 << GHWCFG3_PACKET_SIZE_CNTR_WIDTH_SHIFT) |
-                 (4 << GHWCFG3_XFER_SIZE_CNTR_WIDTH_SHIFT);
+                 (5 << GHWCFG3_PACKET_SIZE_CNTR_WIDTH_SHIFT) |
+                 (5 << GHWCFG3_XFER_SIZE_CNTR_WIDTH_SHIFT);
     s->ghwcfg4 = 0;
     s->glpmcfg = 0;
     s->gpwrdn = GPWRDN_PWRDNRSTN;

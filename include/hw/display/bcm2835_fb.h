@@ -34,6 +34,12 @@ typedef struct {
     uint32_t alpha;
 } BCM2835FBConfig;
 
+static inline uint32_t bcm2835_fb_read_rgb24(const uint8_t *source)
+{
+    return source[0] | ((uint32_t)source[1] << 8) |
+           ((uint32_t)source[2] << 16);
+}
+
 #define BCM2835_FB_MAX_HVS_LAYERS 16
 
 typedef struct BCM2835FBHVSLayer {

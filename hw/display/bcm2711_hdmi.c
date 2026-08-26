@@ -598,12 +598,18 @@ static bool bcm2711_hdmi_audio_state_needed(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_bcm2711_hdmi = {
     .name = TYPE_BCM2711_HDMI,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = bcm2711_hdmi_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, BCM2711HDMIState, BCM2711_HDMI_REGS),
         VMSTATE_BOOL(clock_enabled, BCM2711HDMIState),
+        /*
+         * Hot-plug state is guest-visible through HDMI_HOTPLUG, so it has to
+         * survive migration.  Version 3: a stream from an older version leaves
+         * the destination's default in place.
+         */
+        VMSTATE_BOOL_V(connected, BCM2711HDMIState, 3),
         VMSTATE_UINT64_V(next_sample_ns, BCM2711HDMIState, 2),
         VMSTATE_UINT64_V(sample_remainder, BCM2711HDMIState, 2),
         VMSTATE_FIFO8_TEST(mai_fifo.fifo, BCM2711HDMIState,
@@ -613,8 +619,37 @@ static const VMStateDescription vmstate_bcm2711_hdmi = {
     },
 };
 
+/*
+ * "connected" models the HDMI hot-plug detect line.  It is a runtime QOM
+ * property rather than a static qdev one so a display can be attached or
+ * removed while the guest runs.  The VC4 DRM connector is polled
+ * (DRM_CONNECTOR_POLL_CONNECT | DRM_CONNECTOR_POLL_DISCONNECT) and its
+ * BCM2711 detect path reads HDMI_HOTPLUG, so no separate HPD interrupt is
+ * required for the guest to notice a change.
+ */
+static bool bcm2711_hdmi_get_connected(Object *obj, Error **errp)
+{
+    return BCM2711_HDMI(obj)->connected;
+}
+
+static void bcm2711_hdmi_set_connected(Object *obj, bool value, Error **errp)
+{
+    BCM2711HDMIState *s = BCM2711_HDMI(obj);
+
+    if (s->connected == value) {
+        return;
+    }
+
+    s->connected = value;
+
+    /*
+     * Audio is gated on the hot-plug state, so a disconnect must stop an
+     * in-flight stream rather than leave it running against an absent sink.
+     */
+    bcm2711_hdmi_update_audio(s);
+}
+
 static const Property bcm2711_hdmi_properties[] = {
-    DEFINE_PROP_BOOL("connected", BCM2711HDMIState, connected, true),
     DEFINE_AUDIO_PROPERTIES(BCM2711HDMIState, audio_be),
 };
 
@@ -646,6 +681,11 @@ static void bcm2711_hdmi_init(Object *obj)
     fifo32_create(&s->mai_fifo, BCM2711_HDMI_MAI_FIFO_WORDS);
     timer_init_ns(&s->mai_timer, QEMU_CLOCK_VIRTUAL,
                   bcm2711_hdmi_sample, s);
+
+    s->connected = true;
+    object_property_add_bool(obj, "connected",
+                             bcm2711_hdmi_get_connected,
+                             bcm2711_hdmi_set_connected);
 
     for (unsigned int i = 0; i < BCM2711_HDMI_BANKS; i++) {
         BCM2711HDMIRegBank *bank = &s->banks[i];

@@ -1970,6 +1970,14 @@ static void test_dwc2_reset_and_fifo_flush(void)
     g_assert_cmphex(readl(RASPI4_DWC2_REG(GRSTCTL)), ==,
                     GRSTCTL_AHBIDLE);
 
+    /* BCM2711 exposes five-bit packet and transfer-size counters. */
+    g_assert_cmphex((readl(RASPI4_DWC2_REG(GHWCFG3)) &
+                     GHWCFG3_PACKET_SIZE_CNTR_WIDTH_MASK) >>
+                    GHWCFG3_PACKET_SIZE_CNTR_WIDTH_SHIFT, ==, 5);
+    g_assert_cmphex((readl(RASPI4_DWC2_REG(GHWCFG3)) &
+                     GHWCFG3_XFER_SIZE_CNTR_WIDTH_MASK) >>
+                    GHWCFG3_XFER_SIZE_CNTR_WIDTH_SHIFT, ==, 5);
+
     writel(RASPI4_DWC2_REG(GAHBCFG), gahbcfg);
     writel(RASPI4_DWC2_REG(GUSBCFG), gusbcfg);
     writel(RASPI4_DWC2_REG(GNPTXFSIZ), gnptxfsiz);
@@ -2673,10 +2681,26 @@ static void test_firmware_malformed_buffers(void)
 
 static void test_firmware_framebuffer_operation(void)
 {
+    static const struct {
+        uint32_t physical_width;
+        uint32_t physical_height;
+        uint32_t virtual_width;
+        uint32_t virtual_height;
+        uint32_t requested_xoffset;
+        uint32_t requested_yoffset;
+        uint32_t expected_xoffset;
+        uint32_t expected_yoffset;
+    } viewport_cases[] = {
+        { 64, 48, 32, 96, 7, 100, 0, 48 },
+        { 32, 64, 64, 32, 100, 7, 32, 0 },
+    };
     uint8_t message[1084];
     const uint32_t get_depth[] = { UINT32_MAX };
+    const uint32_t get_pitch[] = { UINT32_MAX };
+    const uint32_t allocate_buffer[] = { 16, UINT32_MAX };
     const uint32_t set_depth_16[] = { 16 };
     const uint32_t set_depth_32[] = { 32 };
+    const uint32_t set_depth_huge[] = { 0x80000000 };
     const uint32_t size_640x480[] = { 640, 480 };
     const uint64_t palette_254 = RASPI4_VCRAM_BASE + 254 * sizeof(uint32_t);
     const uint64_t palette_255 = RASPI4_VCRAM_BASE + 255 * sizeof(uint32_t);
@@ -2766,6 +2790,77 @@ static void test_firmware_framebuffer_operation(void)
     g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 76), ==, 0x80000008);
     g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 80), ==, 800);
     g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 84), ==, 600);
+
+    /* A larger virtual size on one axis must not underflow the other. */
+    for (size_t i = 0; i < G_N_ELEMENTS(viewport_cases); i++) {
+        memset(message, 0, 92);
+        stl_le_p(message, 92);
+        stl_le_p(message + 8,
+                 RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT);
+        stl_le_p(message + 12, 8);
+        stl_le_p(message + 20, viewport_cases[i].physical_width);
+        stl_le_p(message + 24, viewport_cases[i].physical_height);
+        stl_le_p(message + 28,
+                 RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT);
+        stl_le_p(message + 32, 8);
+        stl_le_p(message + 40, viewport_cases[i].virtual_width);
+        stl_le_p(message + 44, viewport_cases[i].virtual_height);
+        stl_le_p(message + 48,
+                 RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_OFFSET);
+        stl_le_p(message + 52, 8);
+        stl_le_p(message + 60, viewport_cases[i].requested_xoffset);
+        stl_le_p(message + 64, viewport_cases[i].requested_yoffset);
+        stl_le_p(message + 68,
+                 RPI_FWREQ_FRAMEBUFFER_GET_VIRTUAL_OFFSET);
+        stl_le_p(message + 72, 8);
+        stl_le_p(message + 88, RPI_FWREQ_PROPERTY_END);
+        memwrite(RASPI4_PROPERTY_BUFFER, message, 92);
+        property_submit_raw();
+
+        g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                        PROPERTY_RESPONSE_SUCCESS);
+        g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 56), ==, 0x80000008);
+        g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 60), ==,
+                        viewport_cases[i].expected_xoffset);
+        g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 64), ==,
+                        viewport_cases[i].expected_yoffset);
+        g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 76), ==, 0x80000008);
+        g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 80), ==,
+                        viewport_cases[i].expected_xoffset);
+        g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 84), ==,
+                        viewport_cases[i].expected_yoffset);
+    }
+
+    /* Bound depth before pitch and allocation-size arithmetic can wrap. */
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT,
+                     size_640x480, G_N_ELEMENTS(size_640x480),
+                     sizeof(size_640x480));
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT,
+                     size_640x480, G_N_ELEMENTS(size_640x480),
+                     sizeof(size_640x480));
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_DEPTH, set_depth_huge,
+                     G_N_ELEMENTS(set_depth_huge), sizeof(set_depth_huge));
+    g_assert_cmphex(property_payload(0), ==, 32);
+    property_request(RPI_FWREQ_FRAMEBUFFER_GET_PITCH, get_pitch,
+                     G_N_ELEMENTS(get_pitch), sizeof(get_pitch));
+    g_assert_cmphex(property_payload(0), ==, 640 * sizeof(uint32_t));
+    property_request(RPI_FWREQ_FRAMEBUFFER_ALLOCATE, allocate_buffer,
+                     G_N_ELEMENTS(allocate_buffer), sizeof(allocate_buffer));
+    g_assert_cmphex(property_payload(0), ==,
+                    RASPI4_VCRAM_BASE + 0x00100000);
+    g_assert_cmphex(property_payload(1), ==,
+                    640 * 480 * sizeof(uint32_t));
+
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_DEPTH, set_depth_16,
+                     G_N_ELEMENTS(set_depth_16), sizeof(set_depth_16));
+    property_request(RPI_FWREQ_FRAMEBUFFER_TEST_DEPTH, set_depth_huge,
+                     G_N_ELEMENTS(set_depth_huge), sizeof(set_depth_huge));
+    g_assert_cmphex(property_payload(0), ==, 32);
+    property_request(RPI_FWREQ_FRAMEBUFFER_GET_DEPTH, get_depth,
+                     G_N_ELEMENTS(get_depth), sizeof(get_depth));
+    g_assert_cmphex(property_payload(0), ==, 16);
+    property_request(RPI_FWREQ_FRAMEBUFFER_SET_DEPTH, set_depth_32,
+                     G_N_ELEMENTS(set_depth_32), sizeof(set_depth_32));
 
     /* Mixing Test with Set/Get is invalid and returns no tag responses. */
     memset(message, 0, 44);
@@ -3539,6 +3634,72 @@ static void raspi4b_test_run(const void *opaque)
 #endif
 }
 
+/*
+ * HDMI0 hot-plug: the "connected" QOM property models the hot-plug detect
+ * line and must be changeable while the machine runs, because the VC4 DRM
+ * connector is polled rather than interrupt-driven.  HDMI_HOTPLUG is what
+ * the guest driver reads, so assert the register follows the property.
+ */
+#define RASPI4_HDMI0_CORE          0xfef00700
+#define RASPI4_HDMI_HOTPLUG        (RASPI4_HDMI0_CORE + 0x1a8)
+#define HDMI_HOTPLUG_CONNECTED     0x1
+#define RASPI4_HDMI0_QOM_PATH      "/machine/soc/peripherals/hdmi0"
+
+static bool hdmi_get_connected(void)
+{
+    g_autoptr(QDict) response = qtest_qmp(global_qtest,
+        "{ 'execute': 'qom-get',"
+        "  'arguments': { 'path': %s, 'property': 'connected' } }",
+        RASPI4_HDMI0_QOM_PATH);
+
+    g_assert(!qdict_haskey(response, "error"));
+    return qdict_get_bool(response, "return");
+}
+
+static void hdmi_set_connected(bool value)
+{
+    qtest_qmp_assert_success(global_qtest,
+        "{ 'execute': 'qom-set',"
+        "  'arguments': { 'path': %s, 'property': 'connected',"
+        "                 'value': %i } }",
+        RASPI4_HDMI0_QOM_PATH, value);
+}
+
+static void test_hdmi_hotplug(void)
+{
+    /* A display is attached by default. */
+    g_assert_true(hdmi_get_connected());
+    g_assert_cmphex(readl(RASPI4_HDMI_HOTPLUG) & HDMI_HOTPLUG_CONNECTED,
+                    ==, HDMI_HOTPLUG_CONNECTED);
+
+    /* Unplugging clears the bit the guest driver polls. */
+    hdmi_set_connected(false);
+    g_assert_false(hdmi_get_connected());
+    g_assert_cmphex(readl(RASPI4_HDMI_HOTPLUG) & HDMI_HOTPLUG_CONNECTED,
+                    ==, 0);
+
+    /* Re-plugging restores it. */
+    hdmi_set_connected(true);
+    g_assert_true(hdmi_get_connected());
+    g_assert_cmphex(readl(RASPI4_HDMI_HOTPLUG) & HDMI_HOTPLUG_CONNECTED,
+                    ==, HDMI_HOTPLUG_CONNECTED);
+
+    /* Setting the current value again is a no-op, not an error. */
+    hdmi_set_connected(true);
+    g_assert_true(hdmi_get_connected());
+
+    /*
+     * Hot-plug state is guest-visible, so a reset must not silently change
+     * it: an unplugged display stays unplugged across a system reset.
+     */
+    hdmi_set_connected(false);
+    raspi4b_watchdog_reset();
+    g_assert_false(hdmi_get_connected());
+    g_assert_cmphex(readl(RASPI4_HDMI_HOTPLUG) & HDMI_HOTPLUG_CONNECTED,
+                    ==, 0);
+    hdmi_set_connected(true);
+}
+
 static void raspi4b_add_test(const char *path, void (*func)(void))
 {
     Raspi4TestData *data = g_new(Raspi4TestData, 1);
@@ -3622,6 +3783,7 @@ int main(int argc, char **argv)
                      test_genet_registers_and_mdio);
 #ifndef _WIN32
     raspi4b_add_test("/raspi4b/genet/packet_dma", test_genet_packet_dma);
+    raspi4b_add_test("/raspi4b/hdmi/hotplug", test_hdmi_hotplug);
 #endif
 
     return g_test_run();
