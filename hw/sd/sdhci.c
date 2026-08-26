@@ -98,8 +98,9 @@ static void sdhci_check_capareg(SDHCIState *s, Error **errp)
         msk = FIELD_DP64(msk, SDHC_CAPAB, ASYNC_INT, 0);
 
         val = FIELD_EX64(s->capareg, SDHC_CAPAB, SLOT_TYPE);
-        if (val) {
-            error_setg(errp, "slot-type not supported");
+        /* BCM2711 EMMC2 advertises an embedded slot while exposing an SD bus. */
+        if (val > 1) {
+            error_setg(errp, "slot-type %u not supported", val);
             return;
         }
         trace_sdhci_capareg("slot type", val);

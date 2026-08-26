@@ -33,6 +33,8 @@
 
 #define RASPI4_VCRAM_BASE      0x3c000000
 #define RASPI4_GPU_RAM_ALIAS   0x40000000
+#define RASPI4_EMMC2_BASE      0xfe340000
+#define RASPI4_EMMC2_CAPAREG   0x0000a52545ee6432ULL
 
 #define PROPERTY_RESPONSE_SUCCESS 0x80000000
 #define PROPERTY_RESPONSE_ERROR   0x80000001
@@ -2265,6 +2267,8 @@ static void test_thermal_temperature(void)
 
 static void test_sd_card_on_emmc2(void)
 {
+    g_assert_cmphex(readq(RASPI4_EMMC2_BASE + 0x40), ==,
+                    RASPI4_EMMC2_CAPAREG);
     g_assert_true(qom_bus_has_sd_card(
         "/machine/soc/peripherals/emmc2/sd-bus"));
     g_assert_false(qom_bus_has_sd_card(

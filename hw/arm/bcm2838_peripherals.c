@@ -24,8 +24,12 @@
 
 #define BCM2838_DMA_CHANNEL_MASK 0x07f5
 
-/* Capabilities for SD controller: no DMA, high-speed, default clocks etc. */
-#define BCM2835_SDHC_CAPAREG 0x52134b4
+/*
+ * BCM2711 EMMC2 CAPABILITIES, captured from a Pi 400 at 0xfe340040.
+ * Keep this separate from the BCM2835 controller's value: Linux reads the
+ * BCM2711 register directly and uses its ADMA, voltage and clock claims.
+ */
+#define BCM2711_EMMC2_CAPAREG 0x0000a52545ee6432ULL
 
 static uint64_t bcm2838_asb_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -184,7 +188,7 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     object_property_set_uint(OBJECT(&s->emmc2), "sd-spec-version", 3,
                              &error_abort);
     object_property_set_uint(OBJECT(&s->emmc2), "capareg",
-                             BCM2835_SDHC_CAPAREG, &error_abort);
+                             BCM2711_EMMC2_CAPAREG, &error_abort);
     object_property_set_bool(OBJECT(&s->emmc2), "pending-insert-quirk", true,
                              &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->emmc2), errp)) {
