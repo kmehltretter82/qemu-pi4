@@ -142,6 +142,13 @@ with ``-drive file=IMAGE,if=sd,format=raw`` and use ``root=/dev/mmcblk0`` for
 an unpartitioned filesystem or ``root=/dev/mmcblk0pN`` for partition ``N``.
 See :doc:`raspi` for a complete command line and safe snapshot mode.
 
+The BCM2711 EMMC2 controller at ``0xfe340000`` exposes the Pi 400's
+hardware-derived SDHCI CAPABILITIES value ``0x0000a52545ee6432``.  This
+advertises the controller's 100 MHz base clock and ADMA2/SDMA support; Linux
+therefore reports ``mmc0 ... using ADMA`` during the acceptance boot.  The
+legacy BCM2835-compatible controller at ``0xfe300000`` retains its separate
+``0x052134b4`` capability value.
+
 Boot on a Pi 400
 ----------------
 
