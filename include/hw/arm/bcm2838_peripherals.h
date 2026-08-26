@@ -71,7 +71,8 @@
 #define GPU_INTERRUPT_DMA14     28
 #define GPU_INTERRUPT_DMA15     31
 
-#define BCM2838_MPHI_OFFSET     0xb200
+/* Keep the BCM2838 MPHI alias out of the legacy ARMCTRL IC window. */
+#define BCM2838_MPHI_OFFSET     0x6000
 #define BCM2838_MPHI_SIZE       0x200
 
 #define TYPE_BCM2838_PERIPHERALS "bcm2838-peripherals"

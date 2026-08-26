@@ -185,6 +185,13 @@ static void bcm2835_ic_reset(DeviceState *d)
     s->arm_irq_enable = 0;
     s->fiq_enable = false;
     s->fiq_select = 0;
+
+    /*
+     * Resetting the enable state must also update the exported lines.  The
+     * input levels are wire state and may still be asserted by a producer,
+     * but with all sources disabled neither IRQ nor FIQ may remain high.
+     */
+    bcm2835_ic_update(s);
 }
 
 static void bcm2835_ic_init(Object *obj)

@@ -138,6 +138,7 @@ precache-pi4:
 PI4_NINJA_TARGETS = qemu-system-aarch64 \
 	tests/unit/test-qgraph \
 	tests/qtest/bcm2711-display-test \
+	tests/qtest/bcm2835-ic-test \
 	tests/qtest/bcm2835-cprman-test \
 	tests/qtest/bcm2835-dma-test \
 	tests/qtest/bcm2835-i2c-test \
