@@ -70,6 +70,7 @@
 #define BCM2711_PCIE_MSI_MASK_SET    0x4510
 #define BCM2711_PCIE_MSI_MASK_CLEAR  0x4514
 #define BCM2711_PCIE_MSI_NUM_VECTORS 32
+#define BCM2711_PCIE_EVENT_IRQ       4
 #define BCM2711_PCIE_MSI_IRQ         5
 
 #define BCM2711_PCIE_STATUS_RC_MODE BIT(7)
@@ -288,6 +289,42 @@ static void bcm2711_pcie_update_msi_irq(BCM2711PcieHostState *s)
 
     s->irq_level[BCM2711_PCIE_MSI_IRQ] = level;
     qemu_set_irq(s->irq[BCM2711_PCIE_MSI_IRQ], level);
+}
+
+/*
+ * BCM2711 has a separate controller-event output in addition to the four
+ * downstream INTx lines.  QEMU's generic root-port code reports AER and
+ * slot-service notifications through the root port's PCI INTx state.  The
+ * PCI bridge machinery also forwards ordinary downstream INTx through that
+ * same root bus, so distinguish the root port's own state from the aggregate
+ * count before driving the SoC outputs.  The generic slot implementation
+ * retains a pending service notification separately, so that it survives an
+ * unrelated AER update to the root port's PCI INTx state.
+ */
+static void bcm2711_pcie_update_pci_irqs(BCM2711PcieHostState *s)
+{
+    PCIHostState *host = PCI_HOST_BRIDGE(s);
+    PCIDevice *root = PCI_DEVICE(&s->root_port);
+    bool root_irq_enabled = !pci_irq_disabled(root);
+    unsigned int i;
+
+    assert(host->bus);
+    assert(host->bus->nirq == PCI_NUM_PINS);
+
+    for (i = 0; i < PCI_NUM_PINS; i++) {
+        bool root_irq = root_irq_enabled && (root->irq_state & BIT(i));
+        int count = host->bus->irq_count[i] - root_irq;
+
+        /* The root port can contribute at most one level to each pin. */
+        assert(count >= 0);
+        s->irq_level[i] = count != 0;
+        qemu_set_irq(s->irq[i], s->irq_level[i]);
+    }
+
+    s->irq_level[BCM2711_PCIE_EVENT_IRQ] = root_irq_enabled &&
+        (root->irq_state || root->exp.hpev_notified);
+    qemu_set_irq(s->irq[BCM2711_PCIE_EVENT_IRQ],
+                 s->irq_level[BCM2711_PCIE_EVENT_IRQ]);
 }
 
 static uint64_t bcm2711_pcie_msi_doorbell_read(void *opaque, hwaddr offset,
@@ -545,6 +582,7 @@ static void bcm2711_pcie_host_write(void *opaque, hwaddr offset,
         if (offset + size <= PCIE_CONFIG_SPACE_SIZE) {
             pci_host_config_write_common(root, offset, pci_config_size(root),
                                          value, size);
+            bcm2711_pcie_update_pci_irqs(s);
         }
         return;
     }
@@ -620,8 +658,9 @@ static void bcm2711_pcie_set_irq(void *opaque, int irq_num, int level)
     BCM2711PcieHostState *s = opaque;
 
     assert(irq_num >= 0 && irq_num < PCI_NUM_PINS);
-    s->irq_level[irq_num] = !!level;
-    qemu_set_irq(s->irq[irq_num], level);
+    (void)level;
+    /* The PCI core updates bus->irq_count before invoking this callback. */
+    bcm2711_pcie_update_pci_irqs(s);
 }
 
 static int bcm2711_pcie_map_irq(PCIDevice *pdev, int pin)
