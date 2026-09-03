@@ -42,7 +42,13 @@
 #define HVS_CTL_END                 BIT(31)
 #define HVS_CTL_VALID               BIT(30)
 #define HVS_CTL_SIZE_SHIFT          24
+#define HVS_CTL_TILING_SHIFT        20
+#define HVS_CTL_TILING_T            3
 #define HVS_CTL_ORDER_SHIFT         13
+#define HVS_CTL_SCL0_SHIFT          5
+#define HVS_CTL_SCL_H_TPZ_V_TPZ     3
+#define HVS_CTL_SCL_H_NONE_V_TPZ    6
+#define HVS_CTL_SCL_H_TPZ_V_NONE    7
 #define HVS_CTL_UNITY               BIT(15)
 #define HVS_CTL_FORMAT_RGB565       4
 #define HVS_CTL_FORMAT_RGB888       5
@@ -61,6 +67,9 @@
 #define HVS_CTL2_ALPHA_OPAQUE       0xfff
 #define HVS_PRIMARY_BASE            0x01000000
 #define HVS_OVERLAY_BASE            0x01100000
+#define HVS_TILED_RGB565_BASE       0x01200000
+#define HVS_TILED_RGBA8888_BASE     0x01300000
+#define HVS_TILED_HEIGHT            64
 
 #define PIXELVALVE2_BASE            0xfe20a000
 #define PV_CONTROL                  (PIXELVALVE2_BASE + 0x00)
@@ -305,6 +314,70 @@ static void hvs_assert_ppm_pixel(const char *contents, size_t length,
     g_assert_cmpuint(length, ==, sizeof(header) - 1 + 8 * 8 * 3);
     g_assert_cmpmem(contents, sizeof(header) - 1,
                     header, sizeof(header) - 1);
+    g_assert_cmphex((uint8_t)contents[offset], ==, red);
+    g_assert_cmphex((uint8_t)contents[offset + 1], ==, green);
+    g_assert_cmphex((uint8_t)contents[offset + 2], ==, blue);
+}
+
+static void hvs_assert_ppm_pixel_close(const char *contents, size_t length,
+                                       unsigned int x, unsigned int y,
+                                       uint8_t red, uint8_t green,
+                                       uint8_t blue, uint8_t tolerance)
+{
+    static const char header[] = "P6\n8 8\n255\n";
+    size_t offset = sizeof(header) - 1 + ((size_t)y * 8 + x) * 3;
+
+    g_assert_cmpuint(length, ==, sizeof(header) - 1 + 8 * 8 * 3);
+    g_assert_cmpmem(contents, sizeof(header) - 1,
+                    header, sizeof(header) - 1);
+    g_assert_cmpint((int)(uint8_t)contents[offset] - red, >=, -tolerance);
+    g_assert_cmpint((int)(uint8_t)contents[offset] - red, <=, tolerance);
+    g_assert_cmpint((int)(uint8_t)contents[offset + 1] - green,
+                    >=, -tolerance);
+    g_assert_cmpint((int)(uint8_t)contents[offset + 1] - green,
+                    <=, tolerance);
+    g_assert_cmpint((int)(uint8_t)contents[offset + 2] - blue,
+                    >=, -tolerance);
+    g_assert_cmpint((int)(uint8_t)contents[offset + 2] - blue,
+                    <=, tolerance);
+}
+
+static void hvs_assert_ppm_pixel_4x4(const char *contents, size_t length,
+                                      unsigned int x, unsigned int y,
+                                      uint8_t red, uint8_t green,
+                                      uint8_t blue)
+{
+    static const char header[] = "P6\n4 4\n255\n";
+    size_t offset = sizeof(header) - 1 + ((size_t)y * 4 + x) * 3;
+
+    g_assert_cmpuint(length, ==, sizeof(header) - 1 + 4 * 4 * 3);
+    g_assert_cmpmem(contents, sizeof(header) - 1,
+                    header, sizeof(header) - 1);
+    g_assert_cmphex((uint8_t)contents[offset], ==, red);
+    g_assert_cmphex((uint8_t)contents[offset + 1], ==, green);
+    g_assert_cmphex((uint8_t)contents[offset + 2], ==, blue);
+}
+
+static void hvs_assert_ppm_pixel_sized(const char *contents, size_t length,
+                                       unsigned int width, unsigned int height,
+                                       unsigned int x, unsigned int y,
+                                       uint8_t red, uint8_t green,
+                                       uint8_t blue)
+{
+    char header[64];
+    int header_length;
+    size_t offset;
+
+    header_length = g_snprintf(header, sizeof(header), "P6\n%u %u\n255\n",
+                               width, height);
+    g_assert_cmpint(header_length, >, 0);
+    g_assert_cmpint(header_length, <, sizeof(header));
+    g_assert_cmpuint(x, <, width);
+    g_assert_cmpuint(y, <, height);
+    g_assert_cmpuint(length, ==, (size_t)header_length +
+                     (size_t)width * height * 3);
+    g_assert_cmpmem(contents, header_length, header, header_length);
+    offset = (size_t)header_length + ((size_t)y * width + x) * 3;
     g_assert_cmphex((uint8_t)contents[offset], ==, red);
     g_assert_cmphex((uint8_t)contents[offset + 1], ==, green);
     g_assert_cmphex((uint8_t)contents[offset + 2], ==, blue);
@@ -572,6 +645,580 @@ static void test_hvs_scaled_composition(void)
     contents = display_screendump(qts, &length);
     hvs_assert_ppm_pixel(contents, length, 0, 0, 248, 0, 0);
     hvs_assert_ppm_pixel(contents, length, 7, 7, 248, 0, 0);
+    qtest_quit(qts);
+}
+
+/* T tiles contain 8x8 64-byte microtiles, arranged in 4 KiB supertiles. */
+#define HVS_T_TILE_BYTES 4096
+#define HVS_TILED_RGB565_WIDTH 128
+#define HVS_TILED_RGBA8888_WIDTH 64
+#define HVS_TILED_COLUMNS 2
+#define HVS_TILED_ROWS 2
+
+static size_t hvs_tiled_offset(unsigned int bytes_per_pixel,
+                               unsigned int tile_columns,
+                               unsigned int x, unsigned int y)
+{
+    static const uint8_t even_subtile_map[] = { 0, 3, 1, 2 };
+    static const uint8_t odd_subtile_map[] = { 2, 1, 3, 0 };
+    unsigned int utile_width = bytes_per_pixel == 2 ? 8 : 4;
+    unsigned int utile_x = x / utile_width;
+    unsigned int utile_y = y / 4;
+    unsigned int tile_x = utile_x / 8;
+    unsigned int tile_y = utile_y / 8;
+    unsigned int physical_tile_x = tile_y & 1 ?
+        tile_columns - tile_x - 1 : tile_x;
+    unsigned int subtile = ((utile_y >> 2) & 1) * 2 +
+                           ((utile_x >> 2) & 1);
+    unsigned int subtile_offset =
+        (tile_y & 1 ? odd_subtile_map[subtile] : even_subtile_map[subtile]) *
+        1024;
+    unsigned int utile_offset = ((utile_y & 3) * 4 + (utile_x & 3)) * 64;
+    unsigned int pixel_offset = ((y & 3) * utile_width +
+                                 (x % utile_width)) * bytes_per_pixel;
+
+    g_assert_cmpuint(tile_x, <, tile_columns);
+    return ((size_t)tile_y * tile_columns + physical_tile_x) *
+        HVS_T_TILE_BYTES + subtile_offset + utile_offset + pixel_offset;
+}
+
+static uint16_t hvs_tiled_rgb565_pixel(unsigned int x, unsigned int y)
+{
+    uint16_t red = (x * 5 + y * 3) & 0x1f;
+    uint16_t green = (x * 11 + y * 7) & 0x3f;
+    uint16_t blue = (x * 13 + y * 17) & 0x1f;
+
+    return (red << 11) | (green << 5) | blue;
+}
+
+static void hvs_write_tiled_rgb565_buffer(QTestState *qts)
+{
+    const size_t tiled_size = HVS_TILED_COLUMNS * HVS_TILED_ROWS *
+        HVS_T_TILE_BYTES;
+    g_autofree uint8_t *tiles = g_malloc0(tiled_size);
+
+    for (unsigned int y = 0; y < HVS_TILED_HEIGHT; y++) {
+        for (unsigned int x = 0; x < HVS_TILED_RGB565_WIDTH; x++) {
+            size_t offset = hvs_tiled_offset(2, HVS_TILED_COLUMNS, x, y);
+
+            stw_le_p(tiles + offset, hvs_tiled_rgb565_pixel(x, y));
+        }
+    }
+    qtest_memwrite(qts, HVS_TILED_RGB565_BASE, tiles, tiled_size);
+}
+
+static void hvs_rgb565_components(uint16_t pixel, uint8_t *red,
+                                  uint8_t *green, uint8_t *blue)
+{
+    *red = ((pixel >> 11) & 0x1f) << 3;
+    *green = ((pixel >> 5) & 0x3f) << 2;
+    *blue = (pixel & 0x1f) << 3;
+}
+
+static void hvs_tiled_rgba8888_components(unsigned int x, unsigned int y,
+                                           uint8_t *red, uint8_t *green,
+                                           uint8_t *blue)
+{
+    *red = x * 37 + y * 13;
+    *green = x * 17 + y * 29;
+    *blue = x * 7 + y * 53;
+}
+
+static void hvs_program_tiled_plane(QTestState *qts, uint32_t base,
+                                    unsigned int width, unsigned int height,
+                                    unsigned int columns, uint32_t format,
+                                    uint32_t order, bool hflip)
+{
+    hvs_write_dlist(qts, 0,
+                    HVS_CTL_VALID | (8U << HVS_CTL_SIZE_SHIFT) |
+                    (HVS_CTL_TILING_T << HVS_CTL_TILING_SHIFT) |
+                    (order << HVS_CTL_ORDER_SHIFT) |
+                    HVS_CTL_UNITY | format);
+    hvs_write_dlist(qts, 1, hflip ? HVS_POS0_HFLIP : 0);
+    hvs_write_dlist(qts, 2,
+                    HVS_CTL2_ALPHA_MODE_FIXED |
+                    (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
+    hvs_write_dlist(qts, 3, (height << HVS_POS2_HEIGHT_SHIFT) | width);
+    hvs_write_dlist(qts, 4, 0);
+    hvs_write_dlist(qts, 5, base);
+    hvs_write_dlist(qts, 6, 0);
+    hvs_write_dlist(qts, 7, columns);
+    hvs_write_dlist(qts, 8, HVS_CTL_END);
+}
+
+static void hvs_program_unsupported_scaled_tiled_plane(QTestState *qts)
+{
+    const unsigned int dlist = 32;
+
+    hvs_write_dlist(qts, dlist,
+                    HVS_CTL_VALID | (9U << HVS_CTL_SIZE_SHIFT) |
+                    (HVS_CTL_TILING_T << HVS_CTL_TILING_SHIFT) |
+                    (HVS_CTL_ORDER_XRGB << HVS_CTL_ORDER_SHIFT) |
+                    HVS_CTL_FORMAT_RGB565);
+    hvs_write_dlist(qts, dlist + 1, 0);
+    hvs_write_dlist(qts, dlist + 2,
+                    HVS_CTL2_ALPHA_MODE_FIXED |
+                    (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
+    hvs_write_dlist(qts, dlist + 3,
+                    (32U << HVS_POS1_HEIGHT_SHIFT) | 64);
+    hvs_write_dlist(qts, dlist + 4,
+                    (HVS_TILED_HEIGHT << HVS_POS2_HEIGHT_SHIFT) | 128);
+    hvs_write_dlist(qts, dlist + 5, 0);
+    hvs_write_dlist(qts, dlist + 6, HVS_TILED_RGB565_BASE);
+    hvs_write_dlist(qts, dlist + 7, 0);
+    hvs_write_dlist(qts, dlist + 8, 2);
+    hvs_write_dlist(qts, dlist + 9, HVS_CTL_END);
+}
+
+static void test_hvs_t_tiled_rgb_scanout(void)
+{
+    static const unsigned int sample_x[] = {
+        0, 7, 8, 31, 32, 63, 64, 95, 96, 127,
+    };
+    static const unsigned int sample_y[] = {
+        0, 3, 4, 15, 16, 31, 32, 35, 48, 63,
+    };
+    const size_t tiled_size = HVS_TILED_COLUMNS * HVS_TILED_ROWS *
+        HVS_T_TILE_BYTES;
+    QTestState *qts = display_start();
+    g_autofree uint8_t *tiles = g_malloc0(tiled_size);
+    g_autofree char *contents = NULL;
+    size_t length;
+
+    hvs_write_tiled_rgb565_buffer(qts);
+    hvs_program_tiled_plane(qts, HVS_TILED_RGB565_BASE,
+                            HVS_TILED_RGB565_WIDTH, HVS_TILED_HEIGHT,
+                            HVS_TILED_COLUMNS,
+                            HVS_CTL_FORMAT_RGB565, HVS_CTL_ORDER_XRGB,
+                            false);
+    qtest_writel(qts, HVS_DISPLIST0, 0);
+    qtest_writel(qts, HVS_DISPCTRL0,
+                 HVS_DISPCTRL_ENABLE | (HVS_TILED_RGB565_WIDTH << 16) |
+                 HVS_TILED_HEIGHT);
+    contents = display_screendump(qts, &length);
+    for (unsigned int y_index = 0; y_index < G_N_ELEMENTS(sample_y);
+         y_index++) {
+        for (unsigned int x_index = 0; x_index < G_N_ELEMENTS(sample_x);
+             x_index++) {
+            uint8_t red, green, blue;
+            uint16_t pixel = hvs_tiled_rgb565_pixel(sample_x[x_index],
+                                                     sample_y[y_index]);
+
+            hvs_rgb565_components(pixel, &red, &green, &blue);
+            hvs_assert_ppm_pixel_sized(contents, length,
+                                       HVS_TILED_RGB565_WIDTH,
+                                       HVS_TILED_HEIGHT, sample_x[x_index],
+                                       sample_y[y_index], red, green, blue);
+        }
+    }
+
+    /* HVS horizontal reflection is independent of T-tile traversal. */
+    g_clear_pointer(&contents, g_free);
+    hvs_write_dlist(qts, 1, HVS_POS0_HFLIP);
+    contents = display_screendump(qts, &length);
+    for (unsigned int y_index = 0; y_index < G_N_ELEMENTS(sample_y);
+         y_index++) {
+        for (unsigned int x_index = 0; x_index < G_N_ELEMENTS(sample_x);
+             x_index++) {
+            uint8_t red, green, blue;
+            uint16_t pixel = hvs_tiled_rgb565_pixel(
+                HVS_TILED_RGB565_WIDTH - 1 - sample_x[x_index],
+                sample_y[y_index]);
+
+            hvs_rgb565_components(pixel, &red, &green, &blue);
+            hvs_assert_ppm_pixel_sized(contents, length,
+                                       HVS_TILED_RGB565_WIDTH,
+                                       HVS_TILED_HEIGHT, sample_x[x_index],
+                                       sample_y[y_index], red, green, blue);
+        }
+    }
+
+    /* A scaled T plane must leave the last valid scanout untouched. */
+    g_clear_pointer(&contents, g_free);
+    hvs_program_unsupported_scaled_tiled_plane(qts);
+    qtest_writel(qts, HVS_DISPLIST0, 32);
+    contents = display_screendump(qts, &length);
+    {
+        uint8_t red, green, blue;
+        uint16_t pixel = hvs_tiled_rgb565_pixel(
+            HVS_TILED_RGB565_WIDTH - 1, 0);
+
+        hvs_rgb565_components(pixel, &red, &green, &blue);
+        hvs_assert_ppm_pixel_sized(contents, length,
+                                   HVS_TILED_RGB565_WIDTH,
+                                   HVS_TILED_HEIGHT, 0, 0,
+                                   red, green, blue);
+    }
+
+    /* 32bpp T tiles have a narrower 32-pixel 4 KiB tile. */
+    g_clear_pointer(&contents, g_free);
+    memset(tiles, 0, tiled_size);
+    for (unsigned int y = 0; y < HVS_TILED_HEIGHT; y++) {
+        for (unsigned int x = 0; x < HVS_TILED_RGBA8888_WIDTH; x++) {
+            uint8_t red, green, blue;
+            size_t offset = hvs_tiled_offset(4, HVS_TILED_COLUMNS, x, y);
+
+            hvs_tiled_rgba8888_components(x, y, &red, &green, &blue);
+            /* Guest little-endian ARGB is stored B, G, R, A. */
+            tiles[offset] = blue;
+            tiles[offset + 1] = green;
+            tiles[offset + 2] = red;
+            tiles[offset + 3] = 0xff;
+        }
+    }
+    qtest_memwrite(qts, HVS_TILED_RGBA8888_BASE, tiles, tiled_size);
+    hvs_program_tiled_plane(qts, HVS_TILED_RGBA8888_BASE,
+                            HVS_TILED_RGBA8888_WIDTH, HVS_TILED_HEIGHT,
+                            HVS_TILED_COLUMNS,
+                            HVS_CTL_FORMAT_RGBA8888, HVS_CTL_ORDER_ARGB,
+                            false);
+    qtest_writel(qts, HVS_DISPLIST0, 0);
+    qtest_writel(qts, HVS_DISPCTRL0,
+                 HVS_DISPCTRL_ENABLE | (HVS_TILED_RGBA8888_WIDTH << 16) |
+                 HVS_TILED_HEIGHT);
+    contents = display_screendump(qts, &length);
+    for (unsigned int y_index = 0; y_index < G_N_ELEMENTS(sample_y);
+         y_index++) {
+        for (unsigned int x_index = 0; x_index < G_N_ELEMENTS(sample_x);
+             x_index++) {
+            unsigned int x = sample_x[x_index] % HVS_TILED_RGBA8888_WIDTH;
+            uint8_t red, green, blue;
+
+            hvs_tiled_rgba8888_components(x, sample_y[y_index],
+                                           &red, &green, &blue);
+            hvs_assert_ppm_pixel_sized(contents, length,
+                                       HVS_TILED_RGBA8888_WIDTH,
+                                       HVS_TILED_HEIGHT, x, sample_y[y_index],
+                                       red, green, blue);
+        }
+    }
+
+    qtest_quit(qts);
+}
+
+static void hvs_program_ppf_reference(QTestState *qts)
+{
+    uint8_t source[4 * 4 * sizeof(uint32_t)];
+
+    for (unsigned int y = 0; y < 4; y++) {
+        for (unsigned int x = 0; x < 4; x++) {
+            uint8_t *pixel = source + (y * 4 + x) * sizeof(uint32_t);
+            bool blue = x >= 2;
+
+            /* Guest little-endian ARGB: B, G, R, A. */
+            pixel[0] = blue ? 0xff : 0x00;
+            pixel[1] = 0x00;
+            pixel[2] = blue ? 0x00 : 0xff;
+            pixel[3] = 0xff;
+        }
+    }
+    qtest_memwrite(qts, HVS_OVERLAY_BASE, source, sizeof(source));
+
+    /*
+     * A full RGB PPF list has LBM, horizontal and vertical PPF state, and
+     * four coefficient pointers after the source pitch.  The values are not
+     * decoded by the bounded compositor yet; their presence selects its
+     * Linux PPF approximation instead of the short-list nearest path.
+     */
+    hvs_write_dlist(qts, 0,
+                    HVS_CTL_VALID | (17U << HVS_CTL_SIZE_SHIFT) |
+                    (HVS_CTL_ORDER_ARGB << HVS_CTL_ORDER_SHIFT) |
+                    HVS_CTL_FORMAT_RGBA8888);
+    hvs_write_dlist(qts, 1, 0);
+    hvs_write_dlist(qts, 2,
+                    HVS_CTL2_ALPHA_MODE_FIXED |
+                    (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
+    hvs_write_dlist(qts, 3, (8U << HVS_POS1_HEIGHT_SHIFT) | 8);
+    hvs_write_dlist(qts, 4, (4U << HVS_POS2_HEIGHT_SHIFT) | 4);
+    hvs_write_dlist(qts, 5, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 6, HVS_OVERLAY_BASE);
+    hvs_write_dlist(qts, 7, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 8, 4 * sizeof(uint32_t));
+    hvs_write_dlist(qts, 9, 0);  /* LBM base */
+    hvs_write_dlist(qts, 10, 0); /* horizontal PPF */
+    hvs_write_dlist(qts, 11, 0); /* vertical PPF */
+    hvs_write_dlist(qts, 12, 0); /* vertical PPF context */
+    hvs_write_dlist(qts, 13, 0); /* horizontal luma PPF kernel */
+    hvs_write_dlist(qts, 14, 0); /* vertical luma PPF kernel */
+    hvs_write_dlist(qts, 15, 0); /* horizontal chroma PPF kernel */
+    hvs_write_dlist(qts, 16, 0); /* vertical chroma PPF kernel */
+    hvs_write_dlist(qts, 17, HVS_CTL_END);
+}
+
+static void test_hvs_ppf_filter_reference(void)
+{
+    g_autofree char *contents = NULL;
+    QTestState *qts = display_start();
+    size_t length;
+
+    hvs_program_ppf_reference(qts);
+
+    qtest_writel(qts, HVS_DISPLIST0, 0);
+    qtest_writel(qts, HVS_DISPCTRL0,
+                 HVS_DISPCTRL_ENABLE | (8U << 16) | 8);
+    contents = display_screendump(qts, &length);
+
+    hvs_assert_ppm_pixel(contents, length, 2, 0, 255, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 6, 0, 0, 0, 255);
+
+    /*
+     * Pi 400 HVS reference, XRGB8888 4x4 -> 8x8 first row:
+     * ff0000 ff0000 ff0000 ed0012 6f0090 0200fd 0000ff 0000ff.
+     * The software Mitchell filter is intentionally close to, rather than
+     * bit-identical with, the hardware's quantized coefficient datapath.
+     */
+    hvs_assert_ppm_pixel_close(contents, length, 3, 0, 237, 0, 18, 20);
+    hvs_assert_ppm_pixel_close(contents, length, 4, 0, 111, 0, 144, 20);
+    hvs_assert_ppm_pixel_close(contents, length, 5, 0, 2, 0, 253, 20);
+
+    qtest_quit(qts);
+}
+
+static void hvs_program_tpz_reference(QTestState *qts)
+{
+    uint8_t source[8 * 8 * sizeof(uint32_t)];
+
+    for (unsigned int y = 0; y < 8; y++) {
+        for (unsigned int x = 0; x < 8; x++) {
+            uint8_t *pixel = source + (y * 8 + x) * sizeof(uint32_t);
+            bool blue = (x + y) & 1;
+
+            /* Guest little-endian ARGB: B, G, R, A. */
+            pixel[0] = blue ? 0xff : 0x00;
+            pixel[1] = 0x00;
+            pixel[2] = blue ? 0x00 : 0xff;
+            pixel[3] = 0xff;
+        }
+    }
+    qtest_memwrite(qts, HVS_OVERLAY_BASE, source, sizeof(source));
+
+    /* A full RGB TPZ list has LBM plus two horizontal and three vertical
+     * parameter words, but no PPF coefficient pointers. */
+    hvs_write_dlist(qts, 0,
+                    HVS_CTL_VALID | (15U << HVS_CTL_SIZE_SHIFT) |
+                    (HVS_CTL_ORDER_ARGB << HVS_CTL_ORDER_SHIFT) |
+                    (HVS_CTL_SCL_H_TPZ_V_TPZ << HVS_CTL_SCL0_SHIFT) |
+                    HVS_CTL_FORMAT_RGBA8888);
+    hvs_write_dlist(qts, 1, 0);
+    hvs_write_dlist(qts, 2,
+                    HVS_CTL2_ALPHA_MODE_FIXED |
+                    (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
+    hvs_write_dlist(qts, 3, (4U << HVS_POS1_HEIGHT_SHIFT) | 4);
+    hvs_write_dlist(qts, 4, (8U << HVS_POS2_HEIGHT_SHIFT) | 8);
+    hvs_write_dlist(qts, 5, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 6, HVS_OVERLAY_BASE);
+    hvs_write_dlist(qts, 7, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 8, 8 * sizeof(uint32_t));
+    hvs_write_dlist(qts, 9, 0);  /* LBM base */
+    hvs_write_dlist(qts, 10, 0); /* horizontal TPZ */
+    hvs_write_dlist(qts, 11, 0); /* horizontal TPZ reciprocal */
+    hvs_write_dlist(qts, 12, 0); /* vertical TPZ */
+    hvs_write_dlist(qts, 13, 0); /* vertical TPZ reciprocal */
+    hvs_write_dlist(qts, 14, 0); /* vertical TPZ context */
+    hvs_write_dlist(qts, 15, HVS_CTL_END);
+}
+
+static void test_hvs_tpz_filter_reference(void)
+{
+    g_autofree char *contents = NULL;
+    QTestState *qts = display_start();
+    size_t length;
+
+    hvs_program_tpz_reference(qts);
+
+    qtest_writel(qts, HVS_DISPLIST0, 0);
+    qtest_writel(qts, HVS_DISPCTRL0,
+                 HVS_DISPCTRL_ENABLE | (4U << 16) | 4);
+    contents = display_screendump(qts, &length);
+
+    /* Pi 400 reference: an 8x8 one-pixel red/blue checker scaled to 4x4
+     * produces 7f007f in every output pixel. */
+    for (unsigned int y = 0; y < 4; y++) {
+        for (unsigned int x = 0; x < 4; x++) {
+            hvs_assert_ppm_pixel_4x4(contents, length, x, y,
+                                     127, 0, 127);
+        }
+    }
+
+    qtest_quit(qts);
+}
+
+static void hvs_program_horizontal_tpz_reference(QTestState *qts,
+                                                 uint32_t source_width)
+{
+    uint8_t source[12 * 4 * sizeof(uint32_t)];
+    uint32_t scale;
+    uint32_t reciprocal;
+
+    g_assert_cmpuint(source_width, <=, 12);
+    for (unsigned int y = 0; y < 4; y++) {
+        for (unsigned int x = 0; x < source_width; x++) {
+            uint8_t *pixel = source +
+                (y * source_width + x) * sizeof(uint32_t);
+            bool blue = (x + y) & 1;
+
+            /* Guest little-endian ARGB: B, G, R, A. */
+            pixel[0] = blue ? 0xff : 0x00;
+            pixel[1] = 0x00;
+            pixel[2] = blue ? 0x00 : 0xff;
+            pixel[3] = 0xff;
+        }
+    }
+    qtest_memwrite(qts, HVS_OVERLAY_BASE, source,
+                   source_width * 4 * sizeof(uint32_t));
+
+    /* Match vc4_write_tpz(): source/destination is 16.16 in TPZ0 and
+     * TPZ1 receives ~0 divided by that scale. */
+    scale = (source_width << 16) / 4;
+    reciprocal = UINT32_MAX / scale;
+    hvs_write_dlist(qts, 0,
+                    HVS_CTL_VALID | (11U << HVS_CTL_SIZE_SHIFT) |
+                    (HVS_CTL_ORDER_ARGB << HVS_CTL_ORDER_SHIFT) |
+                    (HVS_CTL_SCL_H_TPZ_V_NONE << HVS_CTL_SCL0_SHIFT) |
+                    HVS_CTL_FORMAT_RGBA8888);
+    hvs_write_dlist(qts, 1, 0);
+    hvs_write_dlist(qts, 2,
+                    HVS_CTL2_ALPHA_MODE_FIXED |
+                    (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
+    hvs_write_dlist(qts, 3, (4U << HVS_POS1_HEIGHT_SHIFT) | 4);
+    hvs_write_dlist(qts, 4, (4U << HVS_POS2_HEIGHT_SHIFT) | source_width);
+    hvs_write_dlist(qts, 5, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 6, HVS_OVERLAY_BASE);
+    hvs_write_dlist(qts, 7, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 8, source_width * sizeof(uint32_t));
+    hvs_write_dlist(qts, 9, scale << 8); /* horizontal TPZ scale */
+    hvs_write_dlist(qts, 10, reciprocal & 0xffff); /* reciprocal */
+    hvs_write_dlist(qts, 11, HVS_CTL_END);
+}
+
+static void test_hvs_tpz_three_to_one_reference(void)
+{
+    g_autofree char *contents = NULL;
+    QTestState *qts = display_start();
+    size_t length;
+
+    hvs_program_horizontal_tpz_reference(qts, 12);
+    qtest_writel(qts, HVS_DISPLIST0, 0);
+    qtest_writel(qts, HVS_DISPCTRL0,
+                 HVS_DISPCTRL_ENABLE | (4U << 16) | 4);
+    contents = display_screendump(qts, &length);
+
+    /* Pi 400 reference, a horizontal-only 12x4 -> 4x4 one-pixel checker:
+     * aa0055 5500aa aa0055 5500aa.  Each TPZ destination pixel covers
+     * three source pixels rather than just the leading two. */
+    for (unsigned int y = 0; y < 4; y++) {
+        for (unsigned int x = 0; x < 4; x++) {
+            bool blue = (x + y) & 1;
+
+            hvs_assert_ppm_pixel_4x4(contents, length, x, y,
+                                     blue ? 85 : 170, 0,
+                                     blue ? 170 : 85);
+        }
+    }
+
+    qtest_quit(qts);
+}
+
+static void hvs_program_vertical_tpz_three_to_one_reference(QTestState *qts)
+{
+    uint8_t source[4 * 12 * sizeof(uint32_t)];
+
+    for (unsigned int y = 0; y < 12; y++) {
+        for (unsigned int x = 0; x < 4; x++) {
+            uint8_t *pixel = source + (y * 4 + x) * sizeof(uint32_t);
+            bool blue = (x + y) & 1;
+
+            /* Guest little-endian ARGB: B, G, R, A. */
+            pixel[0] = blue ? 0xff : 0x00;
+            pixel[1] = 0x00;
+            pixel[2] = blue ? 0x00 : 0xff;
+            pixel[3] = 0xff;
+        }
+    }
+    qtest_memwrite(qts, HVS_OVERLAY_BASE, source, sizeof(source));
+
+    /* A vertical-only TPZ list retains the line-buffer word, then carries
+     * TPZ scale, reciprocal and context. */
+    hvs_write_dlist(qts, 0,
+                    HVS_CTL_VALID | (13U << HVS_CTL_SIZE_SHIFT) |
+                    (HVS_CTL_ORDER_ARGB << HVS_CTL_ORDER_SHIFT) |
+                    (HVS_CTL_SCL_H_NONE_V_TPZ << HVS_CTL_SCL0_SHIFT) |
+                    HVS_CTL_FORMAT_RGBA8888);
+    hvs_write_dlist(qts, 1, 0);
+    hvs_write_dlist(qts, 2,
+                    HVS_CTL2_ALPHA_MODE_FIXED |
+                    (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
+    hvs_write_dlist(qts, 3, (4U << HVS_POS1_HEIGHT_SHIFT) | 4);
+    hvs_write_dlist(qts, 4, (12U << HVS_POS2_HEIGHT_SHIFT) | 4);
+    hvs_write_dlist(qts, 5, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 6, HVS_OVERLAY_BASE);
+    hvs_write_dlist(qts, 7, 0xc0c0c0c0);
+    hvs_write_dlist(qts, 8, 4 * sizeof(uint32_t));
+    hvs_write_dlist(qts, 9, 0);          /* LBM base */
+    hvs_write_dlist(qts, 10, 0x03000000); /* vertical TPZ scale */
+    hvs_write_dlist(qts, 11, 0x5555);    /* reciprocal */
+    hvs_write_dlist(qts, 12, 0xc0c0c0c0); /* vertical context */
+    hvs_write_dlist(qts, 13, HVS_CTL_END);
+}
+
+static void test_hvs_vertical_tpz_three_to_one_reference(void)
+{
+    g_autofree char *contents = NULL;
+    QTestState *qts = display_start();
+    size_t length;
+
+    hvs_program_vertical_tpz_three_to_one_reference(qts);
+    qtest_writel(qts, HVS_DISPLIST0, 0);
+    qtest_writel(qts, HVS_DISPCTRL0,
+                 HVS_DISPCTRL_ENABLE | (4U << 16) | 4);
+    contents = display_screendump(qts, &length);
+
+    /* Pi 400 vertical-only 4x12 -> 4x4 reference has the same alternating
+     * aa0055 / 5500aa output as the horizontal 3:1 capture. */
+    for (unsigned int y = 0; y < 4; y++) {
+        for (unsigned int x = 0; x < 4; x++) {
+            bool blue = (x + y) & 1;
+
+            hvs_assert_ppm_pixel_4x4(contents, length, x, y,
+                                     blue ? 85 : 170, 0,
+                                     blue ? 170 : 85);
+        }
+    }
+
+    qtest_quit(qts);
+}
+
+static void test_hvs_tpz_fractional_reference(void)
+{
+    g_autofree char *contents = NULL;
+    QTestState *qts = display_start();
+    size_t length;
+
+    hvs_program_horizontal_tpz_reference(qts, 10);
+    qtest_writel(qts, HVS_DISPLIST0, 0);
+    qtest_writel(qts, HVS_DISPCTRL0,
+                 HVS_DISPCTRL_ENABLE | (4U << 16) | 4);
+    contents = display_screendump(qts, &length);
+
+    /* Pi 400 reference, horizontal-only 10x4 -> 4x4: the first two
+     * columns are 990066, the last two are 660099.  This anchors a
+     * fractional 2.5:1 coverage interval as well as the integer 3:1 case. */
+    for (unsigned int y = 0; y < 4; y++) {
+        for (unsigned int x = 0; x < 4; x++) {
+            uint8_t red = x < 2 ? 153 : 102;
+            uint8_t blue = 255 - red;
+
+            if (y & 1) {
+                uint8_t temporary = red;
+
+                red = blue;
+                blue = temporary;
+            }
+            hvs_assert_ppm_pixel_4x4(contents, length, x, y,
+                                     red, 0, blue);
+        }
+    }
+
     qtest_quit(qts);
 }
 
@@ -1334,6 +1981,157 @@ static void test_display_migration(void)
     g_assert_cmpint(g_unlink(state_path), ==, 0);
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
+
+static void test_hvs_ppf_filter_migration(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *contents = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autofree char *destination_args = NULL;
+    QTestState *source = display_start();
+    QTestState *destination;
+    size_t length;
+    const uint32_t hvs_control = HVS_DISPCTRL_ENABLE | (8U << 16) | 8;
+
+    hvs_program_ppf_reference(source);
+    qtest_writel(source, HVS_DISPLIST0, 0);
+    qtest_writel(source, HVS_DISPCTRL0, hvs_control);
+
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("bcm2711-hvs-ppf-migration-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    wait_for_migration(source);
+
+    destination_args = g_strdup_printf(
+        "-machine raspi4b -nic none -incoming %s", uri);
+    destination = qtest_init(destination_args);
+    wait_for_migration(destination);
+
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPLIST0), ==, 0);
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPCTRL0), ==,
+                    hvs_control);
+    contents = display_screendump(destination, &length);
+    hvs_assert_ppm_pixel_close(contents, length, 3, 0, 237, 0, 18, 20);
+    hvs_assert_ppm_pixel_close(contents, length, 4, 0, 111, 0, 144, 20);
+    hvs_assert_ppm_pixel_close(contents, length, 5, 0, 2, 0, 253, 20);
+
+    qtest_quit(destination);
+    qtest_quit(source);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+static void test_hvs_tpz_filter_migration(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *contents = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autofree char *destination_args = NULL;
+    QTestState *source = display_start();
+    QTestState *destination;
+    size_t length;
+    const uint32_t hvs_control = HVS_DISPCTRL_ENABLE | (4U << 16) | 4;
+
+    hvs_program_tpz_reference(source);
+    qtest_writel(source, HVS_DISPLIST0, 0);
+    qtest_writel(source, HVS_DISPCTRL0, hvs_control);
+
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("bcm2711-hvs-tpz-migration-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    wait_for_migration(source);
+
+    destination_args = g_strdup_printf(
+        "-machine raspi4b -nic none -incoming %s", uri);
+    destination = qtest_init(destination_args);
+    wait_for_migration(destination);
+
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPLIST0), ==, 0);
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPCTRL0), ==,
+                    hvs_control);
+    contents = display_screendump(destination, &length);
+    hvs_assert_ppm_pixel_4x4(contents, length, 0, 0, 127, 0, 127);
+    hvs_assert_ppm_pixel_4x4(contents, length, 3, 3, 127, 0, 127);
+
+    qtest_quit(destination);
+    qtest_quit(source);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+static void test_hvs_t_tiled_rgb_scanout_migration(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *contents = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autofree char *destination_args = NULL;
+    QTestState *source = display_start();
+    QTestState *destination;
+    const uint32_t hvs_control = HVS_DISPCTRL_ENABLE |
+        (HVS_TILED_RGB565_WIDTH << 16) | HVS_TILED_HEIGHT;
+    size_t length;
+    uint8_t red, green, blue;
+    uint16_t pixel = hvs_tiled_rgb565_pixel(96, 35);
+
+    hvs_write_tiled_rgb565_buffer(source);
+    hvs_program_tiled_plane(source, HVS_TILED_RGB565_BASE,
+                            HVS_TILED_RGB565_WIDTH, HVS_TILED_HEIGHT,
+                            HVS_TILED_COLUMNS,
+                            HVS_CTL_FORMAT_RGB565, HVS_CTL_ORDER_XRGB,
+                            false);
+    qtest_writel(source, HVS_DISPLIST0, 0);
+    qtest_writel(source, HVS_DISPCTRL0, hvs_control);
+
+    /* Populate the source-side scratch cache before migration. */
+    contents = display_screendump(source, &length);
+    hvs_rgb565_components(pixel, &red, &green, &blue);
+    hvs_assert_ppm_pixel_sized(contents, length, HVS_TILED_RGB565_WIDTH,
+                               HVS_TILED_HEIGHT, 96, 35, red, green, blue);
+    g_clear_pointer(&contents, g_free);
+
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("bcm2711-hvs-t-tile-migration-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    wait_for_migration(source);
+
+    destination_args = g_strdup_printf(
+        "-machine raspi4b -nic none -incoming %s", uri);
+    destination = qtest_init(destination_args);
+    wait_for_migration(destination);
+
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPLIST0), ==, 0);
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPCTRL0), ==,
+                    hvs_control);
+    contents = display_screendump(destination, &length);
+    hvs_assert_ppm_pixel_sized(contents, length, HVS_TILED_RGB565_WIDTH,
+                               HVS_TILED_HEIGHT, 96, 35, red, green, blue);
+
+    qtest_quit(destination);
+    qtest_quit(source);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
 #endif
 
 int main(int argc, char **argv)
@@ -1342,6 +2140,18 @@ int main(int argc, char **argv)
     qtest_add_func("/bcm2711/display/hvs", test_hvs_registers_and_reset);
     qtest_add_func("/bcm2711/display/hvs/scaled_composition",
                    test_hvs_scaled_composition);
+    qtest_add_func("/bcm2711/display/hvs/t_tiled_rgb_scanout",
+                   test_hvs_t_tiled_rgb_scanout);
+    qtest_add_func("/bcm2711/display/hvs/ppf_filter_reference",
+                   test_hvs_ppf_filter_reference);
+    qtest_add_func("/bcm2711/display/hvs/tpz_filter_reference",
+                   test_hvs_tpz_filter_reference);
+    qtest_add_func("/bcm2711/display/hvs/tpz_three_to_one_reference",
+                   test_hvs_tpz_three_to_one_reference);
+    qtest_add_func("/bcm2711/display/hvs/tpz_vertical_three_to_one_reference",
+                   test_hvs_vertical_tpz_three_to_one_reference);
+    qtest_add_func("/bcm2711/display/hvs/tpz_fractional_reference",
+                   test_hvs_tpz_fractional_reference);
     qtest_add_func("/bcm2711/display/framebuffer/viewport",
                    test_legacy_framebuffer_viewport);
     qtest_add_func("/bcm2711/display/pixelvalve/vblank",
@@ -1360,6 +2170,12 @@ int main(int argc, char **argv)
     qtest_add_func("/bcm2711/display/framebuffer/migration",
                    test_legacy_framebuffer_migration);
     qtest_add_func("/bcm2711/display/migration", test_display_migration);
+    qtest_add_func("/bcm2711/display/hvs/ppf_filter_migration",
+                   test_hvs_ppf_filter_migration);
+    qtest_add_func("/bcm2711/display/hvs/tpz_filter_migration",
+                   test_hvs_tpz_filter_migration);
+    qtest_add_func("/bcm2711/display/hvs/t_tiled_rgb_scanout_migration",
+                   test_hvs_t_tiled_rgb_scanout_migration);
 #endif
     return g_test_run();
 }
