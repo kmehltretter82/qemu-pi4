@@ -110,9 +110,28 @@
 #define RASPI4_AUX_MU_SCRATCH     (RASPI4_AUX_BASE + 0x5c)
 #define RASPI4_AUX_GIC_IRQ        93
 #define AUX_ENABLE_UART           (1U << 0)
+#define AUX_ENABLE_SPI1           (1U << 1)
+#define AUX_ENABLE_SPI2           (1U << 2)
 #define AUX_IER_TX_INT            (1U << 1)
 #define AUX_MCR_RTS               (1U << 1)
 #define AUX_MSR_CTS               (1U << 4)
+#define AUX_IRQ_SPI1              (1U << 1)
+#define AUX_IRQ_SPI2              (1U << 2)
+
+#define RASPI4_AUX_SPI1_BASE      (RASPI4_AUX_BASE + 0x80)
+#define RASPI4_AUX_SPI2_BASE      (RASPI4_AUX_BASE + 0xc0)
+#define AUX_SPI_CNTL0(_base)      ((_base) + 0x00)
+#define AUX_SPI_CNTL1(_base)      ((_base) + 0x04)
+#define AUX_SPI_STAT(_base)       ((_base) + 0x08)
+#define AUX_SPI_PEEK(_base)       ((_base) + 0x0c)
+#define AUX_SPI_IO(_base)         ((_base) + 0x20)
+#define AUX_SPI_TXHOLD(_base)     ((_base) + 0x30)
+#define AUX_SPI_CNTL0_VAR_WIDTH   (1U << 14)
+#define AUX_SPI_CNTL0_ENABLE      (1U << 11)
+#define AUX_SPI_CNTL0_MSBF_OUT    (1U << 6)
+#define AUX_SPI_CNTL1_TXEMPTY     (1U << 7)
+#define AUX_SPI_CNTL1_MSBF_IN     (1U << 1)
+#define AUX_SPI_STAT_IDLE          0x00000280
 
 #define RASPI4_GPIO_BASE          0xfe200000
 #define RASPI4_GPIO_GPFSEL5       (RASPI4_GPIO_BASE + 0x14)
@@ -241,6 +260,7 @@
 #define RASPI4_PCIE_ID_VAL3          (RASPI4_PCIE_BASE + 0x043c)
 #define RASPI4_PCIE_PRIV_LINK_CAP    (RASPI4_PCIE_BASE + 0x04dc)
 #define RASPI4_PCIE_PRIV_ROOT_CAP    (RASPI4_PCIE_BASE + 0x04f8)
+#define RASPI4_PCIE_ROOT_EXP_CAP     0xac
 
 #define PCIE_SW_INIT_PERST           (1U << 0)
 #define PCIE_SW_INIT_BRIDGE          (1U << 1)
@@ -271,7 +291,9 @@
 #define RASPI4_PCIE_INTX_FIRST       143
 #define RASPI4_PCIE_INTX_LAST        146
 #define RASPI4_PCIE_EDU_GIC_INTX     144
+#define RASPI4_PCIE_GIC_EVENT        147
 #define RASPI4_PCIE_EDU_GIC_MSI      148
+#define RASPI4_PCIE_EVENT_OUTPUT     4
 
 #define RASPI4_PCIE_VL805_PCI_BAR    0xf8000000U
 #define RASPI4_PCIE_VL805_CPU_BAR    RASPI4_PCIE_CPU_WINDOW
@@ -830,6 +852,115 @@ static void test_aux_uart_modem_and_reset(void)
     g_assert_false(get_irq(RASPI4_AUX_GIC_IRQ));
 }
 
+static void test_aux_spi_pio_and_reset(void)
+{
+    const uint32_t cntl0 = AUX_SPI_CNTL0_ENABLE |
+                           AUX_SPI_CNTL0_VAR_WIDTH |
+                           AUX_SPI_CNTL0_MSBF_OUT;
+    const uint32_t cntl1 = AUX_SPI_CNTL1_MSBF_IN;
+
+    /* Pi 400 gates AUX SPI bank reads and ignores writes while disabled. */
+    g_assert_cmphex(readl(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_STAT(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    writel(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE), cntl0);
+    writel(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE), cntl1);
+    g_assert_cmphex(readl(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE)), ==, 0);
+
+    writel(RASPI4_AUX_ENABLES, AUX_ENABLE_SPI1);
+    g_assert_cmphex(readl(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_STAT(RASPI4_AUX_SPI1_BASE)), ==,
+                    AUX_SPI_STAT_IDLE);
+
+    writel(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE), cntl0);
+    writel(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE), cntl1);
+    g_assert_cmphex(readl(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE)), ==, cntl0);
+    g_assert_cmphex(readl(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE)), ==, cntl1);
+
+    /* The empty QEMU SSI bus returns zero, but preserves PIO word framing. */
+    writel(AUX_SPI_TXHOLD(RASPI4_AUX_SPI1_BASE), 0x18a1b2c3);
+    writel(AUX_SPI_IO(RASPI4_AUX_SPI1_BASE), 0x08d40000);
+    g_assert_cmphex(readl(AUX_SPI_STAT(RASPI4_AUX_SPI1_BASE)), ==,
+                    0x00040200);
+    g_assert_cmphex(readl(AUX_SPI_PEEK(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_STAT(RASPI4_AUX_SPI1_BASE)), ==,
+                    0x00040200);
+    g_assert_cmphex(readl(AUX_SPI_IO(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_STAT(RASPI4_AUX_SPI1_BASE)), ==,
+                    0x00010200);
+    g_assert_cmphex(readl(AUX_SPI_IO(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_STAT(RASPI4_AUX_SPI1_BASE)), ==,
+                    AUX_SPI_STAT_IDLE);
+
+    /* The defined SPI interrupt bit stays live while its register bank gates. */
+    writel(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE),
+           cntl1 | AUX_SPI_CNTL1_TXEMPTY);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, AUX_IRQ_SPI1);
+    g_assert_true(get_irq(RASPI4_AUX_GIC_IRQ));
+    writel(RASPI4_AUX_ENABLES, 0);
+    g_assert_cmphex(readl(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, AUX_IRQ_SPI1);
+    g_assert_true(get_irq(RASPI4_AUX_GIC_IRQ));
+
+    /* SPI1 and SPI2 contribute distinct bits to the same AUX interrupt. */
+    writel(RASPI4_AUX_ENABLES, AUX_ENABLE_SPI1 | AUX_ENABLE_SPI2);
+    writel(AUX_SPI_CNTL1(RASPI4_AUX_SPI2_BASE),
+           cntl1 | AUX_SPI_CNTL1_TXEMPTY);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==,
+                    AUX_IRQ_SPI1 | AUX_IRQ_SPI2);
+    writel(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE), cntl1);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, AUX_IRQ_SPI2);
+    writel(AUX_SPI_CNTL1(RASPI4_AUX_SPI2_BASE), cntl1);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, 0);
+    g_assert_false(get_irq(RASPI4_AUX_GIC_IRQ));
+
+    writel(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE), cntl0);
+    writel(AUX_SPI_IO(RASPI4_AUX_SPI1_BASE), 0x18a1b2c3);
+    g_assert_cmphex(readl(AUX_SPI_STAT(RASPI4_AUX_SPI1_BASE)), ==,
+                    0x00030200);
+    raspi4b_watchdog_reset();
+    g_assert_cmphex(readl(RASPI4_AUX_ENABLES), ==, 0);
+    g_assert_cmphex(readl(RASPI4_AUX_IRQ), ==, 0);
+    g_assert_false(get_irq(RASPI4_AUX_GIC_IRQ));
+    writel(RASPI4_AUX_ENABLES, AUX_ENABLE_SPI1);
+    g_assert_cmphex(readl(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(readl(AUX_SPI_STAT(RASPI4_AUX_SPI1_BASE)), ==,
+                    AUX_SPI_STAT_IDLE);
+}
+
+static void aux_spi_flash_read_id(uint64_t spi_base)
+{
+    const uint32_t cntl0 = AUX_SPI_CNTL0_ENABLE |
+                           AUX_SPI_CNTL0_VAR_WIDTH |
+                           AUX_SPI_CNTL0_MSBF_OUT;
+    const uint32_t cntl1 = AUX_SPI_CNTL1_MSBF_IN;
+
+    writel(AUX_SPI_CNTL0(spi_base), cntl0);
+    writel(AUX_SPI_CNTL1(spi_base), cntl1);
+
+    /* TXHOLD preserves virtual CS; the final IO word ends the transaction. */
+    writel(AUX_SPI_TXHOLD(spi_base), 0x089f0000);
+    writel(AUX_SPI_IO(spi_base), 0x18000000);
+    g_assert_cmphex(readl(AUX_SPI_IO(spi_base)), ==, 0x002020);
+    g_assert_cmphex(readl(AUX_SPI_IO(spi_base)), ==, 0x140000);
+    g_assert_cmphex(readl(AUX_SPI_STAT(spi_base)), ==,
+                    AUX_SPI_STAT_IDLE);
+}
+
+static void test_aux_spi_flash_transaction(void)
+{
+    /* One standard QEMU M25P80 peripheral is attached to each AUX SSI bus. */
+    writel(RASPI4_AUX_ENABLES, AUX_ENABLE_SPI1 | AUX_ENABLE_SPI2);
+    aux_spi_flash_read_id(RASPI4_AUX_SPI1_BASE);
+    aux_spi_flash_read_id(RASPI4_AUX_SPI1_BASE);
+    aux_spi_flash_read_id(RASPI4_AUX_SPI2_BASE);
+    aux_spi_flash_read_id(RASPI4_AUX_SPI2_BASE);
+}
+
 static void pcie_edu_dma(uint64_t src, uint64_t dst, size_t size,
                          uint32_t command)
 {
@@ -983,6 +1114,44 @@ static void test_pcie_edu_intx(void)
         }
     }
     g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_MSI));
+
+    writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_ACK, 1);
+    g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_INTX));
+}
+
+static void test_pcie_root_event_irq(void)
+{
+    const uint64_t slot_ctl = RASPI4_PCIE_BASE +
+                              RASPI4_PCIE_ROOT_EXP_CAP + PCI_EXP_SLTCTL;
+    const uint64_t slot_sta = RASPI4_PCIE_BASE +
+                              RASPI4_PCIE_ROOT_EXP_CAP + PCI_EXP_SLTSTA;
+    unsigned int irq;
+
+    if (!pcie_edu_test_start()) {
+        return;
+    }
+
+    /*
+     * A root-port slot command generates QEMU's standard command-completed
+     * service event.  BCM2711 delivers it through SPI 147, independently of
+     * the downstream device's INTx lines.
+     */
+    writew(slot_ctl, PCI_EXP_SLTCTL_HPIE | PCI_EXP_SLTCTL_CCIE);
+    g_assert_true(readw(slot_sta) & PCI_EXP_SLTSTA_CC);
+    g_assert_true(get_irq(RASPI4_PCIE_GIC_EVENT));
+    for (irq = RASPI4_PCIE_INTX_FIRST;
+         irq <= RASPI4_PCIE_INTX_LAST; irq++) {
+        g_assert_false(get_irq(irq));
+    }
+
+    /* A simultaneous downstream INTx must retain its ordinary SPI route. */
+    writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_RAISE, 1);
+    g_assert_true(get_irq(RASPI4_PCIE_GIC_EVENT));
+    g_assert_true(get_irq(RASPI4_PCIE_EDU_GIC_INTX));
+
+    writew(slot_sta, PCI_EXP_SLTSTA_CC);
+    g_assert_false(get_irq(RASPI4_PCIE_GIC_EVENT));
+    g_assert_true(get_irq(RASPI4_PCIE_EDU_GIC_INTX));
 
     writel(RASPI4_PCIE_EDU_CPU_BAR + EDU_IRQ_ACK, 1);
     g_assert_false(get_irq(RASPI4_PCIE_EDU_GIC_INTX));
@@ -1386,6 +1555,10 @@ static void raspi4b_wait_for_migration(QTestState *qts)
 
 static void test_pcie_vl805_multisegment_migration(void)
 {
+    const uint64_t slot_ctl = RASPI4_PCIE_BASE +
+                              RASPI4_PCIE_ROOT_EXP_CAP + PCI_EXP_SLTCTL;
+    const uint64_t slot_sta = RASPI4_PCIE_BASE +
+                              RASPI4_PCIE_ROOT_EXP_CAP + PCI_EXP_SLTSTA;
     g_autoptr(GError) error = NULL;
     g_autofree char *tmpdir = NULL;
     g_autofree char *state_path = NULL;
@@ -1407,6 +1580,11 @@ static void test_pcie_vl805_multisegment_migration(void)
     }
     pcie_assert_vl805_port_event(VL805_XHCI_EVENT_RING2_CPU, true);
     g_assert_cmphex(readq(VL805_XHCI_EVENT_RING2_CPU + 16), ==, 0);
+
+    /* A pending root service event must migrate with the controller IRQ. */
+    writew(slot_ctl, PCI_EXP_SLTCTL_HPIE | PCI_EXP_SLTCTL_CCIE);
+    g_assert_true(readw(slot_sta) & PCI_EXP_SLTSTA_CC);
+    g_assert_true(get_irq(RASPI4_PCIE_GIC_EVENT));
 
     result = qtest_qmp(source, "{ 'execute': 'query-status' }");
     g_assert_true(qdict_haskey(result, "return"));
@@ -1436,10 +1614,21 @@ static void test_pcie_vl805_multisegment_migration(void)
     g_assert_cmpint(ret, !=, -1);
     g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
                            net_sockets[1]);
-    g_string_append_printf(cmd_line, " -incoming %s", uri);
+    g_string_append(cmd_line, " -incoming defer");
     destination = qtest_init(cmd_line->str);
     close(net_sockets[1]);
+    qtest_irq_intercept_out_named(destination,
+                                  "/machine/soc/peripherals/pcie",
+                                  "sysbus-irq");
+    qtest_qmp_assert_success(destination,
+        "{ 'execute': 'migrate-incoming', 'arguments': { "
+        "'uri': %s, 'exit-on-error': false } }", uri);
     raspi4b_wait_for_migration(destination);
+
+    g_assert_true(qtest_readw(destination, slot_sta) & PCI_EXP_SLTSTA_CC);
+    g_assert_true(qtest_get_irq(destination, RASPI4_PCIE_EVENT_OUTPUT));
+    qtest_writew(destination, slot_sta, PCI_EXP_SLTSTA_CC);
+    g_assert_false(qtest_get_irq(destination, RASPI4_PCIE_EVENT_OUTPUT));
 
     /* The next event must use the migrated segment and producer index. */
     g_assert_cmphex(qtest_readq(destination,
@@ -1450,6 +1639,83 @@ static void test_pcie_vl805_multisegment_migration(void)
     g_assert_false(qtest_readl(destination,
                               RASPI4_PCIE_VL805_CPU_BAR +
                               VL805_XHCI_USBSTS) & VL805_XHCI_USBSTS_HCE);
+
+    qtest_quit(destination);
+    close(net_sockets[0]);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+static void test_aux_spi_flash_migration(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autoptr(GString) cmd_line = g_string_new("-machine raspi4b");
+    QTestState *source = global_qtest;
+    QTestState *destination;
+    const uint32_t cntl0 = AUX_SPI_CNTL0_ENABLE |
+                           AUX_SPI_CNTL0_VAR_WIDTH |
+                           AUX_SPI_CNTL0_MSBF_OUT;
+    const uint32_t cntl1 = AUX_SPI_CNTL1_MSBF_IN;
+    int net_sockets[2];
+    int ret;
+
+    writel(RASPI4_AUX_ENABLES, AUX_ENABLE_SPI1);
+    writel(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE), cntl0);
+    writel(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE), cntl1);
+
+    /* Start a JEDEC-ID exchange but leave its virtual CS asserted. */
+    writel(AUX_SPI_TXHOLD(RASPI4_AUX_SPI1_BASE), 0x089f0000);
+    g_assert_cmphex(readl(AUX_SPI_IO(RASPI4_AUX_SPI1_BASE)), ==, 0);
+
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("raspi4b-aux-spi-migration-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    raspi4b_wait_for_migration(source);
+
+    if (pcie_has_edu) {
+        g_string_append(cmd_line,
+                        " -device edu,id=edu0,bus=pcie.1,addr=1,"
+                        "dma_mask=0xffffffffffffffff");
+    }
+    g_string_append(cmd_line, " -device m25p80,id=spi1flash,bus=spi1");
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
+    g_assert_cmpint(ret, !=, -1);
+    g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
+                           net_sockets[1]);
+    g_string_append(cmd_line, " -incoming defer");
+    destination = qtest_init(cmd_line->str);
+    close(net_sockets[1]);
+    qtest_qmp_assert_success(destination,
+        "{ 'execute': 'migrate-incoming', 'arguments': { "
+        "'uri': %s, 'exit-on-error': false } }", uri);
+    raspi4b_wait_for_migration(destination);
+
+    g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_ENABLES), ==,
+                    AUX_ENABLE_SPI1);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE)), ==,
+                    cntl0);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE)), ==,
+                    cntl1);
+
+    /* Complete the source transaction on the destination VM. */
+    qtest_writel(destination, AUX_SPI_IO(RASPI4_AUX_SPI1_BASE), 0x18000000);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_IO(RASPI4_AUX_SPI1_BASE)), ==,
+                    0x00202014);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_IO(RASPI4_AUX_SPI1_BASE)), ==,
+                    0);
 
     qtest_quit(destination);
     close(net_sockets[0]);
@@ -1472,6 +1738,10 @@ static void test_soc_peripheral_migration(void)
     const uint32_t dma_source = 0x9000;
     const uint32_t dma_destination = 0xa000;
     const uint32_t dma_length = 2048;
+    const uint32_t aux_spi_cntl0 = AUX_SPI_CNTL0_ENABLE |
+                                   AUX_SPI_CNTL0_VAR_WIDTH |
+                                   AUX_SPI_CNTL0_MSBF_OUT;
+    const uint32_t aux_spi_cntl1 = AUX_SPI_CNTL1_MSBF_IN;
     int64_t dma_clock;
     QDict *response;
     unsigned offset;
@@ -1543,9 +1813,12 @@ static void test_soc_peripheral_migration(void)
                            G_N_ELEMENTS(get_customer_otp),
                            sizeof(get_customer_otp));
     g_assert_cmphex(property_payload_qtest(source, 2), ==, 0xa5c35a3c);
-    writel(RASPI4_AUX_ENABLES, AUX_ENABLE_UART);
+    writel(RASPI4_AUX_ENABLES, AUX_ENABLE_UART | AUX_ENABLE_SPI1);
     writel(RASPI4_AUX_MU_MCR, AUX_MCR_RTS);
     writel(RASPI4_AUX_MU_SCRATCH, 0xa5);
+    writel(AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE), aux_spi_cntl0);
+    writel(AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE), aux_spi_cntl1);
+    writel(AUX_SPI_TXHOLD(RASPI4_AUX_SPI1_BASE), 0x18a1b2c3);
     writel(RASPI4_AUX_ENABLES, 0);
 
     /* Migrate distinct AON bank state and a held-high physical source. */
@@ -1684,11 +1957,30 @@ static void test_soc_peripheral_migration(void)
     g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_ENABLES), ==, 0);
     g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_MU_MCR), ==, 0);
     g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_MU_SCRATCH), ==, 0);
-    qtest_writel(destination, RASPI4_AUX_ENABLES, AUX_ENABLE_UART);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    qtest_writel(destination, RASPI4_AUX_ENABLES,
+                 AUX_ENABLE_UART | AUX_ENABLE_SPI1);
     g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_MU_MCR), ==,
                     AUX_MCR_RTS);
     g_assert_cmphex(qtest_readl(destination, RASPI4_AUX_MU_SCRATCH), ==,
                     0xa5);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_CNTL0(RASPI4_AUX_SPI1_BASE)), ==,
+                    aux_spi_cntl0);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_CNTL1(RASPI4_AUX_SPI1_BASE)), ==,
+                    aux_spi_cntl1);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_STAT(RASPI4_AUX_SPI1_BASE)), ==,
+                    0x00030200);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_IO(RASPI4_AUX_SPI1_BASE)), ==, 0);
+    g_assert_cmphex(qtest_readl(destination,
+                                AUX_SPI_STAT(RASPI4_AUX_SPI1_BASE)), ==,
+                    AUX_SPI_STAT_IDLE);
     g_assert_cmphex(qtest_readl(destination, RASPI4_DMA_CS) & DMA_ACTIVE,
                     ==, DMA_ACTIVE);
     g_assert_cmphex(qtest_readl(destination, RASPI4_DMA_TXFR_LEN), ==, 1024);
@@ -3600,6 +3892,7 @@ static void test_genet_packet_dma(void)
 
 typedef struct Raspi4TestData {
     void (*func)(void);
+    const char *extra_args;
 } Raspi4TestData;
 
 static void raspi4b_test_run(const void *opaque)
@@ -3615,6 +3908,9 @@ static void raspi4b_test_run(const void *opaque)
         g_string_append(cmd_line,
                         " -device edu,id=edu0,bus=pcie.1,addr=1,"
                         "dma_mask=0xffffffffffffffff");
+    }
+    if (data->extra_args) {
+        g_string_append(cmd_line, data->extra_args);
     }
 
 #ifndef _WIN32
@@ -3704,12 +4000,19 @@ static void test_hdmi_hotplug(void)
     hdmi_set_connected(true);
 }
 
-static void raspi4b_add_test(const char *path, void (*func)(void))
+static void raspi4b_add_test_with_args(const char *path, void (*func)(void),
+                                       const char *extra_args)
 {
     Raspi4TestData *data = g_new(Raspi4TestData, 1);
 
     data->func = func;
+    data->extra_args = extra_args;
     qtest_add_data_func_full(path, data, raspi4b_test_run, g_free);
+}
+
+static void raspi4b_add_test(const char *path, void (*func)(void))
+{
+    raspi4b_add_test_with_args(path, func, NULL);
 }
 
 int main(int argc, char **argv)
@@ -3727,6 +4030,17 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/interrupts/spi0", test_spi0_interrupt);
     raspi4b_add_test("/raspi4b/aux/modem_and_reset",
                      test_aux_uart_modem_and_reset);
+    raspi4b_add_test("/raspi4b/aux/spi_pio_and_reset",
+                     test_aux_spi_pio_and_reset);
+    raspi4b_add_test_with_args("/raspi4b/aux/spi_flash_transaction",
+                               test_aux_spi_flash_transaction,
+                               " -device m25p80,id=spi1flash,bus=spi1"
+                               " -device m25p80,id=spi2flash,bus=spi2");
+#ifndef _WIN32
+    raspi4b_add_test_with_args("/raspi4b/aux/spi_flash_migration",
+                               test_aux_spi_flash_migration,
+                               " -device m25p80,id=spi1flash,bus=spi1");
+#endif
     raspi4b_add_test("/raspi4b/dwc2/reset_and_fifo_flush",
                      test_dwc2_reset_and_fifo_flush);
     raspi4b_add_test("/raspi4b/gpio/events_and_interrupts",
@@ -3766,6 +4080,8 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/pcie/edu/config_and_mmio",
                      test_pcie_edu_config_and_mmio);
     raspi4b_add_test("/raspi4b/pcie/edu/intx", test_pcie_edu_intx);
+    raspi4b_add_test("/raspi4b/pcie/root_event_irq",
+                     test_pcie_root_event_irq);
     raspi4b_add_test("/raspi4b/pcie/edu/inbound_dma",
                      test_pcie_edu_inbound_dma);
     raspi4b_add_test("/raspi4b/pcie/edu/msi", test_pcie_edu_msi);
