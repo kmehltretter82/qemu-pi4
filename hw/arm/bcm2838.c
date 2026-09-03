@@ -226,6 +226,8 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
     /* Connect the native display pipeline interrupts. */
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps->hvs), 0,
                        qdev_get_gpio_in(gicdev, 97));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&ps->v3d), 0,
+                       qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_V3D));
     sysbus_connect_irq(SYS_BUS_DEVICE(&ps->pixelvalve2), 0,
                        qdev_get_gpio_in(gicdev, 101));
 

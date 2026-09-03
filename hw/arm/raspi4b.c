@@ -84,6 +84,11 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
         const char *dev_str = nodes_to_remove[i];
         int offset;
 
+        if (g_str_equal(dev_str, "brcm,2711-v3d") &&
+            s_base->soc.peripherals.v3d.enable_probe_dtb) {
+            continue;
+        }
+
         while ((offset = fdt_node_offset_by_compatible(fdt, -1,
                                                        dev_str)) >= 0) {
             if (fdt_nop_node(fdt, offset) != 0) {

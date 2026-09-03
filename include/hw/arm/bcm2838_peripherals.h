@@ -13,6 +13,7 @@
 #include "hw/display/bcm2711_hdmi.h"
 #include "hw/display/bcm2711_hvs.h"
 #include "hw/display/bcm2711_pixelvalve.h"
+#include "hw/display/bcm2711_v3d.h"
 #include "hw/sd/sdhci.h"
 #include "hw/gpio/bcm2838_gpio.h"
 #include "hw/i2c/bcm2711_hdmi_i2c.h"
@@ -30,6 +31,7 @@
 #define GIC_SPI_INTERRUPT_SYSTIMER_0   64
 #define GIC_SPI_INTERRUPT_SYSTIMER_3   67
 #define GIC_SPI_INTERRUPT_DWC2         73
+#define GIC_SPI_INTERRUPT_V3D          74
 #define GIC_SPI_INTERRUPT_DMA_0        80
 #define GIC_SPI_INTERRUPT_DMA_6        86
 #define GIC_SPI_INTERRUPT_DMA_7_8      87
@@ -75,6 +77,9 @@
 #define BCM2838_MPHI_OFFSET     0x6000
 #define BCM2838_MPHI_SIZE       0x200
 
+/* The BCM2711 asynchronous AXI bridge has nine 32-bit registers. */
+#define BCM2838_ASB_REGS        9
+
 #define TYPE_BCM2838_PERIPHERALS "bcm2838-peripherals"
 OBJECT_DECLARE_TYPE(BCM2838PeripheralState, BCM2838PeripheralClass,
                     BCM2838_PERIPHERALS)
@@ -96,6 +101,7 @@ struct BCM2838PeripheralState {
     BCM2711PcieHostState pcie;
     BCM2835PWMState pwm1;
     BCM2711HVSState hvs;
+    BCM2711V3DState v3d;
     BCM2711PixelValveState pixelvalve2;
     BCM2711HDMIState hdmi0;
     BCM2711DVPState dvp;
@@ -109,6 +115,8 @@ struct BCM2838PeripheralState {
 
     MemoryRegion asb_mr;
     MemoryRegion rpivid_asb_mr;
+    uint32_t asb_regs[BCM2838_ASB_REGS];
+    uint32_t rpivid_asb_regs[BCM2838_ASB_REGS];
 };
 
 struct BCM2838PeripheralClass {

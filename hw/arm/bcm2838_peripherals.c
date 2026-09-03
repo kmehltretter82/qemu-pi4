@@ -7,17 +7,31 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bitops.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "hw/arm/raspi4_platform.h"
 #include "hw/arm/bcm2838_peripherals.h"
+#include "migration/vmstate.h"
 #include "net/net.h"
 #include "system/address-spaces.h"
 
 #define RPIVID_ASB_OFFSET       0xc11000
-#define ASB_SIZE                0x24
+#define ASB_SIZE                (BCM2838_ASB_REGS * sizeof(uint32_t))
+#define ASB_CPR_CTRL            0x04
+#define ASB_V3D_S_CTRL          0x08
+#define ASB_V3D_M_CTRL          0x0c
+#define ASB_ISP_S_CTRL          0x10
+#define ASB_ISP_M_CTRL          0x14
+#define ASB_H264_S_CTRL         0x18
+#define ASB_H264_M_CTRL         0x1c
 #define ASB_AXI_BRDG_ID         0x20
 #define BCM2835_BRDG_ID         0x62726467
+
+#define ASB_REQ_STOP            BIT(0)
+#define ASB_ACK                 BIT(1)
+#define ASB_EMPTY               BIT(2)
+#define ASB_PM_PASSWORD_MASK    0xff000000
 
 /* Lower peripheral base address on the VC (GPU) system bus */
 #define BCM2838_VC_PERI_LOW_BASE 0x7c000000
@@ -33,12 +47,31 @@
 
 static uint64_t bcm2838_asb_read(void *opaque, hwaddr offset, unsigned size)
 {
-    return offset == ASB_AXI_BRDG_ID ? BCM2835_BRDG_ID : 0;
+    uint32_t *regs = opaque;
+
+    return offset == ASB_AXI_BRDG_ID ? BCM2835_BRDG_ID : regs[offset >> 2];
 }
 
 static void bcm2838_asb_write(void *opaque, hwaddr offset, uint64_t value,
                               unsigned size)
 {
+    uint32_t *regs = opaque;
+    uint32_t control = value & ~ASB_PM_PASSWORD_MASK;
+
+    if (offset < ASB_CPR_CTRL || offset >= ASB_AXI_BRDG_ID) {
+        return;
+    }
+
+    /*
+     * The Linux power-domain driver polls ACK after changing REQ_STOP.
+     * There are no transactions in this model, so the bridge immediately
+     * reaches the requested quiescent or running state and remains empty.
+     */
+    control &= ~ASB_ACK;
+    if (control & ASB_REQ_STOP) {
+        control |= ASB_ACK;
+    }
+    regs[offset >> 2] = control | ASB_EMPTY;
 }
 
 static const MemoryRegionOps bcm2838_asb_ops = {
@@ -47,6 +80,40 @@ static const MemoryRegionOps bcm2838_asb_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid.min_access_size = 4,
     .valid.max_access_size = 4,
+};
+
+static void bcm2838_asb_reset(BCM2838PeripheralState *s)
+{
+    memset(s->asb_regs, 0, sizeof(s->asb_regs));
+    memset(s->rpivid_asb_regs, 0, sizeof(s->rpivid_asb_regs));
+
+    /* Pi 400 idle values observed through read-only MMIO. */
+    s->asb_regs[ASB_V3D_S_CTRL >> 2] = ASB_REQ_STOP | ASB_EMPTY;
+    s->asb_regs[ASB_V3D_M_CTRL >> 2] = ASB_REQ_STOP | ASB_EMPTY;
+    s->rpivid_asb_regs[ASB_V3D_S_CTRL >> 2] =
+        ASB_REQ_STOP | ASB_ACK | ASB_EMPTY;
+    s->rpivid_asb_regs[ASB_V3D_M_CTRL >> 2] =
+        ASB_REQ_STOP | ASB_ACK | ASB_EMPTY;
+}
+
+static void bcm2838_peripherals_reset(DeviceState *dev)
+{
+    BCM2838PeripheralState *s = BCM2838_PERIPHERALS(dev);
+
+    bcm2838_asb_reset(s);
+}
+
+static const VMStateDescription vmstate_bcm2838_peripherals = {
+    .name = TYPE_BCM2838_PERIPHERALS,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(asb_regs, BCM2838PeripheralState,
+                             BCM2838_ASB_REGS),
+        VMSTATE_UINT32_ARRAY(rpivid_asb_regs, BCM2838PeripheralState,
+                             BCM2838_ASB_REGS),
+        VMSTATE_END_OF_LIST()
+    },
 };
 
 static void bcm2838_peripherals_init(Object *obj)
@@ -79,10 +146,12 @@ static void bcm2838_peripherals_init(Object *obj)
                        bc->peri_low_size);
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->peri_low_mr);
 
-    memory_region_init_io(&s->asb_mr, obj, &bcm2838_asb_ops, s,
+    memory_region_init_io(&s->asb_mr, obj, &bcm2838_asb_ops, s->asb_regs,
                           "bcm2838-asb", ASB_SIZE);
-    memory_region_init_io(&s->rpivid_asb_mr, obj, &bcm2838_asb_ops, s,
+    memory_region_init_io(&s->rpivid_asb_mr, obj, &bcm2838_asb_ops,
+                          s->rpivid_asb_regs,
                           "bcm2838-rpivid-asb", ASB_SIZE);
+    bcm2838_asb_reset(s);
 
     /* Extended Mass Media Controller 2 */
     object_initialize_child(obj, "emmc2", &s->emmc2, TYPE_SYSBUS_SDHCI);
@@ -112,6 +181,7 @@ static void bcm2838_peripherals_init(Object *obj)
     object_initialize_child(obj, "hvs", &s->hvs, TYPE_BCM2711_HVS);
     object_property_add_const_link(OBJECT(&s->hvs), "fb",
                                    OBJECT(&s_base->fb));
+    object_initialize_child(obj, "v3d", &s->v3d, TYPE_BCM2711_V3D);
     object_initialize_child(obj, "pixelvalve2", &s->pixelvalve2,
                             TYPE_BCM2711_PIXELVALVE);
     object_initialize_child(obj, "hdmi0", &s->hdmi0, TYPE_BCM2711_HDMI);
@@ -319,6 +389,21 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
         &s_base->peri_mr, HVS_OFFSET,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hvs), 0));
 
+    /*
+     * V3D 4.2 has separate hub and core0 windows.  This mapping overrides
+     * the legacy V3D unimplemented-device placeholder inherited by the
+     * common Raspberry Pi peripheral block.
+     */
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->v3d), errp)) {
+        return;
+    }
+    memory_region_add_subregion(
+        &s_base->peri_mr, V3D_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->v3d), BCM2711_V3D_HUB));
+    memory_region_add_subregion(
+        &s_base->peri_mr, V3D_OFFSET + BCM2711_V3D_MMIO_SIZE,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->v3d), BCM2711_V3D_CORE0));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->pixelvalve2), errp)) {
         return;
     }
@@ -449,6 +534,8 @@ static void bcm2838_peripherals_class_init(ObjectClass *oc, const void *data)
     bc->peri_low_size = 0x2000000;
     bc_base->peri_size = 0x1800000;
     dc->realize = bcm2838_peripherals_realize;
+    device_class_set_legacy_reset(dc, bcm2838_peripherals_reset);
+    dc->vmsd = &vmstate_bcm2838_peripherals;
 }
 
 static const TypeInfo bcm2838_peripherals_type_info = {
