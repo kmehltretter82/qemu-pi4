@@ -40,8 +40,11 @@ QEMU ``spi1`` and ``spi2`` SSI buses and supports the one-to-three-byte,
 MSB-first variable-width transfers used by Linux's ``spi-bcm2835aux`` driver,
 including RX FIFO/status, shared interrupts, reset and migration.  For an
 explicitly attached virtual SSI peripheral, ``TXHOLD`` followed by ``IO``
-preserves the driver's transaction boundary.  SPI DMA, timing, pin mux and
-physical GPIO chip-select wiring remain out of scope.
+preserves the driver's transaction boundary.  That boundary is one
+``spi_transfer``: as on hardware, the native chip select drops between the
+transfers of a multi-transfer message, which is why the driver asks for
+``cs-gpios``.  SPI DMA, timing, pin mux and physical GPIO chip-select wiring
+remain out of scope.
 
 The on-SoC DWC2 USB controller implements core-soft-reset effects, including
 terminating modeled host transfers, clearing interrupt masks while preserving

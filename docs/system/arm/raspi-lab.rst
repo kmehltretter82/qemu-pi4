@@ -160,9 +160,17 @@ explicit virtual M25P80 device; it leaves the stock Pi DTB unchanged::
       --qemu build/qemu-system-aarch64 --machine raspi400
 
 It requires ``dtc`` and ``fdtoverlay`` on the host.  The guest must bind
-``spi-bcm2835aux`` to ``spi1.0``, bind its generic SPI-NOR child, and read 16
-erased bytes from the resulting MTD device.  It is a controller/driver test,
-not a claim of physical GPIO wiring.
+``spi-bcm2835aux`` to the ``fe215080.spi`` controller, bind its ``spidev``
+child, and read the M25P80's JEDEC id ``20 20 14`` back from one full-duplex
+four-byte ``SPI_IOC_MESSAGE`` transfer.  The child is deliberately not a
+SPI-NOR driver: ``spi-bcm2835aux`` ends every ``spi_transfer`` with a write to
+``IO``, which deasserts the native chip select, so a command-then-data SPI-NOR
+message cannot hold it.  The driver documents that hardware behavior and asks
+for ``cs-gpios`` instead.  A single transfer is the exchange the native chip
+select spans, and it is the contract the model implements.  The controller has
+no device-tree alias, so Linux assigns its bus number dynamically and the gate
+matches on the platform device name.  It is a controller/driver test, not a
+claim of physical GPIO wiring.
 
 The same kernel and unmodified upstream Pi 4 DTB can also mount a normal
 Linux root filesystem from the emulated external SD card.  Attach the image

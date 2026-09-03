@@ -212,7 +212,12 @@ The bounded PIO subset implements ``CNTL0``, ``CNTL1``, ``STAT``, ``PEEK``,
 one-, two- and three-byte MSB-first variable-width transfers used by Linux's
 ``spi-bcm2835aux`` driver, synchronously exchanges them with a QEMU SSI bus,
 and provides the driver's twelve-byte receive FIFO, status bits, shared
-interrupt, cold reset and migration behavior.  QEMU exposes the buses as
+interrupt, cold reset and migration behavior.  A word is sent from the most
+significant bits but received into the least significant ones, so an n-byte
+result is returned right-aligned, as ``spi-bcm2835aux`` reads it back.  The
+receive FIFO holds bytes rather than words, so a read drains up to three of
+them irrespective of the widths that produced them; the driver only ever
+shortens its final word, so its own ``min(pending, 3)`` accounting matches.  QEMU exposes the buses as
 ``spi1`` and ``spi2``.  For a lab-only serial-flash transaction, for example,
 an explicitly requested standard QEMU device can be attached with::
 
@@ -223,6 +228,14 @@ chip select asserted and the final ``IO`` word deasserts it.  This follows the
 transaction boundary used by the Linux PIO driver; it does not model physical
 GPIO routing.  The controller state, virtual chip-select state and a held
 standard-M25P80 transaction migrate together.
+
+That boundary is one ``spi_transfer``, not one SPI message, because
+``spi-bcm2835aux`` writes the last word of every transfer to ``IO``.  A guest
+message built from separate command and data transfers therefore drops the
+native chip select in between, and a SPI-NOR child bound to this controller
+cannot complete a JEDEC or read command.  This matches the hardware the driver
+describes, which is why it asks for ``cs-gpios``; a single full-duplex
+transfer is what the native chip select can span.
 
 The upstream Pi 4 device-tree nodes remain disabled by default, as on the
 board, so a guest must use its normal device-tree overlay or other DT change
