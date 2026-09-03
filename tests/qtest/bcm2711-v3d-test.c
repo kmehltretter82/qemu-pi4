@@ -47,8 +47,13 @@
 #define V3D_L2TCACTL_TMUWCF          BIT(8)
 #define V3D_L2TCACTL_L2TFLS          BIT(0)
 
+#define ASB_CPR_CTRL                 0x04
 #define ASB_V3D_S_CTRL               0x08
 #define ASB_V3D_M_CTRL               0x0c
+#define ASB_ISP_S_CTRL               0x10
+#define ASB_ISP_M_CTRL               0x14
+#define ASB_H264_S_CTRL              0x18
+#define ASB_H264_M_CTRL              0x1c
 #define ASB_AXI_BRDG_ID               0x20
 #define ASB_REQ_STOP                  BIT(0)
 #define ASB_ACK                       BIT(1)
@@ -162,18 +167,45 @@ static void test_v3d_asb_stop_and_resume(void)
     QTestState *qts = v3d_start_unintercepted();
 
     /*
-     * Pi 400 bridge identity and idle values captured through read-only MMIO.
+     * Bridge identity and every per-domain control word, as read from a real
+     * Pi 400 through read-only MMIO.  Linux reaches the V3D bridges through
+     * the RPiVid block on BCM2711, which is why the two blocks disagree about
+     * V3D while agreeing about the bridge identity.
      */
     g_assert_cmphex(qtest_readl(qts, ASB_BASE + ASB_AXI_BRDG_ID), ==,
                     0x62726467);
+    g_assert_cmphex(qtest_readl(qts, RPIVID_ASB_BASE + ASB_AXI_BRDG_ID), ==,
+                    0x62726467);
+
+    g_assert_cmphex(qtest_readl(qts, ASB_BASE + ASB_CPR_CTRL), ==,
+                    ASB_REQ_STOP | ASB_ACK | ASB_EMPTY);
     g_assert_cmphex(qtest_readl(qts, ASB_BASE + ASB_V3D_S_CTRL), ==,
                     ASB_REQ_STOP | ASB_EMPTY);
     g_assert_cmphex(qtest_readl(qts, ASB_BASE + ASB_V3D_M_CTRL), ==,
                     ASB_REQ_STOP | ASB_EMPTY);
+    g_assert_cmphex(qtest_readl(qts, ASB_BASE + ASB_ISP_S_CTRL), ==,
+                    ASB_REQ_STOP | ASB_EMPTY);
+    g_assert_cmphex(qtest_readl(qts, ASB_BASE + ASB_ISP_M_CTRL), ==,
+                    ASB_REQ_STOP | ASB_EMPTY);
+    g_assert_cmphex(qtest_readl(qts, ASB_BASE + ASB_H264_S_CTRL), ==,
+                    ASB_REQ_STOP | ASB_ACK | ASB_EMPTY);
+    g_assert_cmphex(qtest_readl(qts, ASB_BASE + ASB_H264_M_CTRL), ==,
+                    ASB_REQ_STOP | ASB_ACK | ASB_EMPTY);
+
+    g_assert_cmphex(qtest_readl(qts, RPIVID_ASB_BASE + ASB_CPR_CTRL), ==,
+                    ASB_EMPTY);
     g_assert_cmphex(qtest_readl(qts, RPIVID_ASB_BASE + ASB_V3D_S_CTRL), ==,
                     ASB_REQ_STOP | ASB_ACK | ASB_EMPTY);
     g_assert_cmphex(qtest_readl(qts, RPIVID_ASB_BASE + ASB_V3D_M_CTRL), ==,
                     ASB_REQ_STOP | ASB_ACK | ASB_EMPTY);
+    g_assert_cmphex(qtest_readl(qts, RPIVID_ASB_BASE + ASB_ISP_S_CTRL), ==,
+                    ASB_EMPTY);
+    g_assert_cmphex(qtest_readl(qts, RPIVID_ASB_BASE + ASB_ISP_M_CTRL), ==,
+                    ASB_EMPTY);
+    g_assert_cmphex(qtest_readl(qts, RPIVID_ASB_BASE + ASB_H264_S_CTRL), ==,
+                    ASB_EMPTY);
+    g_assert_cmphex(qtest_readl(qts, RPIVID_ASB_BASE + ASB_H264_M_CTRL), ==,
+                    ASB_EMPTY);
 
     qtest_writel(qts, RPIVID_ASB_BASE + ASB_V3D_S_CTRL,
                  PM_PASSWORD | ASB_REQ_STOP);
