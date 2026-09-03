@@ -252,6 +252,27 @@ On 2026-08-23, the pinned upstream Linux 7.2 acceptance image passed on both
 same boots also retained all PCIe, VL805, USB-storage, MSI, GENET, and Pi 400
 keyboard acceptance gates.
 
+V3D identity reference evidence
+-------------------------------
+
+The V3D substrate's read-only words come from the Linux V3D driver's debugfs
+on the project's Pi 400 and were re-read on 2026-09-03, with the module
+loaded and the device idle::
+
+  sudo cat /sys/kernel/debug/dri/0/v3d_regs
+
+The hub reports ``AXICFG`` ``0x0000000f``, ``UIFCFG`` ``0x00000045`` and
+``IDENT0`` through ``IDENT3`` ``0x42554856``, ``0x000e1124``, ``0x00000100``
+and ``0x00000e00``; ``V3D_MMU_DEBUG_INFO`` reads ``0x00000550``.  Core 0
+reports ``IDENT0`` through ``IDENT2`` ``0x04443356``, ``0x81001422`` and
+``0x40078121``, with ``MISCCFG`` ``0x00000006`` at offset ``0x18``.  The
+adjacent ``v3d_ident`` file decodes these as revision 4.2.14.0 with an MMU,
+TFU, TSY and MSO, no L3 cache, and one core of two slices, two TMUs and eight
+QPUs.  Every value and offset in the model matches this capture.
+
+This establishes identity only.  It says nothing about command-list
+execution, which the model does not implement.
+
 ASB power-domain bridge reference evidence
 ------------------------------------------
 
