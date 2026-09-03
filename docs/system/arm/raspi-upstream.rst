@@ -1107,12 +1107,14 @@ invent it.
 Known feature gaps, not bug candidates
 --------------------------------------
 
-The absence of V3D 4.2, unmodeled HVS formats and filter behavior, remaining
-pixel-valve and HDMI endpoints, the unimplemented BCM2711 PCIe
-controller-event path, and missing Pi 400 consumer-control event production
-are tracked as implementation scope in :doc:`raspi`.  These are upstream
-enhancement opportunities, but should not be described as correctness bugs
-merely because the models or optional behavior do not exist.  The fork's
+The absence of V3D 4.2 command execution, unmodeled HVS formats and filter
+behavior, remaining pixel-valve and HDMI endpoints, and the missing HPD
+interrupt, hot-plug-tracking EDID and CEC paths are tracked as implementation
+scope in :doc:`raspi`.  The BCM2711 PCIe controller-event path and Pi 400
+consumer-control event production were previously listed here and are now
+implemented in the fork.  These are upstream enhancement opportunities, but
+should not be described as correctness bugs merely because the models or
+optional behavior do not exist.  The fork's
 functional HVS composition, HDMI0 pixel valve and transmitter, DVP, HDMI DDC,
 GENET v5, BCM2711 PCIe, VL805, RNG200, and AVS thermal models belong in the
 same enhancement category and are tracked above or in :doc:`raspi-lab`.

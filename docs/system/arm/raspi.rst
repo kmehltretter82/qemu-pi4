@@ -46,7 +46,8 @@ Implemented devices
    multi-plane composition, a bounded full-surface T-tiled RGB scanout path,
    and functional scaling for native Linux VC4 DRM scanout to a QEMU display
  * BCM2711 HDMI DVP clock/reset controller and both HDMI DDC I2C controllers,
-   with a connected virtual EDID monitor on HDMI0
+   with a connected virtual EDID monitor on HDMI0 and a runtime hot-plug
+   detect line on the HDMI0 transmitter
  * BCM2711 HDMI0 MAI audio, with a 64-word FIFO, DMA DREQ pacing and PCM
    playback through a QEMU audio backend
  * System Timer
@@ -90,7 +91,8 @@ Missing devices
  * Remaining native-display features: cropped, vertically reflected and scaled
    HVS T-tiled planes; compressed and YUV formats; exact PPF/TPZ coefficient
    and LBM behavior; pixel valves other than HDMI0's; HDMI1;
-   dynamic hotplug, CEC and signal-level TMDS and HDMI audio-packet transport
+   HPD interrupt edges, EDID that tracks the hot-plug line, CEC and
+   signal-level TMDS and HDMI audio-packet transport
  * Physical BCM2711 PCIe power-management and link-training event behavior
  * AUX SPI DMA, fixed-width or LSB-first framing, clock timing, GPIO pin-mux
    and native chip-select wiring
@@ -409,10 +411,10 @@ events, masking, clearing a held-high source, reset and migration.
 The node remains present in supplied Pi 4-family device trees, and the pinned
 upstream Linux 7.2 image registers its ``irq_brcmstb_l2`` driver on both
 ``raspi4b`` and ``raspi400``.  HDMI0 uses the controller as the parent for its
-hotplug interrupt descriptions, but the transmitter has a fixed connected
-state and does not generate connect, disconnect or CEC edges.  The controller
-therefore supplies the Linux-visible interrupt topology without claiming
-dynamic hotplug or CEC emulation.
+hotplug interrupt descriptions.  The transmitter's hot-plug state is settable
+at run time, but detection is polled: no connect, disconnect or CEC edge is
+delivered through this controller.  It therefore supplies the Linux-visible
+interrupt topology without claiming HPD interrupt or CEC emulation.
 
 Native HDMI0 scanout, DVP clocks and DDC
 ----------------------------------------
@@ -487,8 +489,9 @@ are not yet modeled.
 
 The HDMI0 model exposes all register banks described by the BCM2711 device
 tree and implements the hotplug, FIFO, packet-status and scheduler responses
-needed by the Linux HDMI driver.  It starts connected and consumes HDMI0's
-DVP clock-enable and reset signals.  Most transmitter registers are retained
+needed by the Linux HDMI driver.  It starts connected, accepts a runtime
+``connected`` property change that a polled guest observes through
+``HDMI_HOTPLUG``, and consumes HDMI0's DVP clock-enable and reset signals.  Most transmitter registers are retained
 control state rather than a signal-level HDMI encoder; there is no TMDS,
 blanking-interval, audio-packet or physical-monitor model.  The separate MAI
 functional model described below terminates audio at QEMU's host audio core
@@ -550,8 +553,8 @@ This is native Linux-programmed scanout, but it remains a deliberately bounded
 display-pipeline subset.  Cropped, vertically reflected and scaled T-tiled
 planes, compressed and YUV formats, negative destination coordinates, full TPZ
 and exact coefficient-table-driven scaling, mode-derived timings, HDMI1,
-dynamic HPD, CEC, signal-level TMDS and audio-packet transport, and V3D command
-execution are not modeled.  The DDC
+HPD interrupt edges, hot-plug-tracking EDID, CEC, signal-level TMDS and
+audio-packet transport, and V3D command execution are not modeled.  The DDC
 controller also
 omits the combined hardware DTF encodings and ten-bit I2C addressing.
 

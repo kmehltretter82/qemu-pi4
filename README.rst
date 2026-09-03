@@ -106,6 +106,13 @@ production-driver pixel gate adds a 320x200 RGB565 overlay, asks VC4 to scale
 it to 640x400 at ``(320, 200)``, and validates the primary and all four overlay
 quadrants in a QMP screendump on both boards.
 
+The HDMI0 transmitter models the hot-plug detect line as a runtime
+``connected`` property, so a display can be attached or removed while the
+guest runs.  The polled VC4 DRM connector observes the change through
+``HDMI_HOTPLUG``, a disconnect stops an in-flight MAI stream, and the state
+migrates.  The DDC monitor is independent of that line, so a guest reading
+EDID directly still sees it while the transmitter reports disconnected.
+
 HDMI0's MAI FIFO is paced at the guest-selected sample rate, drives DMA DREQ
 10 and sends decoded PCM to a QEMU audio backend.  The Linux VC4 HDMI driver
 completes a one-second 48 kHz stereo IEC958 playback on both boards; a host
@@ -117,10 +124,10 @@ by focused qtests.
 The display model does not yet reproduce the HVS's quantized PPF coefficient
 tables or full TPZ filter, full LBM behavior, cropped, vertically reflected or
 scaled T-tiled planes, compressed or YUV formats, the other pixel valves,
-HDMI1 scanout or audio, dynamic hot-plug, CEC, or signal-level TMDS and HDMI
-audio-packet transport.  V3D 4.2 and Mesa 3D
-acceleration also remain unavailable; the opt-in V3D Linux driver probe is not
-a renderer.
+HDMI1 scanout or audio, HPD interrupt edges, EDID that tracks the hot-plug
+line, CEC, or signal-level TMDS and HDMI audio-packet transport.  V3D 4.2 and
+Mesa 3D acceleration also remain unavailable; the opt-in V3D Linux driver
+probe is not a renderer.
 
 Raspberry Pi 5 is not supported. It uses a substantially different BCM2712
 SoC and RP1 I/O controller, neither of which this project currently models.
