@@ -82,18 +82,40 @@ static const MemoryRegionOps bcm2838_asb_ops = {
     .valid.max_access_size = 4,
 };
 
+/*
+ * Idle control-register values read from the project's Pi 400 through
+ * read-only MMIO on 2026-09-03, at 0xfe00a000 and 0xfec11000, on a running
+ * Raspberry Pi OS with the V3D module loaded but no GPU work in flight.
+ * Linux reaches the V3D bridges through the RPiVid block on BCM2711, so the
+ * main block's V3D entries are firmware-left state that the power driver
+ * never writes on this SoC.  The bridge-version and AXI bridge-identity
+ * words are not per-domain controls and stay at their read-path values.
+ */
+static const uint32_t bcm2838_asb_idle[BCM2838_ASB_REGS] = {
+    [ASB_CPR_CTRL >> 2]    = ASB_REQ_STOP | ASB_ACK | ASB_EMPTY,
+    [ASB_V3D_S_CTRL >> 2]  = ASB_REQ_STOP | ASB_EMPTY,
+    [ASB_V3D_M_CTRL >> 2]  = ASB_REQ_STOP | ASB_EMPTY,
+    [ASB_ISP_S_CTRL >> 2]  = ASB_REQ_STOP | ASB_EMPTY,
+    [ASB_ISP_M_CTRL >> 2]  = ASB_REQ_STOP | ASB_EMPTY,
+    [ASB_H264_S_CTRL >> 2] = ASB_REQ_STOP | ASB_ACK | ASB_EMPTY,
+    [ASB_H264_M_CTRL >> 2] = ASB_REQ_STOP | ASB_ACK | ASB_EMPTY,
+};
+
+static const uint32_t bcm2838_rpivid_asb_idle[BCM2838_ASB_REGS] = {
+    [ASB_CPR_CTRL >> 2]    = ASB_EMPTY,
+    [ASB_V3D_S_CTRL >> 2]  = ASB_REQ_STOP | ASB_ACK | ASB_EMPTY,
+    [ASB_V3D_M_CTRL >> 2]  = ASB_REQ_STOP | ASB_ACK | ASB_EMPTY,
+    [ASB_ISP_S_CTRL >> 2]  = ASB_EMPTY,
+    [ASB_ISP_M_CTRL >> 2]  = ASB_EMPTY,
+    [ASB_H264_S_CTRL >> 2] = ASB_EMPTY,
+    [ASB_H264_M_CTRL >> 2] = ASB_EMPTY,
+};
+
 static void bcm2838_asb_reset(BCM2838PeripheralState *s)
 {
-    memset(s->asb_regs, 0, sizeof(s->asb_regs));
-    memset(s->rpivid_asb_regs, 0, sizeof(s->rpivid_asb_regs));
-
-    /* Pi 400 idle values observed through read-only MMIO. */
-    s->asb_regs[ASB_V3D_S_CTRL >> 2] = ASB_REQ_STOP | ASB_EMPTY;
-    s->asb_regs[ASB_V3D_M_CTRL >> 2] = ASB_REQ_STOP | ASB_EMPTY;
-    s->rpivid_asb_regs[ASB_V3D_S_CTRL >> 2] =
-        ASB_REQ_STOP | ASB_ACK | ASB_EMPTY;
-    s->rpivid_asb_regs[ASB_V3D_M_CTRL >> 2] =
-        ASB_REQ_STOP | ASB_ACK | ASB_EMPTY;
+    memcpy(s->asb_regs, bcm2838_asb_idle, sizeof(s->asb_regs));
+    memcpy(s->rpivid_asb_regs, bcm2838_rpivid_asb_idle,
+           sizeof(s->rpivid_asb_regs));
 }
 
 static void bcm2838_peripherals_reset(DeviceState *dev)
