@@ -36,9 +36,11 @@
 #define BCM2708_DMA_D_INC      (1 << 4)
 #define BCM2708_DMA_D_WIDTH    (1 << 5)
 #define BCM2708_DMA_D_DREQ     (1 << 6)
+#define BCM2708_DMA_D_IGNORE   (1 << 7)
 #define BCM2708_DMA_S_INC      (1 << 8)
 #define BCM2708_DMA_S_WIDTH    (1 << 9)
 #define BCM2708_DMA_PERMAP(_n) ((_n) << 16)
+#define BCM2708_DMA_S_IGNORE   (1 << 11)
 
 #define RASPI4_DMA_QOM_PATH "/machine/soc/peripherals/dma"
 
@@ -145,6 +147,32 @@ static void bcm2835_dma_test_cyclic_yields(void)
     g_assert_cmphex(cs & BCM2708_DMA_ACTIVE, ==, 0);
     g_assert_cmphex(cs & BCM2708_DMA_ISPAUSED, ==, BCM2708_DMA_ISPAUSED);
     g_assert_cmphex(readl(dma_base + BCM2708_DMA_ADDR), ==, 0);
+}
+
+static void bcm2835_dma_test_large_transfer_yields(void)
+{
+    const uint64_t dma_base = RASPI4_DMA_BASE + 5 * 0x100;
+    const uint32_t cb = 0x1000;
+    const uint32_t length = UINT32_MAX - 3;
+    const int64_t start = g_get_monotonic_time();
+    uint32_t cs;
+
+    writel(dma_base + BCM2708_DMA_CS, BCM2708_DMA_RESET);
+    /* Ignore both buses: exercise the transfer counter without touching RAM. */
+    bcm2835_dma_write_cb(cb, BCM2708_DMA_S_IGNORE | BCM2708_DMA_D_IGNORE,
+                         0, 0, length, 0);
+    writel(dma_base + BCM2708_DMA_ADDR, cb);
+
+    /* A near-4 GiB finite request must yield after one bounded slice. */
+    writel(dma_base + BCM2708_DMA_CS, BCM2708_DMA_ACTIVE);
+    g_assert_cmpint(g_get_monotonic_time() - start, <,
+                    500 * G_TIME_SPAN_MILLISECOND);
+    cs = readl(dma_base + BCM2708_DMA_CS);
+    g_assert_cmphex(cs & BCM2708_DMA_ACTIVE, ==, BCM2708_DMA_ACTIVE);
+    g_assert_cmphex(readl(dma_base + BCM2708_DMA_TXFR_LEN), ==,
+                    length - 256 * sizeof(uint32_t));
+
+    writel(dma_base + BCM2708_DMA_CS, BCM2708_DMA_RESET);
 }
 
 static void bcm2835_dma_test_pause_and_abort(void)
@@ -365,6 +393,8 @@ int main(int argc, char **argv)
                    bcm2835_dma_test_interrupts);
     qtest_add_func("/bcm2835/dma/cyclic_yields",
                    bcm2835_dma_test_cyclic_yields);
+    qtest_add_func("/bcm2835/dma/large_transfer_yields",
+                   bcm2835_dma_test_large_transfer_yields);
     qtest_add_func("/bcm2835/dma/pause_and_abort",
                    bcm2835_dma_test_pause_and_abort);
     qtest_add_func("/bcm2835/dma/dreq_and_width",
