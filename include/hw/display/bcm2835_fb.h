@@ -45,6 +45,13 @@ static inline uint32_t bcm2835_fb_read_rgb24(const uint8_t *source)
 typedef struct BCM2835FBHVSLayer {
     uint32_t base;
     uint32_t pitch;
+    /*
+     * A BCM2711 HVS5 T-tiled plane uses 4 KiB tiles rather than a raster
+     * line pitch.  The first implementation deliberately accepts only the
+     * full-surface unity form, where tile_columns describes the buffer's
+     * physical row width.
+     */
+    uint32_t tile_columns;
     uint32_t source_width;
     uint32_t source_height;
     uint32_t dest_x;
@@ -55,10 +62,15 @@ typedef struct BCM2835FBHVSLayer {
     uint32_t pixo;
     uint32_t alpha;
     uint32_t alpha_mode;
+    bool ppf_x;
+    bool ppf_y;
+    bool tpz_x;
+    bool tpz_y;
     bool alpha_mix;
     bool alpha_premult;
     bool hflip;
     bool vflip;
+    bool t_tiled;
 } BCM2835FBHVSLayer;
 
 struct BCM2835FBState {
@@ -86,6 +98,14 @@ struct BCM2835FBState {
     size_t hvs_pixels_count;
     uint8_t *hvs_source_line;
     size_t hvs_source_line_size;
+    /* Scratch cache for one logical row of 4 KiB HVS T tiles. */
+    uint8_t *hvs_tiled_row;
+    size_t hvs_tiled_row_size;
+    uint32_t hvs_tiled_row_base;
+    uint32_t hvs_tiled_row_index;
+    uint32_t hvs_tiled_row_columns;
+    uint32_t hvs_tiled_row_bpp;
+    bool hvs_tiled_row_valid;
 };
 
 void bcm2835_fb_reconfigure(BCM2835FBState *s, BCM2835FBConfig *newconfig);

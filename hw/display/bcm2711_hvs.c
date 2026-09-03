@@ -32,8 +32,12 @@
 #define SCALER_CTL0_SIZE_MASK        0x3f
 #define SCALER_CTL0_TILING_SHIFT     20
 #define SCALER_CTL0_TILING_MASK      0x3
+#define SCALER_CTL0_TILING_LINEAR    0
+#define SCALER_CTL0_TILING_T         3
 #define SCALER_CTL0_ORDER_SHIFT      13
 #define SCALER_CTL0_ORDER_MASK       0x3
+#define SCALER_CTL0_SCL0_SHIFT       5
+#define SCALER_CTL0_SCL_MASK         0x7
 #define SCALER5_CTL0_UNITY           BIT(15)
 #define SCALER5_CTL0_PIXEL_FORMAT_MASK 0x1f
 
@@ -48,6 +52,14 @@
 #define SCALER5_POS2_HEIGHT_SHIFT    16
 #define SCALER5_POS2_HEIGHT_MASK     0x1fff
 #define SCALER5_POS2_WIDTH_MASK      0x1fff
+
+/* T-tiled PITCH0 fields, for SCALER_CTL0_TILING_256B_OR_T. */
+#define SCALER_PITCH0_SINK_PIX_MASK  (0x3fU << 26)
+#define SCALER_PITCH0_TILE_WIDTH_L_MASK (0x7fU << 16)
+#define SCALER_PITCH0_TILE_LINE_DIR  BIT(15)
+#define SCALER_PITCH0_TILE_INITIAL_LINE_DIR BIT(14)
+#define SCALER_PITCH0_TILE_Y_OFFSET_MASK (0x3fU << 8)
+#define SCALER_PITCH0_TILE_WIDTH_R_MASK 0x7fU
 
 #define SCALER5_CTL2_ALPHA_MODE_SHIFT 30
 #define SCALER5_CTL2_ALPHA_MODE_MASK  0x3
@@ -70,6 +82,12 @@
 #define HVS_DLIST_WORDS              4096
 #define HVS_MAX_XRES                 3840
 #define HVS_MAX_YRES                 2560
+
+typedef enum BCM2711HVSScaleMode {
+    BCM2711_HVS_SCALE_NONE,
+    BCM2711_HVS_SCALE_PPF,
+    BCM2711_HVS_SCALE_TPZ,
+} BCM2711HVSScaleMode;
 
 static unsigned int bcm2711_hvs_channel_from_offset(hwaddr offset,
                                                      hwaddr base)
@@ -124,6 +142,85 @@ static bool bcm2711_hvs_decode_format(uint32_t ctl, uint32_t *bpp,
     }
 }
 
+static void bcm2711_hvs_decode_scaling(uint32_t ctl,
+                                       BCM2711HVSScaleMode *x_mode,
+                                       BCM2711HVSScaleMode *y_mode)
+{
+    uint32_t scl0 = (ctl >> SCALER_CTL0_SCL0_SHIFT) & SCALER_CTL0_SCL_MASK;
+
+    *x_mode = BCM2711_HVS_SCALE_NONE;
+    *y_mode = BCM2711_HVS_SCALE_NONE;
+
+    switch (scl0) {
+    case 0: /* Horizontal PPF, vertical PPF. */
+        *x_mode = BCM2711_HVS_SCALE_PPF;
+        *y_mode = BCM2711_HVS_SCALE_PPF;
+        break;
+    case 1: /* Horizontal TPZ, vertical PPF. */
+        *x_mode = BCM2711_HVS_SCALE_TPZ;
+        *y_mode = BCM2711_HVS_SCALE_PPF;
+        break;
+    case 2: /* Horizontal PPF, vertical TPZ. */
+        *x_mode = BCM2711_HVS_SCALE_PPF;
+        *y_mode = BCM2711_HVS_SCALE_TPZ;
+        break;
+    case 3: /* Horizontal TPZ, vertical TPZ. */
+        *x_mode = BCM2711_HVS_SCALE_TPZ;
+        *y_mode = BCM2711_HVS_SCALE_TPZ;
+        break;
+    case 4: /* Horizontal PPF, vertical unity. */
+        *x_mode = BCM2711_HVS_SCALE_PPF;
+        break;
+    case 5: /* Horizontal unity, vertical PPF. */
+        *y_mode = BCM2711_HVS_SCALE_PPF;
+        break;
+    case 6: /* Horizontal unity, vertical TPZ. */
+        *y_mode = BCM2711_HVS_SCALE_TPZ;
+        break;
+    case 7: /* Horizontal TPZ, vertical unity. */
+        *x_mode = BCM2711_HVS_SCALE_TPZ;
+        break;
+    }
+}
+
+/*
+ * A complete Linux RGB display list carries the line-buffer, PPF/TPZ
+ * parameters, and (when PPF is in use) four kernel pointers after the source
+ * pitch.  Older fork-local tests deliberately exercise only the short,
+ * functional list form, which has none of that state and remains on the
+ * nearest-neighbour path.  This lets the PPF approximation below target the
+ * real Linux-programmed contract without treating an incomplete list as a
+ * hardware filter configuration.
+ */
+static bool bcm2711_hvs_has_complete_scaling_layout(uint32_t dlist,
+                                                    uint32_t size,
+                                                    uint32_t pitch_index,
+                                                    BCM2711HVSScaleMode x_mode,
+                                                    BCM2711HVSScaleMode y_mode)
+{
+    uint32_t next_word = pitch_index + 1;
+    uint32_t list_end = dlist + size;
+
+    if (x_mode == BCM2711_HVS_SCALE_NONE &&
+        y_mode == BCM2711_HVS_SCALE_NONE) {
+        return false;
+    }
+
+    if (y_mode != BCM2711_HVS_SCALE_NONE) {
+        next_word++; /* LBM base address */
+    }
+    next_word += x_mode == BCM2711_HVS_SCALE_PPF ? 1 :
+                 x_mode == BCM2711_HVS_SCALE_TPZ ? 2 : 0;
+    next_word += y_mode == BCM2711_HVS_SCALE_PPF ? 2 :
+                 y_mode == BCM2711_HVS_SCALE_TPZ ? 3 : 0;
+    if (x_mode == BCM2711_HVS_SCALE_PPF ||
+        y_mode == BCM2711_HVS_SCALE_PPF) {
+        next_word += 4; /* H/V kernel pointers for both plane channels */
+    }
+
+    return next_word <= list_end;
+}
+
 static bool bcm2711_hvs_apply_scanout(BCM2711HVSState *s,
                                       unsigned int channel)
 {
@@ -163,6 +260,10 @@ static bool bcm2711_hvs_apply_scanout(BCM2711HVSState *s,
         uint32_t ptr_index;
         uint32_t pitch_index;
         uint32_t bytes_per_pixel;
+        uint32_t tiling;
+        uint32_t pitch;
+        BCM2711HVSScaleMode x_mode;
+        BCM2711HVSScaleMode y_mode;
 
         if (ctl & SCALER_CTL0_END) {
             break;
@@ -177,10 +278,19 @@ static bool bcm2711_hvs_apply_scanout(BCM2711HVSState *s,
         if (!(ctl & SCALER_CTL0_VALID)) {
             return false;
         }
-        if ((ctl >> SCALER_CTL0_TILING_SHIFT) &
-            SCALER_CTL0_TILING_MASK) {
+        tiling = (ctl >> SCALER_CTL0_TILING_SHIFT) &
+                 SCALER_CTL0_TILING_MASK;
+        if (tiling != SCALER_CTL0_TILING_LINEAR &&
+            tiling != SCALER_CTL0_TILING_T) {
             qemu_log_mask(LOG_UNIMP,
-                          "%s: tiled HVS planes are not implemented\n",
+                          "%s: HVS tiling mode %u is not implemented\n",
+                          TYPE_BCM2711_HVS, tiling);
+            return false;
+        }
+        if (tiling == SCALER_CTL0_TILING_T &&
+            !(ctl & SCALER5_CTL0_UNITY)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "%s: scaled HVS T-tiled planes are not implemented\n",
                           TYPE_BCM2711_HVS);
             return false;
         }
@@ -234,15 +344,72 @@ static bool bcm2711_hvs_apply_scanout(BCM2711HVSState *s,
         }
 
         bytes_per_pixel = layer->bpp >> 3;
-        layer->pitch =
-            s->regs[(SCALER5_DLIST_START >> 2) + pitch_index] & 0xffff;
-        if (!layer->pitch || layer->pitch % bytes_per_pixel ||
-            layer->pitch < layer->source_width * bytes_per_pixel ||
-            layer->pitch / bytes_per_pixel > HVS_MAX_XRES) {
-            return false;
-        }
+        pitch = s->regs[(SCALER5_DLIST_START >> 2) + pitch_index];
         layer->base =
             s->regs[(SCALER5_DLIST_START >> 2) + ptr_index];
+        if (tiling == SCALER_CTL0_TILING_LINEAR) {
+            layer->pitch = pitch & 0xffff;
+            if (!layer->pitch || layer->pitch % bytes_per_pixel ||
+                layer->pitch < layer->source_width * bytes_per_pixel ||
+                layer->pitch / bytes_per_pixel > HVS_MAX_XRES) {
+                return false;
+            }
+        } else {
+            uint32_t tile_width;
+
+            /*
+             * The full-surface T form is the useful first case for a GPU
+             * scanout buffer.  Cropping and vertical reflection alter both
+             * the base and PITCH0 traversal fields, so decline them until
+             * that complete contract can be modeled rather than scrambling
+             * the source image.
+             */
+            if (layer->bpp != 16 && layer->bpp != 32) {
+                qemu_log_mask(LOG_UNIMP,
+                              "%s: only RGB565 and RGBA8888 HVS T-tiled "
+                              "planes are implemented\n",
+                              TYPE_BCM2711_HVS);
+                return false;
+            }
+            if (layer->vflip || (layer->base & 0xfff) ||
+                (pitch & (SCALER_PITCH0_SINK_PIX_MASK |
+                          SCALER_PITCH0_TILE_WIDTH_L_MASK |
+                          SCALER_PITCH0_TILE_LINE_DIR |
+                          SCALER_PITCH0_TILE_INITIAL_LINE_DIR |
+                          SCALER_PITCH0_TILE_Y_OFFSET_MASK))) {
+                qemu_log_mask(LOG_UNIMP,
+                              "%s: cropped or vertically reflected HVS "
+                              "T-tiled plane is not implemented\n",
+                              TYPE_BCM2711_HVS);
+                return false;
+            }
+            tile_width = layer->bpp == 16 ? 64 : 32;
+            layer->tile_columns = pitch & SCALER_PITCH0_TILE_WIDTH_R_MASK;
+            if (!layer->tile_columns ||
+                layer->tile_columns > DIV_ROUND_UP(HVS_MAX_XRES,
+                                                    tile_width) ||
+                layer->tile_columns * tile_width < layer->source_width) {
+                return false;
+            }
+            layer->t_tiled = true;
+        }
+        layer->ppf_x = false;
+        layer->ppf_y = false;
+        layer->tpz_x = false;
+        layer->tpz_y = false;
+        if (!(ctl & SCALER5_CTL0_UNITY)) {
+            bcm2711_hvs_decode_scaling(ctl, &x_mode, &y_mode);
+            if (bcm2711_hvs_has_complete_scaling_layout(dlist, size,
+                                                        pitch_index,
+                                                        x_mode, y_mode)) {
+                layer->ppf_x = x_mode == BCM2711_HVS_SCALE_PPF;
+                layer->ppf_y = y_mode == BCM2711_HVS_SCALE_PPF;
+                layer->tpz_x = x_mode == BCM2711_HVS_SCALE_TPZ &&
+                               layer->source_width > layer->dest_width;
+                layer->tpz_y = y_mode == BCM2711_HVS_SCALE_TPZ &&
+                               layer->source_height > layer->dest_height;
+            }
+        }
         layer->alpha = (ctl2 >> SCALER5_CTL2_ALPHA_SHIFT) &
                        SCALER5_CTL2_ALPHA_MASK;
         layer->alpha_mode = (ctl2 >> SCALER5_CTL2_ALPHA_MODE_SHIFT) &
@@ -264,7 +431,7 @@ static bool bcm2711_hvs_apply_scanout(BCM2711HVSState *s,
         return false;
     }
 
-    if (layer_count == 1 && layers[0].dest_x == 0 &&
+    if (layer_count == 1 && !layers[0].t_tiled && layers[0].dest_x == 0 &&
         layers[0].dest_y == 0 && !layers[0].hflip && !layers[0].vflip &&
         layers[0].source_width == config.xres &&
         layers[0].source_height == config.yres &&
