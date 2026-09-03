@@ -136,6 +136,34 @@ gate rejects silence, internal gaps, channel swapping, incorrect amplitude,
 frequency or duration, and a malformed WAV format.  Pass ``--output PATH`` to
 retain the validated capture.
 
+The Pi 400-specific input gate exercises real Linux evdev delivery after the
+VL805 rebind::
+
+  scripts/pi4/test-input.py --qemu build/qemu-system-aarch64
+
+It adds a standard QEMU USB mouse on hub port ``1.1``, opens the integrated
+``04d9:0007`` keyboard, its separate consumer-control node, and the mouse
+``/dev/input/event*`` nodes from the guest.  It sends an ``A`` press/release,
+play/pause, volume-up, calculator, relative X/Y motion, and a left-button
+press/release through QMP.  The gate accepts only after the guest reports each
+event.  ``pi4lab.input_demo=1`` is opt-in and leaves the normal rebooting
+acceptance image unchanged; it is also useful with the Cocoa Pi 400 desktop
+demo because typed keys and mouse movement are logged on the guest serial
+console.
+
+The AUX SPI1 Linux-driver gate uses a test-only device-tree overlay and an
+explicit virtual M25P80 device; it leaves the stock Pi DTB unchanged::
+
+  scripts/pi4/test-aux-spi.py \
+      --qemu build/qemu-system-aarch64 --machine raspi4b
+  scripts/pi4/test-aux-spi.py \
+      --qemu build/qemu-system-aarch64 --machine raspi400
+
+It requires ``dtc`` and ``fdtoverlay`` on the host.  The guest must bind
+``spi-bcm2835aux`` to ``spi1.0``, bind its generic SPI-NOR child, and read 16
+erased bytes from the resulting MTD device.  It is a controller/driver test,
+not a claim of physical GPIO wiring.
+
 The same kernel and unmodified upstream Pi 4 DTB can also mount a normal
 Linux root filesystem from the emulated external SD card.  Attach the image
 with ``-drive file=IMAGE,if=sd,format=raw`` and use ``root=/dev/mmcblk0`` for
@@ -289,10 +317,12 @@ on both ``raspi4b`` and ``raspi400``.  Linux selected plane 68 on CRTC 67,
 created a pitch-640 320x200 RGB565 dumb buffer and programmed a 640x400
 destination at ``(320, 200)``.  Host screendumps retained the unobscured
 primary bands and showed the expected green, blue, white and black overlay
-quadrants.  Focused qtests separately cover two-plane composition,
-nearest-neighbor scaling, RGB888 byte order, coverage and premultiplied alpha,
-plane-alpha mixing, horizontal and vertical reflection, live display-list
-updates and visible post-migration reconstruction.
+quadrants.  Focused qtests separately cover two-plane composition, short-list
+nearest-neighbor scaling, a Pi 400-referenced Mitchell--Netravali PPF
+approximation, a Pi 400-referenced TPZ downscale approximation, RGB888 byte
+order, coverage and premultiplied alpha, plane-alpha mixing, horizontal and
+vertical reflection, full-surface unity-mode T-tiled RGB565 and RGBA8888
+scanout, live display-list updates and visible post-migration reconstruction.
 
 Focused qtests cover HVS display-list memory and channel state, the pixel
 valve's masked write-one-to-clear vblank interrupt and stable frame deadline,
@@ -301,9 +331,17 @@ system reset and migration while the pixel-valve timer and DDC repeated-start
 session are active.  No raw HVS, pixel-valve or HDMI-transmitter register
 writes were made on the physical Pi for this milestone.  The implemented
 register subset is justified by the upstream Linux driver path and virtual
-display contract.  Nearest-neighbor sampling is explicitly an approximation;
-neither these tests nor the physical capture establish the undocumented HVS
-filter datapath as a complete BCM2711 hardware reproduction.
+display contract.  Short display lists retain nearest-neighbor sampling; a
+complete linear-RGB PPF list uses a continuous Mitchell--Netravali
+approximation checked against the Pi 400's 4x4-to-8x8 capture, and a complete
+TPZ downscale list uses a source-coverage box approximation checked against
+Pi 400 2:1, horizontal 2.5:1 and 3:1 one-pixel-checker captures.  Neither test
+establishes the HVS's quantized coefficient datapath, full TPZ behavior or
+line-buffer-memory implementation as a complete BCM2711 hardware reproduction.
+The T-tile qtest uses a synthetic display list built from the upstream Linux
+driver's T-tile addressing contract; it verifies the bounded
+full-surface layout and safe rejection of scaled T planes, rather than claiming
+a physical-Pi display capture for that form.
 
 The same Linux driver registered the ``vc4-hdmi-0`` IEC958 playback device and
 completed the MAI/DMA 48 kHz stereo workload on both machines.  The final
@@ -427,6 +465,36 @@ The AUX qtest covers reset-low enable state, observed low-byte readback,
 disabled-bank reads and retained writes, IER/IIR separation, scratch masking,
 RTS and CTS values, interrupt assertion while disabled, cold-reset
 deassertion, reuse after reset, and migration of hidden control state.
+
+AUX SPI1/SPI2 PIO reference evidence
+-------------------------------------
+
+The BCM2711 peripheral manual places the two AUX SPI register banks at
+offsets ``0x80`` and ``0xc0`` within AUX, with ``CNTL0``, ``CNTL1``, ``STAT``,
+``PEEK``, ``IO`` and ``TXHOLD`` at offsets ``0x00``, ``0x04``, ``0x08``,
+``0x0c``, ``0x20`` and ``0x30``.  The maintained Linux
+``spi-bcm2835aux`` driver uses MSB-first variable-width words containing one
+to three bytes, and keeps at most four such words in flight during its PIO
+path.  This establishes the bounded controller contract; it does not by
+itself establish electrical timing or pin routing.
+
+Controlled, cleanup-guarded Pi 400 probes on 2026-08-26 found both SPI banks
+at zero while their AUX enable bits were clear.  With SPI1 enabled, ``CNTL0``
+and ``CNTL1`` initially read zero and ``STAT`` read ``0x280`` (empty TX and RX
+FIFOs).  Values written while enabled were hidden by a disable/re-enable gate
+cycle but retained internally.  Setting SPI1 ``CNTL1`` to ``0xc2`` produced
+the defined SPI1 ``AUX_IRQ`` bit; the physical raw value was ``0x80000002``,
+whose top bit is reserved.  The defined bit remained live while SPI1's
+register bank was gated.  The model represents only defined interrupt bits,
+consistent with the existing mini-UART policy.
+
+The focused qtests verify the gate, idle/status and PIO FIFO behavior, shared
+SPI1/SPI2 AUX interrupt bits, watchdog reset, migration of hidden gated state,
+and repeated JEDEC-ID exchanges with QEMU's standard ``m25p80`` SSI model.
+The exchanges verify that ``TXHOLD`` retains and final ``IO`` releases a
+virtual SSI chip select; a held JEDEC exchange also resumes after live
+migration.  No physical transfer or GPIO-chip-select probe is claimed here;
+those remain future hardware work.
 
 DWC2 reset reference evidence
 -----------------------------

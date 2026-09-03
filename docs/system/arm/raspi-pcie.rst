@@ -63,8 +63,9 @@ GIC SPI 148.  Both ``raspi4b`` and ``raspi400`` instantiate the fixed endpoint,
 its stable ``vl805.0`` USB bus, and a high-speed VIA ``2109:3431`` hub.  The
 ``raspi400`` board additionally places its low-speed ``04d9:0007`` integrated
 keyboard on hub port four.  Its two HID interfaces reproduce the captured
-keyboard and consumer-control descriptors; QEMU input events currently drive
-only the keyboard interface.
+keyboard and consumer-control descriptors.  Ordinary keys drive the boot
+keyboard interface; QEMU media, home and calculator key events drive the
+consumer-control interface.
 
 The VL805 advertises an ERST Max exponent of three and accepts up to eight
 event-ring segments.  The engine validates each segment, crosses noncontiguous
@@ -92,9 +93,10 @@ re-enumeration.  Remaining approximations are narrower: the advertised debug
 capability and vendor-specific extended capabilities provide captured
 read-only identity values rather than proprietary behavior, link-up follows
 the two reset bits rather than endpoint link training, MDIO operations
-complete immediately, and the host controller-event interrupt is not yet
-modeled.  The Pi 400 consumer-control HID endpoint enumerates but does not yet
-produce media-key events.
+complete immediately, and QEMU's PCIe core does not generate physical PME or
+link-training events.  Its root-port AER and slot-service notifications do
+use BCM2711's controller-event output on GIC SPI 147; ordinary downstream
+INTx remains on SPIs 143 through 146.
 
 BCM2711 host requirements
 -------------------------
@@ -205,10 +207,11 @@ Required tests
 
 Qtests cover reset and link transitions, revision and MDIO completion, root
 and endpoint IDs, indirect configuration, both known outbound-window layouts,
-DMA below 3 GiB, DMA rejection outside the inbound range, INTx, MSI masking
-and clearing, firmware-notification status, halt-without-cold-reset behavior,
-preserved register state, fixed USB topology, multi-segment event rings, and
-active-ring migration.
+DMA below 3 GiB, DMA rejection outside the inbound range, INTx, root-port
+service events and their migration, MSI masking and clearing,
+firmware-notification status, halt-without-cold-reset behavior, preserved
+register state, fixed USB topology, multi-segment event rings, and active-ring
+migration.
 
 The pinned unmodified Linux v7.2 acceptance test passes on ``raspi4b`` and
 ``raspi400`` with their upstream DTBs.  It verifies ``14e4:2711`` and

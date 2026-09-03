@@ -35,6 +35,14 @@ signalling match hardware observations.  FIFO, enable, interrupt, scratch and
 modem-control state reset and migrate with the VM, with modem lines forwarded
 to capable character backends.
 
+The same block provides a bounded PIO model of AUX SPI1 and SPI2.  It exposes
+QEMU ``spi1`` and ``spi2`` SSI buses and supports the one-to-three-byte,
+MSB-first variable-width transfers used by Linux's ``spi-bcm2835aux`` driver,
+including RX FIFO/status, shared interrupts, reset and migration.  For an
+explicitly attached virtual SSI peripheral, ``TXHOLD`` followed by ``IO``
+preserves the driver's transaction boundary.  SPI DMA, timing, pin mux and
+physical GPIO chip-select wiring remain out of scope.
+
 The on-SoC DWC2 USB controller implements core-soft-reset effects, including
 terminating modeled host transfers, clearing interrupt masks while preserving
 configuration and status, and completing receive/transmit FIFO flush commands.
@@ -87,13 +95,16 @@ DDC I2C engines.  HDMI0 has a standard QEMU virtual monitor at DDC address
 ``0x50``; its CTA extension advertises HDMI stereo LPCM audio, while HDMI1
 defaults to disconnected.  The pinned Linux lab binds the production VC4 DRM,
 ``brcm2711-dvp`` and ``brcmstb-i2c`` drivers, selects a 1280x800 mode and
-presents a native RGB565 scanout to the QEMU display.  Its linear RGB HVS5
-subset also composites multiple planes with nonnegative positions, output
-clipping, horizontal and vertical reflection, Linux's fixed and pipeline alpha
-modes, and nearest-neighbor scaling.  The production-driver pixel gate adds a
-320x200 RGB565 overlay, asks VC4 to scale it to 640x400 at ``(320, 200)``, and
-validates the primary and all four overlay quadrants in a QMP screendump on
-both boards.
+presents a native RGB565 scanout to the QEMU display.  Its HVS5 subset
+composites linear RGB planes with nonnegative positions, output clipping,
+horizontal and vertical reflection, Linux's fixed and pipeline alpha modes,
+nearest-neighbor scaling for its short functional lists, and a
+Mitchell--Netravali PPF approximation for complete linear-RGB Linux display
+lists, plus a source-coverage TPZ downscale approximation.  It also supports
+full-surface unity-mode T-tiled RGB565 and RGBA8888 scanout.  The
+production-driver pixel gate adds a 320x200 RGB565 overlay, asks VC4 to scale
+it to 640x400 at ``(320, 200)``, and validates the primary and all four overlay
+quadrants in a QMP screendump on both boards.
 
 HDMI0's MAI FIFO is paced at the guest-selected sample rate, drives DMA DREQ
 10 and sends decoded PCM to a QEMU audio backend.  The Linux VC4 HDMI driver
@@ -103,11 +114,13 @@ Reset, vblank timing, malformed DDC transfers, HVS composition, visible
 migration reconstruction, audio FIFO/DMA pacing and live migration are covered
 by focused qtests.
 
-The display model does not yet implement the HVS's real PPF/TPZ filters,
-scaling phases and coefficients, LBM behavior, tiled, compressed or YUV
-formats, the other pixel valves, HDMI1 scanout or audio, dynamic hot-plug, CEC,
-or signal-level TMDS and HDMI audio-packet transport.  V3D 4.2 and Mesa 3D
-acceleration also remain unavailable.
+The display model does not yet reproduce the HVS's quantized PPF coefficient
+tables or full TPZ filter, full LBM behavior, cropped, vertically reflected or
+scaled T-tiled planes, compressed or YUV formats, the other pixel valves,
+HDMI1 scanout or audio, dynamic hot-plug, CEC, or signal-level TMDS and HDMI
+audio-packet transport.  V3D 4.2 and Mesa 3D
+acceleration also remain unavailable; the opt-in V3D Linux driver probe is not
+a renderer.
 
 Raspberry Pi 5 is not supported. It uses a substantially different BCM2712
 SoC and RP1 I/O controller, neither of which this project currently models.

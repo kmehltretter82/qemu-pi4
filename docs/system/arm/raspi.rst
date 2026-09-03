@@ -43,8 +43,8 @@ Implemented devices
  * BCM2711 always-on edge-latched L2 interrupt controller, with independently
    masked CPU and PCI banks
  * BCM2711 HVS, HDMI0 pixel valve and HDMI0 transmitter, including linear RGB
-   multi-plane composition and functional scaling for native Linux VC4 DRM
-   scanout to a QEMU display
+   multi-plane composition, a bounded full-surface T-tiled RGB scanout path,
+   and functional scaling for native Linux VC4 DRM scanout to a QEMU display
  * BCM2711 HDMI DVP clock/reset controller and both HDMI DDC I2C controllers,
    with a connected virtual EDID monitor on HDMI0
  * BCM2711 HDMI0 MAI audio, with a 64-word FIFO, DMA DREQ pacing and PCM
@@ -63,7 +63,7 @@ Implemented devices
  * VideoCore firmware property interface, including firmware-controlled GPIOs,
    coherent OTP-backed board identity, clock and power-domain state, reboot
    notification, and the Pi 4-family VL805 initialization notification
- * Peripheral SPI controller (SPI)
+ * Peripheral SPI controller (SPI) and bounded PIO AUX SPI1/SPI2 controllers
  * Broadcom Serial Controller (I2C)
  * BCM2711 RNG200 random number generator, including its 16-word FIFO,
    four generation rates, status and interrupt registers, soft resets, and
@@ -71,27 +71,29 @@ Implemented devices
  * BCM2711 AVS thermal monitor, using the device-tree calibration and a
    migratable, configurable temperature reading
  * BCM2711 PCIe host and root port, including dynamic outbound and inbound
-   DMA windows, INTx, and MSI
+   DMA windows, INTx, root-port service events, and MSI
  * Pi 4-family VIA VL805 PCIe xHCI personality, including the captured PCI and
    xHCI register layout, multi-segment event rings, DMA-backed controller
    events, MSI, PERST, migration state, and a guest-visible PCIe device-tree
    node
  * VIA ``2109:3431`` four-port high-speed USB hub on both boards
  * Raspberry Pi 400 ``04d9:0007`` low-speed integrated keyboard, including
-   its keyboard and consumer-control HID interfaces
+   functional keyboard and consumer-control HID interfaces
 
 Missing devices
 ---------------
 
- * V3D 4.2 graphics accelerator (its MMIO range is an unimplemented
-   placeholder)
- * Remaining native-display features: HVS tiled, compressed and YUV formats,
-   hardware filter and LBM behavior; pixel valves other than HDMI0's; HDMI1;
+ * V3D 4.2 graphics accelerator.  Its Pi 400-identifying hub/core register
+   substrate and shared interrupt are modeled, but the device-tree node stays
+   disabled because command-list execution and Mesa acceleration are not yet
+   modeled.
+ * Remaining native-display features: cropped, vertically reflected and scaled
+   HVS T-tiled planes; compressed and YUV formats; exact PPF/TPZ coefficient
+   and LBM behavior; pixel valves other than HDMI0's; HDMI1;
    dynamic hotplug, CEC and signal-level TMDS and HDMI audio-packet transport
- * Remaining BCM2711 PCIe controller-event behavior
- * Consumer-control key-event production for the Pi 400 keyboard's second HID
-   interface; its identity, descriptors, enumeration and migration already
-   work
+ * Physical BCM2711 PCIe power-management and link-training event behavior
+ * AUX SPI DMA, fixed-width or LSB-first framing, clock timing, GPIO pin-mux
+   and native chip-select wiring
 
 Booting Linux from an SD image
 ------------------------------
@@ -138,6 +140,29 @@ Ports ``1.1`` through ``1.3`` are free on both machines.  Port ``1.4`` is also
 free on ``raspi4b`` but contains the integrated keyboard on ``raspi400``.
 Remove ``snapshot=on`` only when writes to the host image should persist.
 
+Pi 400 desktop view on macOS
+----------------------------
+
+With ``-machine raspi400 -display cocoa``, one Cocoa window contains an HDMI
+monitor bezel and the Pi 400 keyboard.  Host typing and clicking a displayed
+key use the board's built-in ``04d9:0007`` USB HID keyboard; the same input
+event both reaches the guest and highlights its physical key on screen.  The
+displayed key printing matches the local German Pi 400 keyboard, including
+``PrtScn/SysRq`` and the physical navigation cluster.
+
+The boxed ``1`` (Num Lock) and ``A`` (Caps Lock) indicators reflect the
+guest's HID output reports.  The third, power-symbol LED is lit while QEMU is
+running; Pi 400 has no Scroll Lock LED.  To add an external, standard USB
+mouse on a spare Pi 400 hub port, for example, use::
+
+  -device usb-mouse,bus=vl805.0,port=1.1
+
+The Cocoa frontend forwards its movement only while the host pointer is over
+the HDMI panel, so it remains available for normal macOS use outside it.
+When the Pi 400 window is active, macOS volume, mute, play/pause,
+next/previous-track and eject keys drive the keyboard's separate
+consumer-control HID interface.
+
 Mini UART enable, modem control and reset
 -----------------------------------------
 
@@ -148,8 +173,7 @@ register bank reads as zero, outgoing data bytes are discarded and incoming
 character-backend data is paused.  Implemented control writes are retained,
 and interrupt status and the GIC input remain live, matching the Pi 400
 behavior measured by this project.  Enabling the UART exposes the retained
-state and resumes backend input.  Enable bits 1 and 2 read back, but the two
-auxiliary SPI controllers are not implemented.
+state and resumes backend input.
 
 ``AUX_MU_IER`` exposes only its two supported interrupt-enable bits; the FIFO
 status bits are reported by ``AUX_MU_IIR`` instead.  The 8-bit scratch
@@ -167,10 +191,43 @@ the UART is enabled again.  The FIFO, enable, interrupt, scratch and
 RTS-control state migrates with the VM, and post-load processing reconstructs
 the IRQ and external RTS output.
 
-Line control, the baud register, automatic flow control and the two auxiliary
-SPI controllers remain unimplemented.  The extra-control register retains the
-earlier simplified transmit/receive-enabled behavior; GPIO pin-mux timing is
-not modeled.
+Line control, the baud register and automatic flow control remain
+unimplemented.  The extra-control register retains the earlier simplified
+transmit/receive-enabled behavior; GPIO pin-mux timing is not modeled.
+
+AUX SPI1/SPI2 PIO
+-----------------
+
+``AUX_ENABLES`` bits 1 and 2 gate the SPI1 and SPI2 register banks.  A gated
+bank reads as zero and ignores writes; state written while the controller is
+enabled is visible again after re-enabling it.  As on the measured Pi 400,
+the defined shared-AUX interrupt bit can remain asserted while the register
+bank is gated.  The model deliberately omits the hardware's observed reserved
+bit 31 from ``AUX_IRQ``.
+
+The bounded PIO subset implements ``CNTL0``, ``CNTL1``, ``STAT``, ``PEEK``,
+``IO`` and ``TXHOLD`` at the documented SPI1/SPI2 offsets.  It accepts the
+one-, two- and three-byte MSB-first variable-width transfers used by Linux's
+``spi-bcm2835aux`` driver, synchronously exchanges them with a QEMU SSI bus,
+and provides the driver's twelve-byte receive FIFO, status bits, shared
+interrupt, cold reset and migration behavior.  QEMU exposes the buses as
+``spi1`` and ``spi2``.  For a lab-only serial-flash transaction, for example,
+an explicitly requested standard QEMU device can be attached with::
+
+  -device m25p80,id=spi1flash,bus=spi1
+
+For such an explicit virtual SSI device, ``TXHOLD`` keeps the selected virtual
+chip select asserted and the final ``IO`` word deasserts it.  This follows the
+transaction boundary used by the Linux PIO driver; it does not model physical
+GPIO routing.  The controller state, virtual chip-select state and a held
+standard-M25P80 transaction migrate together.
+
+The upstream Pi 4 device-tree nodes remain disabled by default, as on the
+board, so a guest must use its normal device-tree overlay or other DT change
+to enable a controller.  This is not a pin-level model: SPI DMA, other
+framing modes, wire timing, GPIO function selection and physical chip-select
+routing remain unimplemented.  An attached QEMU SSI device is therefore a
+bounded test/lab peripheral rather than a claim of native GPIO wiring.
 
 DWC2 core reset
 ---------------
@@ -364,7 +421,30 @@ The native display path exposes the HVS at ARM physical address
 ``0xfe400000``, HDMI0 pixel valve 2 at ``0xfe20a000`` and the HDMI0
 transmitter register banks beginning at ``0xfef00200``.  Their upstream
 device-tree nodes remain visible, while the other four pixel valves, HDMI1
-and V3D stay hidden.
+and V3D stay hidden.  A non-executing V3D 4.2 hub/core register substrate is
+present at its real addresses, but its device-tree node remains disabled until
+the command-list engine can be modeled faithfully.
+
+V3D developer probe
+-------------------
+
+For driver-facing regression testing only, the V3D node can be explicitly
+retained with ``-global bcm2711-v3d.enable-probe-dtb=true``.  The pinned Linux
+driver then reads the Pi 400-identifying hub/core registers, initializes its
+MMU and interrupt state, and registers its DRM device.  The stateful ASB
+bridge model supplies the stop/acknowledge handshakes used by the Linux V3D
+power-domain driver.
+
+The option does **not** enable usable 3D graphics: command-list execution,
+memory accesses by GPU jobs, fences and rendering are still absent.  Do not
+run Mesa or submit V3D work with it; use it only to exercise the driver-probe
+path.  The following headless test verifies that bounded contract on both Pi 4
+machine types without submitting a GPU job::
+
+  scripts/pi4/test-v3d-probe.py --qemu build/qemu-system-aarch64 \\
+      --machine raspi4b
+  scripts/pi4/test-v3d-probe.py --qemu build/qemu-system-aarch64 \\
+      --machine raspi400
 
 The HVS consumes the channel display list programmed by the Linux VC4 driver
 and redirects supported planes to QEMU's existing Raspberry Pi framebuffer
@@ -372,18 +452,30 @@ console.  The implemented HVS5 subset composites multiple linear RGB565,
 RGB888 or RGBA8888 planes in display-list order.  It supports nonnegative
 positions with output clipping, independent horizontal and vertical
 reflection, and the fixed-alpha and pipeline-alpha modes emitted by Linux,
-including coverage, premultiplied and plane-alpha mixing behavior.  Unity
-planes use the existing dirty-page scanout fast path when possible; other
-lists use a software compositor.
+including coverage, premultiplied and plane-alpha mixing behavior.  It also
+reads full-surface unity-mode T-tiled RGB565 and RGBA8888 planes, including
+their alternating 4 KiB tile rows and microtile ordering.  That bounded tiled
+path requires an aligned base with no crop or vertical-traversal fields in
+``PITCH0``; horizontal reflection remains available.  Unity linear planes use
+the existing dirty-page scanout fast path when possible; other supported lists
+use a software compositor.
 
-Scaled planes use deterministic nearest-neighbor sampling.  This is a
-functional VC4/KMS contract, not a reproduction of the HVS's PPF and TPZ
-filters, phase calculations, coefficient tables or line-buffer-memory
-behavior.  The display-list RAM, channel controls and active-list pointers are
-guest visible and migrate; destination post-load reconstructs the composite
-scanout from those registers and migrated guest RAM.  A list containing an
-unsupported format, tiling mode or alpha mode leaves the previous scanout
-unchanged.
+Short functional display lists use deterministic nearest-neighbor sampling.
+For a structurally complete linear-RGB list selecting HVS PPF scaling, the
+software compositor instead evaluates a separable Mitchell--Netravali
+``B=C=1/3`` approximation with the Linux driver's half-pixel initial phase.
+This produces the filtered transition seen in the project's Pi 400 reference
+capture, but it is not a reproduction of the hardware's quantized
+guest-programmed coefficient tables.  A complete linear-RGB TPZ downscale list
+uses a source-coverage box approximation; it matches Pi 400 2:1, horizontal
+2.5:1 and 3:1 one-pixel-checker captures but not the full TPZ scale,
+reciprocal or context datapath.  Exact PPF phase arithmetic, TPZ fixed-point
+quantization and line-buffer-memory behavior also remain unmodeled.  The
+display-list RAM, channel controls and active-list
+pointers are guest visible and migrate; destination post-load reconstructs the
+composite scanout from those registers and migrated guest RAM.  A list
+containing an unsupported format, tiled form or alpha mode leaves the previous
+scanout unchanged.
 
 Pixel valve 2 retains its programmed register state and supplies the
 write-one-to-clear VFP-start interrupt used by Linux.  While both video-enable
@@ -455,11 +547,13 @@ quadrants::
       --machine raspi400
 
 This is native Linux-programmed scanout, but it remains a deliberately bounded
-display-pipeline subset.  Tiled, compressed and YUV formats, negative
-destination coordinates, hardware scaling filters and phases, mode-derived
-timings, HDMI1, dynamic HPD, CEC, signal-level TMDS and audio-packet transport,
-and V3D are not modeled.  The DDC controller also omits the combined hardware
-DTF encodings and ten-bit I2C addressing.
+display-pipeline subset.  Cropped, vertically reflected and scaled T-tiled
+planes, compressed and YUV formats, negative destination coordinates, full TPZ
+and exact coefficient-table-driven scaling, mode-derived timings, HDMI1,
+dynamic HPD, CEC, signal-level TMDS and audio-packet transport, and V3D command
+execution are not modeled.  The DDC
+controller also
+omits the combined hardware DTF encodings and ten-bit I2C addressing.
 
 HDMI0 MAI audio
 ---------------
