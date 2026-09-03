@@ -31,6 +31,7 @@ system_ss.add(when: 'CONFIG_RASPI4', if_true: files(
   'bcm2711_hdmi.c',
   'bcm2711_hvs.c',
   'bcm2711_pixelvalve.c',
+  'bcm2711_v3d.c',
   'bcm2835_fb.c',
 ))
 system_ss.add(when: 'CONFIG_SM501', if_true: files('sm501.c'))
