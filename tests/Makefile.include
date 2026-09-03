@@ -138,6 +138,7 @@ precache-pi4:
 PI4_NINJA_TARGETS = qemu-system-aarch64 \
 	tests/unit/test-qgraph \
 	tests/qtest/bcm2711-display-test \
+	tests/qtest/bcm2711-v3d-test \
 	tests/qtest/bcm2835-ic-test \
 	tests/qtest/bcm2835-cprman-test \
 	tests/qtest/bcm2835-dma-test \
@@ -148,8 +149,9 @@ PI4_NINJA_TARGETS = qemu-system-aarch64 \
 	tests/qtest/raspi4b-test \
 	tests/qtest/qos-test
 
-# raspi4b-test and bcm2711-display-test repeatedly allocate a 2 GiB guest,
-# while raspi400-test allocates its fixed 4 GiB guest.  Meson's random malloc
+# raspi4b-test, bcm2711-display-test and bcm2711-v3d-test repeatedly allocate
+# a 2 GiB guest, while raspi400-test allocates its fixed 4 GiB guest.  The V3D
+# migration case holds two of those guests at once.  Meson's random malloc
 # perturbation physically dirties those allocations and can make the host kill
 # QEMU for memory pressure.  Run each large binary in its own Meson invocation,
 # largest suite first, with perturbation disabled; keep it enabled for every
@@ -163,6 +165,8 @@ check-pi4:
 		qemu:qtest-aarch64/raspi4b-test
 	@env MALLOC_PERTURB_=0 $(MESON) test --no-rebuild --print-errorlogs \
 		qemu:qtest-aarch64/bcm2711-display-test
+	@env MALLOC_PERTURB_=0 $(MESON) test --no-rebuild --print-errorlogs \
+		qemu:qtest-aarch64/bcm2711-v3d-test
 	@env MALLOC_PERTURB_=0 $(MESON) test --no-rebuild --print-errorlogs \
 		qemu:qtest-aarch64/raspi400-test
 	@$(MESON) test --no-rebuild --print-errorlogs \
