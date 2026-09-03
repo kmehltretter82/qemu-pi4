@@ -15,11 +15,19 @@ Current status
 --------------
 
 The separate `gicv2-lab repository
-<https://github.com/kmehltretter82/gicv2-lab>`__ has completed its current
-QEMU-only H1-H4i sequence.  The final paused virtual-interface save/restore
-scenario passed 100 consecutive fresh qemu-pi4 processes at lab evidence
-commit ``72865aa15a061469b7728af69d2089202d0eae67`` on 2026-08-22.  No physical
-Pi 400 or Linux KVM run has been performed.
+<https://github.com/kmehltretter82/gicv2-lab>`__ has completed its QEMU-only
+H1-H4i sequence and the first H5 slice.  The paused virtual-interface
+save/restore scenario passed 100 consecutive fresh qemu-pi4 processes at lab
+evidence commit ``72865aa15a061469b7728af69d2089202d0eae67`` on 2026-08-22.
+The QEMU-only differential runner and trace gate followed at
+``2f0bea750192c96b2196f3a3e1e739f9cb2874d3`` the same day, with seven unit
+tests, one strict H4i UART oracle, twenty fresh TCG captures whose normalized
+traces all matched run 1, and a manifest-pinned replay; its artifacts are kept
+in the lab's ``results/2026-08-22-h5-qemu-pi4/``.  No physical Pi 400 or Linux
+KVM run has been performed, so H6 is the next milestone.  Its exit condition
+is a captured serial trace, and the monitor has no network stack: SSH can
+stage the image and trigger the boot, but a 3.3 V serial console is still
+required to read the result.
 
 The milestone list below is the original, intentionally broad research plan.
 The separate repository's ``ROADMAP.md`` and result manifests are

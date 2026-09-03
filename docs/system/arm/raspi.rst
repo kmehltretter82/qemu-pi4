@@ -26,8 +26,8 @@ The implementation evidence and remaining fidelity work for the Pi 4-family
 PCIe and external USB path are recorded in :doc:`raspi-pcie`.
 The separate :doc:`raspi-gicv2-lab` project will exercise the GICv2
 virtualization interface across this fork, Linux KVM, and real Pi 4-family
-hardware.  Its first real Pi 400 boot is intentionally deferred until its
-minimal EL2 and EL1 paths pass the QEMU safety gate.
+hardware.  Its minimal EL2 and EL1 paths have now passed the QEMU safety gate,
+so its first real Pi 400 boot is gated only on the physical-run checklist.
 
 Implemented devices
 -------------------
