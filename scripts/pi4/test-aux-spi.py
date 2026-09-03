@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Validate Linux's BCM2835 AUX SPI1 driver against a QEMU M25P80 device."""
+"""Validate Linux's BCM2835 AUX SPI1 driver against a QEMU M25P80 device.
+
+The guest issues one full-duplex spidev transfer, which is the exchange the
+controller's native chip select can hold; see the overlay for why a SPI-NOR
+message cannot be used here.
+"""
 
 # SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -12,9 +17,9 @@ from pathlib import Path
 
 
 AUX_SPI_CHECK_MARKER = (
-    "PI4-LAB: AUX SPI1 M25P80 Linux driver and erased read"
+    "PI4-LAB: AUX SPI1 M25P80 Linux driver and JEDEC exchange"
 )
-AUX_SPI_READ_MARKER = "PI4-LAB: AUX SPI1 M25P80 erased read from /dev/mtd"
+AUX_SPI_READ_MARKER = "PI4-LAB: AUX SPI1 M25P80 JEDEC id 20 20 14 from /dev/spidev"
 SUCCESS_MARKER = "PI4-LAB: upstream Linux boot successful"
 
 
@@ -146,8 +151,8 @@ def main():
         sys.stdout.write(output)
         raise
     print(
-        f"PI4-AUX-SPI: {args.machine} Linux SPI1 driver, M25P80 probe "
-        "and erased read verified"
+        f"PI4-AUX-SPI: {args.machine} Linux SPI1 driver and single "
+        "full-duplex M25P80 JEDEC exchange verified"
     )
     return 0
 

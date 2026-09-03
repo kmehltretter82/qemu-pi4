@@ -329,7 +329,7 @@ class V3DProbeToolTests(unittest.TestCase):
 
 
 class AuxSpiToolTests(unittest.TestCase):
-    def test_aux_spi_validator_accepts_driver_and_flash_read(self):
+    def test_aux_spi_validator_accepts_driver_and_jedec_exchange(self):
         output = "\n".join((
             AUX_SPI_TOOLS.AUX_SPI_CHECK_MARKER,
             AUX_SPI_TOOLS.AUX_SPI_READ_MARKER,
@@ -338,13 +338,13 @@ class AuxSpiToolTests(unittest.TestCase):
 
         AUX_SPI_TOOLS.validate_output(output)
 
-    def test_aux_spi_validator_rejects_missing_flash_read(self):
+    def test_aux_spi_validator_rejects_missing_jedec_exchange(self):
         output = "\n".join((
             AUX_SPI_TOOLS.AUX_SPI_CHECK_MARKER,
             AUX_SPI_TOOLS.SUCCESS_MARKER,
         ))
 
-        with self.assertRaisesRegex(RuntimeError, "erased read"):
+        with self.assertRaisesRegex(RuntimeError, "JEDEC id"):
             AUX_SPI_TOOLS.validate_output(output)
 
 

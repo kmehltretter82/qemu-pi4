@@ -17,6 +17,7 @@
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
 #include <linux/input.h>
+#include <linux/spi/spidev.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -71,8 +72,18 @@
 #define HDMI_AUDIO_RIGHT_PERIOD 24
 #define HDMI_AUDIO_LEFT_AMPLITUDE 0x400000
 #define HDMI_AUDIO_RIGHT_AMPLITUDE 0x200000
-#define AUX_SPI1_DEVICE_PATH "/sys/bus/spi/devices/spi1.0"
-#define AUX_SPI_FLASH_READ_SIZE 16
+#define AUX_SPI1_CONTROLLER "fe215080.spi"
+/*
+ * One 4-byte full-duplex exchange: the JEDEC READ ID opcode followed by three
+ * turnaround bytes.  The AUX SPI controller deasserts its native chip select
+ * after every spi_transfer, so a multi-transfer SPI-NOR message cannot work
+ * here; a single spidev transfer is what the controller can actually hold a
+ * chip select across, and it is what the model claims to implement.
+ */
+#define AUX_SPI_JEDEC_LEN 4
+#define AUX_SPI_M25P80_ID0 0x20
+#define AUX_SPI_M25P80_ID1 0x20
+#define AUX_SPI_M25P80_ID2 0x14
 #define DRM_OVERLAY_SOURCE_WIDTH 320
 #define DRM_OVERLAY_SOURCE_HEIGHT 200
 #define DRM_OVERLAY_DEST_X 320
@@ -1015,13 +1026,13 @@ static int wait_for_path(const char *path, int present)
     return -1;
 }
 
-static int find_aux_spi1_mtd(char *device_path, size_t device_path_size)
+static int find_aux_spi1_spidev(char *device_path, size_t device_path_size)
 {
     int attempt;
 
     for (attempt = 0; attempt < SYSFS_WAIT_ATTEMPTS; attempt++) {
         struct dirent *entry;
-        DIR *directory = opendir("/sys/class/mtd");
+        DIR *directory = opendir("/sys/class/spidev");
 
         if (directory) {
             while ((entry = readdir(directory))) {
@@ -1029,14 +1040,18 @@ static int find_aux_spi1_mtd(char *device_path, size_t device_path_size)
                 char resolved[PATH_MAX];
                 int count;
 
-                if (strncmp(entry->d_name, "mtd", 3) ||
-                    !isdigit((unsigned char)entry->d_name[3])) {
+                if (entry->d_name[0] == '.') {
                     continue;
                 }
                 snprintf(class_path, sizeof(class_path),
-                         "/sys/class/mtd/%s", entry->d_name);
+                         "/sys/class/spidev/%s", entry->d_name);
+                /*
+                 * The AUX SPI1 controller has no device-tree alias, so Linux
+                 * assigns its bus number dynamically.  Match on the platform
+                 * device name instead of a fixed spiN.0 path.
+                 */
                 if (!realpath(class_path, resolved) ||
-                    !strstr(resolved, "/spi1.0/")) {
+                    !strstr(resolved, "/" AUX_SPI1_CONTROLLER "/")) {
                     continue;
                 }
                 count = snprintf(device_path, device_path_size, "/dev/%s",
@@ -1054,43 +1069,46 @@ static int find_aux_spi1_mtd(char *device_path, size_t device_path_size)
     return -1;
 }
 
-static int verify_aux_spi1_flash(void)
+static int verify_aux_spi1_jedec_id(void)
 {
-    unsigned char data[AUX_SPI_FLASH_READ_SIZE];
+    unsigned char tx[AUX_SPI_JEDEC_LEN] = { 0x9f, 0, 0, 0 };
+    unsigned char rx[AUX_SPI_JEDEC_LEN] = { 0 };
     char device_path[PATH_MAX];
-    size_t offset = 0;
+    struct spi_ioc_transfer transfer;
     int fd;
+    int result;
 
-    if (wait_for_path(AUX_SPI1_DEVICE_PATH, 1) ||
-        find_aux_spi1_mtd(device_path, sizeof(device_path))) {
+    if (find_aux_spi1_spidev(device_path, sizeof(device_path))) {
         return -1;
     }
 
-    fd = open(device_path, O_RDONLY);
+    fd = open(device_path, O_RDWR);
     if (fd < 0) {
         return -1;
     }
-    while (offset < sizeof(data)) {
-        ssize_t count = read(fd, data + offset, sizeof(data) - offset);
 
-        if (count < 0 && errno == EINTR) {
-            continue;
-        }
-        if (count <= 0) {
-            close(fd);
-            return -1;
-        }
-        offset += count;
-    }
+    memset(&transfer, 0, sizeof(transfer));
+    transfer.tx_buf = (unsigned long)tx;
+    transfer.rx_buf = (unsigned long)rx;
+    transfer.len = sizeof(tx);
+    transfer.bits_per_word = 8;
+
+    result = ioctl(fd, SPI_IOC_MESSAGE(1), &transfer);
     close(fd);
-
-    for (size_t index = 0; index < sizeof(data); index++) {
-        if (data[index] != 0xff) {
-            errno = EILSEQ;
-            return -1;
-        }
+    if (result < 0) {
+        return -1;
     }
-    printf("PI4-LAB: AUX SPI1 M25P80 erased read from %s\n", device_path);
+
+    if (rx[1] != AUX_SPI_M25P80_ID0 || rx[2] != AUX_SPI_M25P80_ID1 ||
+        rx[3] != AUX_SPI_M25P80_ID2) {
+        printf("PI4-LAB: AUX SPI1 unexpected JEDEC id %02x %02x %02x\n",
+               rx[1], rx[2], rx[3]);
+        errno = EILSEQ;
+        return -1;
+    }
+
+    printf("PI4-LAB: AUX SPI1 M25P80 JEDEC id %02x %02x %02x from %s\n",
+           rx[1], rx[2], rx[3], device_path);
     return 0;
 }
 
@@ -1942,8 +1960,8 @@ int main(void)
     input_demo = cmdline_has_word("pi4lab.input_demo=1");
     hdmi_audio_test = cmdline_has_word("pi4lab.hdmi_audio_test=1");
     if (aux_spi_test) {
-        report_check("AUX SPI1 M25P80 Linux driver and erased read",
-                     verify_aux_spi1_flash(), &failures);
+        report_check("AUX SPI1 M25P80 Linux driver and JEDEC exchange",
+                     verify_aux_spi1_jedec_id(), &failures);
     }
     report_check("VC4 DRM card0 registered",
                  wait_for_path(DRM_CARD_PATH, 1), &failures);

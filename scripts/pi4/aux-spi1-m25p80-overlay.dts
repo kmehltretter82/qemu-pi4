@@ -5,6 +5,13 @@
 /*
  * Test-only overlay for the built-in BCM2835 AUX SPI1 driver.  The board DTB
  * keeps SPI1 disabled by default, as production Pi 4-family DTBs do.
+ *
+ * The child is bound to spidev rather than to a SPI-NOR driver on purpose.
+ * The AUX controller's native chip select is deasserted after every
+ * spi_transfer, so a SPI-NOR command-then-data message cannot hold it; the
+ * driver itself documents that and asks for cs-gpios instead.  A single
+ * full-duplex spidev transfer is the exchange this controller can complete,
+ * and it is the one the model implements.
  */
 / {
     fragment@0 {
@@ -12,9 +19,11 @@
 
         __overlay__ {
             status = "okay";
+            #address-cells = <1>;
+            #size-cells = <0>;
 
-            flash@0 {
-                compatible = "jedec,spi-nor";
+            spidev@0 {
+                compatible = "rohm,dh2228fv";
                 reg = <0>;
                 spi-max-frequency = <1000000>;
             };
