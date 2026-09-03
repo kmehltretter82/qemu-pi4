@@ -945,10 +945,44 @@ static void aux_spi_flash_read_id(uint64_t spi_base)
     /* TXHOLD preserves virtual CS; the final IO word ends the transaction. */
     writel(AUX_SPI_TXHOLD(spi_base), 0x089f0000);
     writel(AUX_SPI_IO(spi_base), 0x18000000);
+    /*
+     * Received words are right-aligned: the three-byte read returns the first
+     * two identity bytes below a zero turnaround byte, and the trailing
+     * one-byte word returns the capacity byte in bits 7 to 0.
+     */
     g_assert_cmphex(readl(AUX_SPI_IO(spi_base)), ==, 0x002020);
-    g_assert_cmphex(readl(AUX_SPI_IO(spi_base)), ==, 0x140000);
+    g_assert_cmphex(readl(AUX_SPI_IO(spi_base)), ==, 0x14);
     g_assert_cmphex(readl(AUX_SPI_STAT(spi_base)), ==,
                     AUX_SPI_STAT_IDLE);
+}
+
+/*
+ * A variable-width word is transmitted from the most significant bits but
+ * received into the least significant ones, so a short receive word must not
+ * be returned in the transmit alignment.  Linux's spi-bcm2835aux reads byte i
+ * of an n-byte result from data >> (8 * (n - i - 1)); left-aligning it would
+ * corrupt every transfer whose length is not a multiple of three.
+ */
+static void aux_spi_flash_short_word_alignment(uint64_t spi_base)
+{
+    const uint32_t cntl0 = AUX_SPI_CNTL0_ENABLE |
+                           AUX_SPI_CNTL0_VAR_WIDTH |
+                           AUX_SPI_CNTL0_MSBF_OUT;
+    const uint32_t cntl1 = AUX_SPI_CNTL1_MSBF_IN;
+
+    writel(AUX_SPI_CNTL0(spi_base), cntl0);
+    writel(AUX_SPI_CNTL1(spi_base), cntl1);
+
+    /*
+     * A one-byte command word and a one-byte data word leave exactly two
+     * bytes in the receive FIFO: the command turnaround byte and the first
+     * identity byte.  Right-aligned they read back as 0x0020, whereas the
+     * transmit alignment would place them at 0x2000.
+     */
+    writel(AUX_SPI_TXHOLD(spi_base), 0x089f0000);
+    writel(AUX_SPI_IO(spi_base), 0x08000000);
+    g_assert_cmphex(readl(AUX_SPI_IO(spi_base)), ==, 0x0020);
+    g_assert_cmphex(readl(AUX_SPI_STAT(spi_base)), ==, AUX_SPI_STAT_IDLE);
 }
 
 static void test_aux_spi_flash_transaction(void)
@@ -959,6 +993,8 @@ static void test_aux_spi_flash_transaction(void)
     aux_spi_flash_read_id(RASPI4_AUX_SPI1_BASE);
     aux_spi_flash_read_id(RASPI4_AUX_SPI2_BASE);
     aux_spi_flash_read_id(RASPI4_AUX_SPI2_BASE);
+    aux_spi_flash_short_word_alignment(RASPI4_AUX_SPI1_BASE);
+    aux_spi_flash_short_word_alignment(RASPI4_AUX_SPI2_BASE);
 }
 
 static void pcie_edu_dma(uint64_t src, uint64_t dst, size_t size,
