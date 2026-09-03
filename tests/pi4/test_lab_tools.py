@@ -28,6 +28,21 @@ DISPLAY_SPEC = importlib.util.spec_from_file_location(
 DISPLAY_TOOLS = importlib.util.module_from_spec(DISPLAY_SPEC)
 DISPLAY_SPEC.loader.exec_module(DISPLAY_TOOLS)
 
+INPUT_SPEC = importlib.util.spec_from_file_location(
+    "pi4_test_input", PI4_SCRIPTS / "test-input.py")
+INPUT_TOOLS = importlib.util.module_from_spec(INPUT_SPEC)
+INPUT_SPEC.loader.exec_module(INPUT_TOOLS)
+
+V3D_PROBE_SPEC = importlib.util.spec_from_file_location(
+    "pi4_test_v3d_probe", PI4_SCRIPTS / "test-v3d-probe.py")
+V3D_PROBE_TOOLS = importlib.util.module_from_spec(V3D_PROBE_SPEC)
+V3D_PROBE_SPEC.loader.exec_module(V3D_PROBE_TOOLS)
+
+AUX_SPI_SPEC = importlib.util.spec_from_file_location(
+    "pi4_test_aux_spi", PI4_SCRIPTS / "test-aux-spi.py")
+AUX_SPI_TOOLS = importlib.util.module_from_spec(AUX_SPI_SPEC)
+AUX_SPI_SPEC.loader.exec_module(AUX_SPI_TOOLS)
+
 
 class InitramfsTests(unittest.TestCase):
     def test_initramfs_is_deterministic(self):
@@ -261,6 +276,76 @@ class DisplayCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,
                                          "green overlay quadrant mismatch"):
                 DISPLAY_TOOLS.validate_pattern(capture)
+
+
+class InputToolTests(unittest.TestCase):
+    def test_input_event_payloads(self):
+        self.assertEqual(
+            INPUT_TOOLS.key_event("a", True),
+            {
+                "type": "key",
+                "data": {
+                    "down": True,
+                    "key": {"type": "qcode", "data": "a"},
+                },
+            },
+        )
+        self.assertEqual(
+            INPUT_TOOLS.rel_event("x", 17),
+            {"type": "rel", "data": {"axis": "x", "value": 17}},
+        )
+        self.assertEqual(
+            INPUT_TOOLS.button_event("left", False),
+            {"type": "btn", "data": {"button": "left", "down": False}},
+        )
+        self.assertEqual(
+            INPUT_TOOLS.CONSUMER_ENDPOINT_MARKER,
+            "PI4-LAB: Pi 400 consumer-control input endpoint /dev/input/event",
+        )
+
+
+class V3DProbeToolTests(unittest.TestCase):
+    def test_v3d_probe_validator_accepts_driver_registration(self):
+        output = "\n".join((
+            V3D_PROBE_TOOLS.V3D_DRIVER_MARKER,
+            V3D_PROBE_TOOLS.V3D_HUB_MAPPING_MARKER,
+            V3D_PROBE_TOOLS.V3D_CORE_MAPPING_MARKER,
+            V3D_PROBE_TOOLS.SUCCESS_MARKER,
+        ))
+
+        V3D_PROBE_TOOLS.validate_output(output)
+
+    def test_v3d_probe_validator_rejects_asb_failure(self):
+        output = "\n".join((
+            V3D_PROBE_TOOLS.V3D_DRIVER_MARKER,
+            V3D_PROBE_TOOLS.V3D_HUB_MAPPING_MARKER,
+            V3D_PROBE_TOOLS.V3D_CORE_MAPPING_MARKER,
+            V3D_PROBE_TOOLS.SUCCESS_MARKER,
+            V3D_PROBE_TOOLS.ASB_FAILURE_MARKERS[0],
+        ))
+
+        with self.assertRaisesRegex(RuntimeError, "bridge failure"):
+            V3D_PROBE_TOOLS.validate_output(output)
+
+
+class AuxSpiToolTests(unittest.TestCase):
+    def test_aux_spi_validator_accepts_driver_and_flash_read(self):
+        output = "\n".join((
+            AUX_SPI_TOOLS.AUX_SPI_CHECK_MARKER,
+            AUX_SPI_TOOLS.AUX_SPI_READ_MARKER,
+            AUX_SPI_TOOLS.SUCCESS_MARKER,
+        ))
+
+        AUX_SPI_TOOLS.validate_output(output)
+
+    def test_aux_spi_validator_rejects_missing_flash_read(self):
+        output = "\n".join((
+            AUX_SPI_TOOLS.AUX_SPI_CHECK_MARKER,
+            AUX_SPI_TOOLS.SUCCESS_MARKER,
+        ))
+
+        with self.assertRaisesRegex(RuntimeError, "erased read"):
+            AUX_SPI_TOOLS.validate_output(output)
 
 
 class ShellScriptTests(unittest.TestCase):

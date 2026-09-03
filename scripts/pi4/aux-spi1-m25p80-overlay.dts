@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/dts-v1/;
+/plugin/;
+
+/*
+ * Test-only overlay for the built-in BCM2835 AUX SPI1 driver.  The board DTB
+ * keeps SPI1 disabled by default, as production Pi 4-family DTBs do.
+ */
+/ {
+    fragment@0 {
+        target = <&spi1>;
+
+        __overlay__ {
+            status = "okay";
+
+            flash@0 {
+                compatible = "jedec,spi-nor";
+                reg = <0>;
+                spi-max-frequency = <1000000>;
+            };
+        };
+    };
+};

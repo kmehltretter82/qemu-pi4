@@ -16,8 +16,10 @@
 #include <linux/fs.h>
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
+#include <linux/input.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sound/asound.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -69,12 +71,16 @@
 #define HDMI_AUDIO_RIGHT_PERIOD 24
 #define HDMI_AUDIO_LEFT_AMPLITUDE 0x400000
 #define HDMI_AUDIO_RIGHT_AMPLITUDE 0x200000
+#define AUX_SPI1_DEVICE_PATH "/sys/bus/spi/devices/spi1.0"
+#define AUX_SPI_FLASH_READ_SIZE 16
 #define DRM_OVERLAY_SOURCE_WIDTH 320
 #define DRM_OVERLAY_SOURCE_HEIGHT 200
 #define DRM_OVERLAY_DEST_X 320
 #define DRM_OVERLAY_DEST_Y 200
 #define DRM_OVERLAY_DEST_WIDTH 640
 #define DRM_OVERLAY_DEST_HEIGHT 400
+#define PI400_KEYBOARD_INPUT_NAME "Raspberry Pi Internal Keyboard"
+#define QEMU_USB_MOUSE_INPUT_NAME "QEMU QEMU USB Mouse"
 
 /* Minimal DRM/KMS UAPI subset used by the pinned Linux acceptance guest. */
 #define PI4_DRM_CLIENT_CAP_UNIVERSAL_PLANES 2
@@ -774,6 +780,155 @@ static int wait_for_pi400_hid_interfaces(unsigned int minimum)
     return -1;
 }
 
+static int find_input_event(const char *name, const char *handler,
+                            const char *phys_suffix, char *path,
+                            size_t path_size)
+{
+    char line[512];
+    FILE *file = fopen("/proc/bus/input/devices", "r");
+    int name_matches = 0;
+    int phys_matches = !phys_suffix;
+
+    if (!file) {
+        return -1;
+    }
+    while (fgets(line, sizeof(line), file)) {
+        if (!strncmp(line, "N: Name=", 8)) {
+            name_matches = strstr(line + 8, name) != NULL;
+            phys_matches = !phys_suffix;
+        } else if (name_matches && !strncmp(line, "P: Phys=", 8)) {
+            phys_matches = !phys_suffix ||
+                           strstr(line + 8, phys_suffix) != NULL;
+        } else if (name_matches && phys_matches &&
+                   !strncmp(line, "H: Handlers=", 12) &&
+                   (!handler || strstr(line + 12, handler))) {
+            const char *event = strstr(line + 12, "event");
+            unsigned int index;
+
+            if (event && sscanf(event, "event%u", &index) == 1 &&
+                snprintf(path, path_size, "/dev/input/event%u", index) <
+                (int)path_size) {
+                fclose(file);
+                return 0;
+            }
+        } else if (line[0] == '\n') {
+            name_matches = 0;
+            phys_matches = !phys_suffix;
+        }
+    }
+    fclose(file);
+    return -1;
+}
+
+static int wait_for_input_event(const char *name, const char *handler,
+                                const char *phys_suffix, char *path,
+                                size_t path_size)
+{
+    int attempt;
+
+    for (attempt = 0; attempt < SYSFS_WAIT_ATTEMPTS; attempt++) {
+        if (!find_input_event(name, handler, phys_suffix, path, path_size) &&
+            !access(path, R_OK)) {
+            return 0;
+        }
+        usleep(SYSFS_WAIT_US);
+    }
+    return -1;
+}
+
+static int open_input_event(const char *name, const char *handler,
+                            const char *phys_suffix,
+                            const char *description)
+{
+    char path[PATH_MAX];
+    int fd;
+
+    if (wait_for_input_event(name, handler, phys_suffix, path,
+                             sizeof(path))) {
+        printf("PI4-LAB: %s input endpoint unavailable\n", description);
+        return -1;
+    }
+    fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+        printf("PI4-LAB: cannot open %s input endpoint %s: %s\n",
+               description, path, strerror(errno));
+        return -1;
+    }
+    printf("PI4-LAB: %s input endpoint %s ready\n", description, path);
+    return fd;
+}
+
+static void log_input_event(const char *source, const struct input_event *event)
+{
+    if (event->type == EV_SYN || event->type == EV_MSC) {
+        return;
+    }
+    if (event->type == EV_KEY) {
+        printf("PI4-LAB: %s input key %u value %d\n", source,
+               event->code, event->value);
+    } else if (event->type == EV_REL) {
+        printf("PI4-LAB: %s input rel %u value %d\n", source,
+               event->code, event->value);
+    } else {
+        printf("PI4-LAB: %s input event type %u code %u value %d\n",
+               source, event->type, event->code, event->value);
+    }
+    fflush(NULL);
+}
+
+static void drain_input_events(int fd, const char *source)
+{
+    struct input_event events[16];
+    ssize_t count;
+
+    while ((count = read(fd, events, sizeof(events))) > 0) {
+        size_t event_count = (size_t)count / sizeof(events[0]);
+
+        for (size_t index = 0; index < event_count; index++) {
+            log_input_event(source, &events[index]);
+        }
+    }
+    if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        printf("PI4-LAB: %s input read failed: %s\n", source,
+               strerror(errno));
+        fflush(NULL);
+    }
+}
+
+static void run_input_demo(int keyboard_fd, int consumer_fd, int mouse_fd)
+{
+    struct pollfd poll_fds[] = {
+        { .fd = keyboard_fd, .events = POLLIN },
+        { .fd = consumer_fd, .events = POLLIN },
+        { .fd = mouse_fd, .events = POLLIN },
+    };
+
+    printf("PI4-LAB: Pi 400 input event demo ready\n");
+    fflush(NULL);
+    for (;;) {
+        int ready = poll(poll_fds,
+                         sizeof(poll_fds) / sizeof(poll_fds[0]), -1);
+
+        if (ready < 0) {
+            if (errno != EINTR) {
+                printf("PI4-LAB: input event poll failed: %s\n",
+                       strerror(errno));
+                fflush(NULL);
+            }
+            continue;
+        }
+        if (poll_fds[0].revents & POLLIN) {
+            drain_input_events(keyboard_fd, "keyboard");
+        }
+        if (poll_fds[1].revents & POLLIN) {
+            drain_input_events(consumer_fd, "consumer");
+        }
+        if (poll_fds[2].revents & POLLIN) {
+            drain_input_events(mouse_fd, "mouse");
+        }
+    }
+}
+
 static unsigned long xhci_interrupt_count(void)
 {
     char line[4096];
@@ -858,6 +1013,85 @@ static int wait_for_path(const char *path, int present)
         usleep(SYSFS_WAIT_US);
     }
     return -1;
+}
+
+static int find_aux_spi1_mtd(char *device_path, size_t device_path_size)
+{
+    int attempt;
+
+    for (attempt = 0; attempt < SYSFS_WAIT_ATTEMPTS; attempt++) {
+        struct dirent *entry;
+        DIR *directory = opendir("/sys/class/mtd");
+
+        if (directory) {
+            while ((entry = readdir(directory))) {
+                char class_path[PATH_MAX];
+                char resolved[PATH_MAX];
+                int count;
+
+                if (strncmp(entry->d_name, "mtd", 3) ||
+                    !isdigit((unsigned char)entry->d_name[3])) {
+                    continue;
+                }
+                snprintf(class_path, sizeof(class_path),
+                         "/sys/class/mtd/%s", entry->d_name);
+                if (!realpath(class_path, resolved) ||
+                    !strstr(resolved, "/spi1.0/")) {
+                    continue;
+                }
+                count = snprintf(device_path, device_path_size, "/dev/%s",
+                                 entry->d_name);
+                if (count >= 0 && (size_t)count < device_path_size &&
+                    !access(device_path, R_OK)) {
+                    closedir(directory);
+                    return 0;
+                }
+            }
+            closedir(directory);
+        }
+        usleep(SYSFS_WAIT_US);
+    }
+    return -1;
+}
+
+static int verify_aux_spi1_flash(void)
+{
+    unsigned char data[AUX_SPI_FLASH_READ_SIZE];
+    char device_path[PATH_MAX];
+    size_t offset = 0;
+    int fd;
+
+    if (wait_for_path(AUX_SPI1_DEVICE_PATH, 1) ||
+        find_aux_spi1_mtd(device_path, sizeof(device_path))) {
+        return -1;
+    }
+
+    fd = open(device_path, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    while (offset < sizeof(data)) {
+        ssize_t count = read(fd, data + offset, sizeof(data) - offset);
+
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            close(fd);
+            return -1;
+        }
+        offset += count;
+    }
+    close(fd);
+
+    for (size_t index = 0; index < sizeof(data); index++) {
+        if (data[index] != 0xff) {
+            errno = EILSEQ;
+            return -1;
+        }
+    }
+    printf("PI4-LAB: AUX SPI1 M25P80 erased read from %s\n", device_path);
+    return 0;
 }
 
 static int cmdline_has_word(const char *word)
@@ -1671,8 +1905,14 @@ int main(void)
     int failures = 0;
     int hdmi_audio_ready;
     int hdmi_audio_test;
+    int aux_spi_test;
+    int input_demo;
+    int keyboard_input_fd = -1;
+    int consumer_input_fd = -1;
+    int mouse_input_fd = -1;
     int pi400;
     int display_test;
+    int hold_after_test;
     int storage_ready = 0;
     int storage_test;
     int vl805_ready;
@@ -1697,7 +1937,14 @@ int main(void)
     pi400 = model_is_pi400();
     storage_test = cmdline_has_word("pi4lab.usb_storage=1");
     display_test = cmdline_has_word("pi4lab.display_test=1");
+    aux_spi_test = cmdline_has_word("pi4lab.aux_spi_test=1");
+    hold_after_test = cmdline_has_word("pi4lab.hold=1");
+    input_demo = cmdline_has_word("pi4lab.input_demo=1");
     hdmi_audio_test = cmdline_has_word("pi4lab.hdmi_audio_test=1");
+    if (aux_spi_test) {
+        report_check("AUX SPI1 M25P80 Linux driver and erased read",
+                     verify_aux_spi1_flash(), &failures);
+    }
     report_check("VC4 DRM card0 registered",
                  wait_for_path(DRM_CARD_PATH, 1), &failures);
     report_check("HDMI-A-1 connector reports connected",
@@ -1828,6 +2075,28 @@ int main(void)
         }
     }
 
+    if (input_demo) {
+        if (!pi400) {
+            report_check("Pi 400 input demo requires raspi400", 1,
+                         &failures);
+        } else {
+            keyboard_input_fd = open_input_event(
+                PI400_KEYBOARD_INPUT_NAME, "kbd", "/input0",
+                "Pi 400 keyboard");
+            report_check("Pi 400 keyboard input endpoint",
+                         keyboard_input_fd < 0, &failures);
+            consumer_input_fd = open_input_event(
+                PI400_KEYBOARD_INPUT_NAME, NULL, "/input1",
+                "Pi 400 consumer-control");
+            report_check("Pi 400 consumer-control input endpoint",
+                         consumer_input_fd < 0, &failures);
+            mouse_input_fd = open_input_event(
+                QEMU_USB_MOUSE_INPUT_NAME, NULL, NULL, "QEMU USB mouse");
+            report_check("QEMU USB mouse input endpoint",
+                         mouse_input_fd < 0, &failures);
+        }
+    }
+
     if (bring_up_interface("eth0")) {
         printf("\nPI4-LAB: eth0 unavailable: %s\n", strerror(errno));
     } else {
@@ -1865,6 +2134,25 @@ int main(void)
     }
     fflush(NULL);
     sync();
+    if (input_demo && !failures) {
+        run_input_demo(keyboard_input_fd, consumer_input_fd, mouse_input_fd);
+    }
+    if (keyboard_input_fd >= 0) {
+        close(keyboard_input_fd);
+    }
+    if (consumer_input_fd >= 0) {
+        close(consumer_input_fd);
+    }
+    if (mouse_input_fd >= 0) {
+        close(mouse_input_fd);
+    }
+    if (hold_after_test) {
+        printf("PI4-LAB: holding the Pi 400 HDMI demo open\n");
+        fflush(NULL);
+        for (;;) {
+            pause();
+        }
+    }
     sleep(display_test ? 5 : 1);
 
     if (reboot(RB_AUTOBOOT)) {
