@@ -83,7 +83,8 @@
 #define BCM2711_PCIE_SW_INIT_BRIDGE_RESET BIT(1)
 #define BCM2711_PCIE_SW_INIT_PERST        BIT(0)
 
-#define BCM2711_PCIE_HW_REVISION 0x0320
+/* Read from a real Pi 400 at 0xfd50406c; stable across repeated reads. */
+#define BCM2711_PCIE_HW_REVISION 0x0304
 #define BCM2711_PCIE_INTX_SPI_BASE 143
 
 static uint8_t *bcm2711_pcie_reg_ptr(BCM2711PcieHostState *s,

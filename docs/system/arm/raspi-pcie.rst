@@ -152,9 +152,14 @@ controller event to SPI 147, and MSI to SPI 148.  USB enumeration shows a
 480 Mbit/s USB 2 root hub with one port leading to a four-port high-speed
 ``2109:3431`` hub.  The ``04d9:0007`` Pi 400 keyboard is a 1.5 Mbit/s device on
 hub port four with two HID interfaces.  The separate USB 3 root hub has four
-5 Gbit/s ports.  Controller revision ``0x0320`` at offset ``0x406c`` is
-currently inferred from the observed PCI revision and Linux behavior; it has
-not yet been confirmed by a raw MMIO capture.
+5 Gbit/s ports.  A read-only MMIO capture on 2026-09-03 reports controller
+revision ``0x0304`` at offset ``0x406c``, stable across repeated reads.  This
+replaces an earlier inference of ``0x0320`` drawn from the observed PCI
+revision and from Linux behavior.  No guest behavior changes: Linux's
+``pcie-brcmstb`` driver uses the register for exactly two decisions, and both
+values fall on the same side of each threshold.  ``msi->legacy`` is selected
+by ``hw_rev < 0x0303``, and the ``hw_rev >= 0x0320`` rejection applies only to
+``BCM4908``.
 
 A controlled follow-up with the xHCI driver unbound tested property tag
 ``0x00030058`` directly through ``/dev/vcio``.  Request data ``0x00100000``
