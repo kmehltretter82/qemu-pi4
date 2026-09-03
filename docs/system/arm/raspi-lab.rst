@@ -608,6 +608,10 @@ in MHz and are the raw integer responses divided by one million::
   15  VEC               0        0      108
   16  DISP              0        0        0  (not present)
 
+A re-query on 2026-09-03 through ``vcmailbox`` returned the same current,
+minimum and maximum for all fifteen IDs, so the table is reproducible across
+reboots rather than a single snapshot.
+
 The fork uses those exact integer values for its per-clock firmware profile.
 Clock-rate writes are retained, clamped to the captured range, reset to the
 captured current values and migrated.  This makes normal Linux clock
