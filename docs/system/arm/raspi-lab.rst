@@ -252,6 +252,23 @@ On 2026-08-23, the pinned upstream Linux 7.2 acceptance image passed on both
 same boots also retained all PCIe, VL805, USB-storage, MSI, GENET, and Pi 400
 keyboard acceptance gates.
 
+ASB power-domain bridge reference evidence
+------------------------------------------
+
+A read-only MMIO capture on 2026-09-03 read all nine words of both bridge
+blocks, at ``0xfe00a000`` and ``0xfec11000``, on a running Raspberry Pi OS
+with the V3D module loaded but no GPU work in flight.  Both blocks report the
+AXI bridge identity ``0x62726467``.  In the main block the CPR and H264
+control words read ``0x7`` while V3D and ISP read ``0x5``; in the RPiVid block
+V3D reads ``0x7`` and every other domain reads ``0x4``.
+
+Linux's ``bcm2835-power`` driver redirects only ``ASB_V3D_S_CTRL`` and
+``ASB_V3D_M_CTRL`` to the RPiVid block when that block is present, which it is
+on BCM2711.  The main block's V3D words are therefore firmware-left state that
+the driver never writes on this SoC, which is why the two blocks disagree
+there while agreeing on the bridge identity.  The model resets both blocks to
+these captured values and a qtest pins every one of them.
+
 AON L2 interrupt-controller reference evidence
 -----------------------------------------------
 

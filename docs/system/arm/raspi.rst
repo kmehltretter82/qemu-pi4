@@ -448,7 +448,12 @@ retained with ``-global bcm2711-v3d.enable-probe-dtb=true``.  The pinned Linux
 driver then reads the Pi 400-identifying hub/core registers, initializes its
 MMU and interrupt state, and registers its DRM device.  The stateful ASB
 bridge model supplies the stop/acknowledge handshakes used by the Linux V3D
-power-domain driver.
+power-domain driver.  Both bridge blocks reset to the per-domain control
+values read from a real Pi 400, and a request to stop is acknowledged
+immediately because no transaction is ever in flight.  Note that the two
+blocks disagree about V3D: on BCM2711 the power driver reaches the V3D
+bridges through the RPiVid block, so the main block's V3D words are
+firmware-left state that Linux never writes on this SoC.
 
 The option does **not** enable usable 3D graphics: command-list execution,
 memory accesses by GPU jobs, fences and rendering are still absent.  Do not
