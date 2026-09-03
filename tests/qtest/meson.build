@@ -232,6 +232,7 @@ qtests_aspeed64 = \
 
 qtests_raspi4 = \
   ['bcm2711-display-test',
+   'bcm2711-v3d-test',
    'bcm2835-ic-test',
    'bcm2835-cprman-test',
    'bcm2835-dma-test',
