@@ -52,6 +52,7 @@ void hid_init(HIDState *hs, int kind, HIDEventFunc event);
 void hid_reset(HIDState *hs);
 void hid_free(HIDState *hs);
 
+void hid_keyboard_handle_event(HIDState *hs, QemuInputEvent *evt);
 bool hid_has_events(HIDState *hs);
 void hid_set_next_idle(HIDState *hs);
 void hid_pointer_activate(HIDState *hs);

@@ -221,10 +221,8 @@ static void hid_pointer_sync(DeviceState *dev)
     }
 }
 
-static void hid_keyboard_event(DeviceState *dev, QemuConsole *src,
-                               QemuInputEvent *evt)
+void hid_keyboard_handle_event(HIDState *hs, QemuInputEvent *evt)
 {
-    HIDState *hs = (HIDState *)dev;
     int scancodes[3], i, count;
     int slot;
 
@@ -239,6 +237,12 @@ static void hid_keyboard_event(DeviceState *dev, QemuConsole *src,
         hs->kbd.keycodes[slot] = scancodes[i];
     }
     hs->event(hs);
+}
+
+static void hid_keyboard_event(DeviceState *dev, QemuConsole *src,
+                               QemuInputEvent *evt)
+{
+    hid_keyboard_handle_event((HIDState *)dev, evt);
 }
 
 static void hid_keyboard_process_keycode(HIDState *hs)

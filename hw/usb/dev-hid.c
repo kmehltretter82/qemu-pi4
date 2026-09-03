@@ -35,6 +35,7 @@
 #include "hw/usb/hid.h"
 #include "hw/core/qdev-properties.h"
 #include "qom/object.h"
+#include "standard-headers/linux/input-event-codes.h"
 
 struct USBHIDState {
     USBDevice dev;
@@ -46,6 +47,8 @@ struct USBHIDState {
     uint32_t usb_version;
     char *display;
     uint32_t head;
+    uint16_t consumer_keys;
+    bool consumer_pending;
 };
 
 #define TYPE_USB_HID "usb-hid"
@@ -672,11 +675,84 @@ static void usb_hid_changed(HIDState *hs)
     usb_wakeup(us->intr, 0);
 }
 
+/*
+ * The Pi 400 keyboard exposes a separate Consumer Control HID interface.
+ * Keep it separate from the boot-keyboard report so Linux gets the same
+ * input-device split as it does from the physical keyboard.
+ */
+static int pi400_consumer_key_bit(unsigned int key)
+{
+    switch (key) {
+    case KEY_PLAYPAUSE:
+        return 0;
+    case KEY_NEXTSONG:
+        return 1;
+    case KEY_PREVIOUSSONG:
+        return 2;
+    case KEY_EJECTCD:
+        return 3;
+    case KEY_MUTE:
+        return 4;
+    case KEY_VOLUMEDOWN:
+        return 5;
+    case KEY_VOLUMEUP:
+        return 6;
+    case KEY_HOMEPAGE:
+        return 7;
+    case KEY_CALC:
+        return 8;
+    default:
+        return -1;
+    }
+}
+
+static void usb_pi400_keyboard_event(DeviceState *dev, QemuConsole *src,
+                                     QemuInputEvent *evt)
+{
+    USBHIDState *us = USB_HID(dev);
+    int bit = pi400_consumer_key_bit(evt->key.key);
+
+    if (bit < 0) {
+        hid_keyboard_handle_event(&us->hid, evt);
+        return;
+    }
+
+    if (evt->key.down) {
+        us->consumer_keys |= 1u << bit;
+    } else {
+        us->consumer_keys &= ~(1u << bit);
+    }
+    us->consumer_pending = true;
+    usb_wakeup(us->intr2, 0);
+}
+
+static const QemuInputHandler usb_pi400_keyboard_handler = {
+    .name  = "Raspberry Pi 400 Keyboard",
+    .mask  = INPUT_EVENT_MASK_KEY,
+    .event = usb_pi400_keyboard_event,
+};
+
+static int usb_pi400_consumer_poll(USBHIDState *us, uint8_t *buf, int len)
+{
+    int report_len = MIN(len, 2);
+
+    if (report_len > 0) {
+        buf[0] = us->consumer_keys;
+    }
+    if (report_len > 1) {
+        buf[1] = us->consumer_keys >> 8;
+    }
+    us->consumer_pending = false;
+    return report_len;
+}
+
 static void usb_hid_handle_reset(USBDevice *dev)
 {
     USBHIDState *us = USB_HID(dev);
 
     hid_reset(&us->hid);
+    us->consumer_keys = 0;
+    us->consumer_pending = false;
 }
 
 static void usb_hid_handle_control(USBDevice *dev, USBPacket *p,
@@ -724,8 +800,7 @@ static void usb_hid_handle_control(USBDevice *dev, USBPacket *p,
         break;
     case HID_GET_REPORT:
         if (us->intr2 && index == 1) {
-            p->actual_length = MIN(length, 5);
-            memset(data, 0, p->actual_length);
+            p->actual_length = usb_pi400_consumer_poll(us, data, length);
         } else if (hs->kind == HID_MOUSE || hs->kind == HID_TABLET) {
             p->actual_length = hid_pointer_poll(hs, data, length);
         } else if (hs->kind == HID_KEYBOARD) {
@@ -799,7 +874,12 @@ static void usb_hid_handle_data(USBDevice *dev, USBPacket *p)
             }
             usb_packet_copy(p, buf, len);
         } else if (us->intr2 && p->ep->nr == 2) {
-            p->status = USB_RET_NAK;
+            if (!us->consumer_pending) {
+                p->status = USB_RET_NAK;
+                return;
+            }
+            len = usb_pi400_consumer_poll(us, buf, p->iov.size);
+            usb_packet_copy(p, buf, len);
         } else {
             goto fail;
         }
@@ -884,6 +964,14 @@ static void usb_pi400_keyboard_realize(USBDevice *dev, Error **errp)
     us->report_desc_len[0] = sizeof(pi400_keyboard_hid_report_descriptor);
     us->report_desc[1] = pi400_consumer_hid_report_descriptor;
     us->report_desc_len[1] = sizeof(pi400_consumer_hid_report_descriptor);
+
+    qemu_input_handler_unregister(us->hid.s);
+    us->hid.s = qemu_input_handler_register(DEVICE(us),
+                                             &usb_pi400_keyboard_handler);
+    qemu_input_handler_activate(us->hid.s);
+    if (us->display) {
+        qemu_input_handler_bind(us->hid.s, us->display, us->head, NULL);
+    }
 }
 
 static int usb_ptr_post_load(void *opaque, int version_id)
@@ -915,6 +1003,30 @@ static const VMStateDescription vmstate_usb_kbd = {
     .fields = (const VMStateField[]) {
         VMSTATE_USB_DEVICE(dev, USBHIDState),
         VMSTATE_HID_KEYBOARD_DEVICE(hid, USBHIDState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static int usb_pi400_keyboard_post_load(void *opaque, int version_id)
+{
+    USBHIDState *us = opaque;
+
+    if (us->consumer_pending) {
+        usb_wakeup(us->intr2, 0);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_usb_pi400_kbd = {
+    .name = "usb-pi400-kbd",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = usb_pi400_keyboard_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_USB_DEVICE(dev, USBHIDState),
+        VMSTATE_HID_KEYBOARD_DEVICE(hid, USBHIDState),
+        VMSTATE_UINT16(consumer_keys, USBHIDState),
+        VMSTATE_BOOL(consumer_pending, USBHIDState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -1010,10 +1122,12 @@ static const TypeInfo usb_keyboard_info = {
 static void usb_pi400_keyboard_class_initfn(ObjectClass *klass,
                                              const void *data)
 {
+    DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
     uc->realize = usb_pi400_keyboard_realize;
     uc->product_desc = "Raspberry Pi Internal Keyboard";
+    dc->vmsd = &vmstate_usb_pi400_kbd;
 }
 
 static const TypeInfo usb_pi400_keyboard_info = {
