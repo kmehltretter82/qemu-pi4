@@ -257,8 +257,16 @@ static uint32_t bcm2835_aux_spi_fifo_word(BCM2835AuxSPIState *spi,
         fifo8_peek_buf(&spi->rx_fifo, bytes, count);
     }
 
+    /*
+     * Transmit and receive alignment differ.  A variable-width word is sent
+     * from the most significant bits, so the write path takes byte i from
+     * bit 8 * (2 - i).  Received bits shift in from the bottom, so an
+     * n-byte word is returned right-aligned with the first byte received in
+     * the most significant position of that n-byte field.  Linux's
+     * spi-bcm2835aux reads it back as data >> (8 * (count - i - 1)).
+     */
     for (unsigned int i = 0; i < count; i++) {
-        value |= bytes[i] << (8 * (2 - i));
+        value |= bytes[i] << (8 * (count - 1 - i));
     }
     return value;
 }
