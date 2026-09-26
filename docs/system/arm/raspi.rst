@@ -135,8 +135,8 @@ the wrong board identity and peripherals even though both boards use BCM2711.
 Experimental CYW43455 SDIO endpoint
 -----------------------------------
 
-The non-removable eMMC1/SDHCI slot can be populated with an experimental
-CYW43455-compatible endpoint::
+The non-removable eMMC1/SDHCI slot can be populated with an experimental,
+local-development CYW43455-compatible endpoint::
 
   -machine raspi400,sdio-wifi=on
 
@@ -149,19 +149,27 @@ functions and implements the CMD5, CMD3, CMD7, CMD13, CMD52 and CMD53 paths
 needed for standard Linux SDIO discovery.  Its CCCR, FBR and CIS data describe
 SDIO 2.00, function-ready state and the two function block sizes.  CMD53 byte
 and block transfers use migratable, byte-addressed function register spaces.
+Clock requests complete immediately.  Function-one backplane windows expose
+the Pi 400's observed BCM4345/9 chip signature, a synthetic five-core AI EROM,
+core-wrapper reset registers and synthetic CR4 TCM-bank geometry.  This
+discovery shim is sufficient for ``brcmfmac`` to select the Pi 400 firmware
+and reach its first firmware control transaction.
 
-This first-stage model does **not** implement the CYW43455 backplane cores,
-firmware processor, firmware upload/boot protocol, SDPCM/BDC framing,
-interrupt production or an 802.11 radio.  Consequently, enumerating the SDIO
-functions is not evidence that ``brcmfmac`` can create a network interface,
-and it cannot yet validate a netpoll transmit path.  Those layers must be
-added and compared with real Pi 400 traces before the endpoint can be treated
-as hardware-faithful.
+The model does **not** implement firmware RAM, the firmware processor,
+SDPCM/BDC control or data responses, interrupt production or an 802.11 radio.
+Unknown backplane reads return zero and writes are ignored.  Consequently,
+the apparent firmware download is not firmware execution: the first control
+transaction times out, no ``wlan0`` is created, and the endpoint cannot yet
+validate a netpoll transmit path.  The synthetic EROM and RAM geometry must
+also be compared with real Pi 400 transactions before they can be treated as
+hardware-faithful.
 
 ``scripts/pi4/cyw43455-sdio-init.sh`` is a focused initramfs probe for this
 boundary.  Install it as ``/init`` alongside a static BusyBox and the
-``rfkill``, ``cfg80211``, ``brcmutil`` and ``brcmfmac`` modules; it reports the
-enumerated IDs, module probe result, network devices and final kernel log.
+``rfkill``, ``cfg80211``, ``brcmutil``, ``brcmfmac`` and ``brcmfmac-cyw``
+modules; it reports the enumerated IDs, module probe result, network devices
+and final kernel log.  A matching firmware binary, NVRAM file and optional
+CLM blob are also required to reach the firmware-control timeout.
 
 Attaching USB storage
 ---------------------

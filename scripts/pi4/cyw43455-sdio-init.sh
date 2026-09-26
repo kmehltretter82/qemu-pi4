@@ -49,7 +49,9 @@ load_module rfkill
 load_module cfg80211
 load_module brcmutil
 load_module brcmfmac
-sleep 2
+load_module brcmfmac-cyw
+echo "CYW43455-QEMU: waiting for asynchronous firmware startup"
+sleep 10
 show_sdio
 
 echo "CYW43455-QEMU: loaded modules"

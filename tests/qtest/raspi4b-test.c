@@ -57,6 +57,22 @@
 #define CYW43455_SDIO_CCCR_IORX    0x03
 #define CYW43455_SDIO_CCCR_CIS     0x09
 #define CYW43455_SDIO_CIS_COMMON   0x1000
+#define CYW43455_SDIO_CHIPCLKCSR   0x1000e
+#define CYW43455_SDIO_FORCE_ALP    0x01
+#define CYW43455_SDIO_ALP_REQ      0x08
+#define CYW43455_SDIO_HWREQ_OFF    0x20
+#define CYW43455_SDIO_ALP_AVAIL    0x40
+#define CYW43455_SDIO_SBADDRLOW    0x1000a
+#define CYW43455_SDIO_SBADDRMID    0x1000b
+#define CYW43455_SDIO_SBADDRHIGH   0x1000c
+#define CYW43455_SDIO_SB_ACCESS    0x08000
+#define CYW43455_SDIO_SB_OFFSET    0x07fff
+#define CYW43455_SDIO_CHIP_ID_ADDR 0x18000000
+#define CYW43455_SDIO_CHIP_ID      0x15294345
+#define CYW43455_SDIO_EROM_PTR     0x180000fc
+#define CYW43455_SDIO_EROM_BASE    0x18110000
+#define CYW43455_SDIO_CR4_BASE     0x18002000
+#define CYW43455_SDIO_CR4_WRAPPER  0x18102000
 
 #define PROPERTY_RESPONSE_SUCCESS 0x80000000
 #define PROPERTY_RESPONSE_ERROR   0x80000001
@@ -2783,6 +2799,63 @@ static void cyw43455_sdio_select_qtest(QTestState *qts)
                    SDHC_SELECT_DESELECT_CARD | SDHC_CMD_RESPONSE);
 }
 
+static void cyw43455_sdio_set_backplane_window_qtest(QTestState *qts,
+                                                       uint32_t address)
+{
+    uint32_t window = address & ~CYW43455_SDIO_SB_OFFSET;
+
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(qts, true, true, 1,
+                                              CYW43455_SDIO_SBADDRLOW,
+                                              window >> 8) & 0xff,
+                    ==, (window >> 8) & 0xff);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(qts, true, true, 1,
+                                              CYW43455_SDIO_SBADDRMID,
+                                              window >> 16) & 0xff,
+                    ==, (window >> 16) & 0xff);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(qts, true, true, 1,
+                                              CYW43455_SDIO_SBADDRHIGH,
+                                              window >> 24) & 0xff,
+                    ==, window >> 24);
+}
+
+static uint32_t cyw43455_sdio_backplane_readl_qtest(QTestState *qts,
+                                                     uint32_t address)
+{
+    uint32_t argument;
+    uint32_t sdio_address;
+
+    cyw43455_sdio_set_backplane_window_qtest(qts, address);
+    sdio_address = CYW43455_SDIO_SB_ACCESS |
+                   (address & CYW43455_SDIO_SB_OFFSET);
+    argument = (1U << SDIO_CMD_FUNC_SHIFT) | SDIO_CMD53_INCREMENT |
+               (sdio_address << SDIO_CMD_ADDR_SHIFT) | 4;
+    sdhci_cmd_regs(qts, RASPI4_EMMC1_BASE, 4, 1, argument,
+                   SDHC_TRNS_BLK_CNT_EN | SDHC_TRNS_READ,
+                   (SDIO_CMD_IO_RW_EXTENDED << 8) |
+                   SDHC_CMD_DATA_PRESENT | SDHC_CMD_RESPONSE);
+    return qtest_readl(qts, RASPI4_EMMC1_BASE + SDHC_BDATA);
+}
+
+static void cyw43455_sdio_backplane_writel_qtest(QTestState *qts,
+                                                  uint32_t address,
+                                                  uint32_t value)
+{
+    uint32_t argument;
+    uint32_t sdio_address;
+
+    cyw43455_sdio_set_backplane_window_qtest(qts, address);
+    sdio_address = CYW43455_SDIO_SB_ACCESS |
+                   (address & CYW43455_SDIO_SB_OFFSET);
+    argument = SDIO_CMD53_WRITE | (1U << SDIO_CMD_FUNC_SHIFT) |
+               SDIO_CMD53_INCREMENT |
+               (sdio_address << SDIO_CMD_ADDR_SHIFT) | 4;
+    sdhci_cmd_regs(qts, RASPI4_EMMC1_BASE, 4, 1, argument,
+                   SDHC_TRNS_BLK_CNT_EN,
+                   (SDIO_CMD_IO_RW_EXTENDED << 8) |
+                   SDHC_CMD_DATA_PRESENT | SDHC_CMD_RESPONSE);
+    qtest_writel(qts, RASPI4_EMMC1_BASE + SDHC_BDATA, value);
+}
+
 static void test_cyw43455_sdio_endpoint(void)
 {
     const char *bus_path = "/machine/soc/peripherals/sdhci/sd-bus";
@@ -2825,6 +2898,66 @@ static void test_cyw43455_sdio_endpoint(void)
     response = cyw43455_sdio_cmd52(false, false, 0,
                                    CYW43455_SDIO_CCCR_IORX, 0);
     g_assert_cmphex(response & 0xff, ==, BIT(1) | BIT(2));
+
+    response = cyw43455_sdio_cmd52(true, true, 1,
+                                   CYW43455_SDIO_CHIPCLKCSR,
+                                   CYW43455_SDIO_HWREQ_OFF |
+                                   CYW43455_SDIO_ALP_REQ);
+    g_assert_cmphex(response & 0xff, ==,
+                    CYW43455_SDIO_HWREQ_OFF |
+                    CYW43455_SDIO_ALP_REQ |
+                    CYW43455_SDIO_ALP_AVAIL);
+    response = cyw43455_sdio_cmd52(true, true, 1,
+                                   CYW43455_SDIO_CHIPCLKCSR,
+                                   CYW43455_SDIO_HWREQ_OFF |
+                                   CYW43455_SDIO_FORCE_ALP);
+    g_assert_cmphex(response & 0xff, ==,
+                    CYW43455_SDIO_HWREQ_OFF |
+                    CYW43455_SDIO_FORCE_ALP |
+                    CYW43455_SDIO_ALP_AVAIL);
+
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_CHIP_ID_ADDR),
+                    ==, CYW43455_SDIO_CHIP_ID);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_EROM_PTR),
+                    ==, CYW43455_SDIO_EROM_BASE);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_EROM_BASE),
+                    ==, 0x00080001);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_EROM_BASE + 4),
+                    ==, 0x33004001);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_EROM_BASE + 2 * 4),
+                    ==, 0x00000003);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_EROM_BASE + 3 * 4),
+                    ==, 0x18000005);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_EROM_BASE + 4 * 4),
+                    ==, 0x181000c5);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_EROM_BASE + 10 * 4),
+                    ==, 0x00083e01);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_EROM_BASE + 25 * 4),
+                    ==, 0x0000000f);
+
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_CR4_BASE + 4),
+                    ==, 0x12);
+    cyw43455_sdio_backplane_writel_qtest(
+        global_qtest, CYW43455_SDIO_CR4_BASE + 0x40, 2);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_CR4_BASE + 0x44),
+                    ==, 0x0f);
+    cyw43455_sdio_backplane_writel_qtest(
+        global_qtest, CYW43455_SDIO_CR4_WRAPPER + 0x800, 1);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest,
+                        CYW43455_SDIO_CR4_WRAPPER + 0x800),
+                    ==, 1);
 
     /* Exercise an incrementing, byte-mode CMD53 transaction on function 1. */
     argument = SDIO_CMD53_WRITE | (1U << SDIO_CMD_FUNC_SHIFT) |
@@ -2884,6 +3017,8 @@ static void test_cyw43455_sdio_migration(void)
     g_assert_cmphex(cyw43455_sdio_cmd52_qtest(source, true, true, 1,
                                               0x400, 0x5a) & 0xff,
                     ==, 0x5a);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_CR4_WRAPPER + 0x408, 0x23);
 
     qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
     tmpdir = g_dir_make_tmp("raspi4b-cyw43455-migration-XXXXXX", &error);
@@ -2916,6 +3051,10 @@ static void test_cyw43455_sdio_migration(void)
     g_assert_cmphex(cyw43455_sdio_cmd52_qtest(destination, false, false, 1,
                                               0x400, 0) & 0xff,
                     ==, 0x5a);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        destination,
+                        CYW43455_SDIO_CR4_WRAPPER + 0x408),
+                    ==, 0x23);
 
     qtest_quit(destination);
     close(net_sockets[0]);

@@ -209,12 +209,13 @@ struct SDState {
 };
 
 /*
- * Minimal CYW43455 SDIO transport endpoint.
+ * Experimental CYW43455 SDIO endpoint.
  *
- * This is intentionally an SDIO card model, not an assertion that the
- * CYW43455 backplane, firmware CPU, or radio is implemented.  It provides
- * the standard two-function enumeration surface and byte-addressed function
- * spaces needed to develop those layers incrementally.
+ * This is intentionally a local development model, not an assertion that a
+ * complete or hardware-faithful CYW43455 is implemented.  In addition to the
+ * two-function transport, it provides a synthetic BCM4345/9 chip-discovery
+ * surface so that brcmfmac can reach firmware startup.  Firmware execution,
+ * SDPCM/BDC, interrupts and radio behavior remain unimplemented.
  */
 #define CYW43455_SDIO_NUM_FUNCS         2
 #define CYW43455_SDIO_ADDR_SPACE_SIZE   (1U << 17)
@@ -269,6 +270,58 @@ struct SDState {
 #define CYW43455_CIS_FUNC1              0x1100
 #define CYW43455_CIS_FUNC2              0x1200
 
+#define CYW43455_CHIPCLKCSR              0x1000e
+#define CYW43455_FORCE_ALP               0x01
+#define CYW43455_FORCE_HT                0x02
+#define CYW43455_ALP_AVAIL_REQ           0x08
+#define CYW43455_HT_AVAIL_REQ            0x10
+#define CYW43455_CLKCSR_CONTROL_MASK      0x3f
+#define CYW43455_ALP_AVAIL               0x40
+#define CYW43455_HT_AVAIL                0x80
+
+#define CYW43455_SBADDRLOW               0x1000a
+#define CYW43455_SBADDRMID               0x1000b
+#define CYW43455_SBADDRHIGH              0x1000c
+#define CYW43455_SB_ACCESS_START         0x08000
+#define CYW43455_SB_ACCESS_END           0x10000
+#define CYW43455_SB_OFFSET_MASK          0x07fff
+
+/* Observed on a physical Pi 400; the remaining discovery data is synthetic. */
+#define CYW43455_CHIP_ID                 0x15294345
+#define CYW43455_ENUM_BASE               0x18000000
+#define CYW43455_EROM_POINTER            0x180000fc
+#define CYW43455_EROM_BASE               0x18110000
+
+#define CYW43455_DMP_COMPONENT           0x00000001
+#define CYW43455_DMP_MASTER_PORT         0x00000003
+#define CYW43455_DMP_ADDRESS             0x00000005
+#define CYW43455_DMP_EOT                 0x0000000f
+#define CYW43455_DMP_NUM_MWRAP           (1U << 14)
+#define CYW43455_DMP_MWRAP               (3U << 6)
+
+#define CYW43455_BCMA_IOCTL              0x0408
+#define CYW43455_BCMA_RESET_CTL          0x0800
+#define CYW43455_ARMCR4_CAP              0x0004
+#define CYW43455_ARMCR4_BANKIDX          0x0040
+#define CYW43455_ARMCR4_BANKINFO         0x0044
+#define CYW43455_ARMCR4_BANK_COUNT       3
+
+typedef struct CYW43455CoreInfo {
+    uint16_t id;
+    uint8_t revision;
+    uint32_t base;
+    uint32_t wrapper;
+} CYW43455CoreInfo;
+
+/* Common BCM4345 topology; verify revisions and descriptors on a Pi 400. */
+static const CYW43455CoreInfo cyw43455_sdio_cores[] = {
+    { 0x800, 51, 0x18000000, 0x18100000 }, /* ChipCommon */
+    { 0x812, 54, 0x18001000, 0x18101000 }, /* D11 */
+    { 0x83e, 9,  0x18002000, 0x18102000 }, /* ARM CR4 */
+    { 0x83c, 14, 0x18003000, 0x18103000 }, /* PCIe Gen2 */
+    { 0x829, 21, 0x18004000, 0x18104000 }, /* SDIO device */
+};
+
 OBJECT_DECLARE_SIMPLE_TYPE(CYW43455SDIOState, CYW43455_SDIO)
 
 struct CYW43455SDIOState {
@@ -282,7 +335,138 @@ struct CYW43455SDIOState {
     bool transfer_write;
     bool transfer_increment;
     bool selected;
+    uint32_t wrapper_ioctl[ARRAY_SIZE(cyw43455_sdio_cores)];
+    uint32_t wrapper_reset[ARRAY_SIZE(cyw43455_sdio_cores)];
+    uint32_t armcr4_bankidx;
 };
+
+static uint32_t cyw43455_sdio_backplane_window(CYW43455SDIOState *s)
+{
+    uint8_t *regs = s->regs[1];
+
+    return (uint32_t)regs[CYW43455_SBADDRLOW] << 8 |
+           (uint32_t)regs[CYW43455_SBADDRMID] << 16 |
+           (uint32_t)regs[CYW43455_SBADDRHIGH] << 24;
+}
+
+static uint32_t cyw43455_sdio_erom_word(unsigned int index)
+{
+    unsigned int core_index = index / 5;
+    unsigned int descriptor = index % 5;
+    const CYW43455CoreInfo *core;
+
+    if (core_index == ARRAY_SIZE(cyw43455_sdio_cores)) {
+        return descriptor == 0 ? CYW43455_DMP_EOT : 0;
+    }
+    if (core_index > ARRAY_SIZE(cyw43455_sdio_cores)) {
+        return 0;
+    }
+
+    core = &cyw43455_sdio_cores[core_index];
+    switch (descriptor) {
+    case 0:
+        return (core->id << 8) | CYW43455_DMP_COMPONENT;
+    case 1:
+        return (core->revision << 24) | CYW43455_DMP_NUM_MWRAP |
+               CYW43455_DMP_COMPONENT;
+    case 2:
+        return CYW43455_DMP_MASTER_PORT;
+    case 3:
+        return core->base | CYW43455_DMP_ADDRESS;
+    case 4:
+        return core->wrapper | CYW43455_DMP_MWRAP |
+               CYW43455_DMP_ADDRESS;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static uint32_t cyw43455_sdio_backplane_readl(CYW43455SDIOState *s,
+                                               uint32_t address)
+{
+    unsigned int i;
+
+    address &= ~3U;
+    if (address == CYW43455_ENUM_BASE) {
+        return CYW43455_CHIP_ID;
+    }
+    if (address == CYW43455_EROM_POINTER) {
+        return CYW43455_EROM_BASE;
+    }
+    if (address >= CYW43455_EROM_BASE &&
+        address <= CYW43455_EROM_BASE +
+                   ARRAY_SIZE(cyw43455_sdio_cores) * 5 * sizeof(uint32_t)) {
+        return cyw43455_sdio_erom_word((address - CYW43455_EROM_BASE) / 4);
+    }
+
+    for (i = 0; i < ARRAY_SIZE(cyw43455_sdio_cores); i++) {
+        if (address == cyw43455_sdio_cores[i].wrapper +
+                       CYW43455_BCMA_IOCTL) {
+            return s->wrapper_ioctl[i];
+        }
+        if (address == cyw43455_sdio_cores[i].wrapper +
+                       CYW43455_BCMA_RESET_CTL) {
+            return s->wrapper_reset[i];
+        }
+    }
+
+    if (address == cyw43455_sdio_cores[2].base + CYW43455_ARMCR4_CAP) {
+        /* Two 256 KiB banks and one 128 KiB bank. */
+        return 0x12;
+    }
+    if (address == cyw43455_sdio_cores[2].base + CYW43455_ARMCR4_BANKIDX) {
+        return s->armcr4_bankidx;
+    }
+    if (address == cyw43455_sdio_cores[2].base + CYW43455_ARMCR4_BANKINFO) {
+        return s->armcr4_bankidx < CYW43455_ARMCR4_BANK_COUNT - 1 ?
+               0x1f : 0x0f;
+    }
+
+    return 0;
+}
+
+static void cyw43455_sdio_backplane_writel(CYW43455SDIOState *s,
+                                            uint32_t address, uint32_t value)
+{
+    unsigned int i;
+
+    address &= ~3U;
+    for (i = 0; i < ARRAY_SIZE(cyw43455_sdio_cores); i++) {
+        if (address == cyw43455_sdio_cores[i].wrapper +
+                       CYW43455_BCMA_IOCTL) {
+            s->wrapper_ioctl[i] = value;
+            return;
+        }
+        if (address == cyw43455_sdio_cores[i].wrapper +
+                       CYW43455_BCMA_RESET_CTL) {
+            s->wrapper_reset[i] = value;
+            return;
+        }
+    }
+
+    if (address == cyw43455_sdio_cores[2].base + CYW43455_ARMCR4_BANKIDX) {
+        s->armcr4_bankidx = value;
+    }
+}
+
+static uint8_t cyw43455_sdio_backplane_readb(CYW43455SDIOState *s,
+                                              uint32_t address)
+{
+    return cyw43455_sdio_backplane_readl(s, address) >>
+           ((address & 3) * 8);
+}
+
+static void cyw43455_sdio_backplane_writeb(CYW43455SDIOState *s,
+                                            uint32_t address, uint8_t value)
+{
+    uint32_t word_address = address & ~3U;
+    unsigned int shift = (address & 3) * 8;
+    uint32_t word = cyw43455_sdio_backplane_readl(s, word_address);
+
+    word &= ~(0xffU << shift);
+    word |= (uint32_t)value << shift;
+    cyw43455_sdio_backplane_writel(s, word_address, word);
+}
 
 static void cyw43455_sdio_set_cis_pointer(CYW43455SDIOState *s,
                                           unsigned int function,
@@ -377,6 +561,9 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     SDState *sd = &s->parent_obj;
 
     cyw43455_sdio_init_registers(s);
+    memset(s->wrapper_ioctl, 0, sizeof(s->wrapper_ioctl));
+    memset(s->wrapper_reset, 0, sizeof(s->wrapper_reset));
+    s->armcr4_bankidx = 0;
     s->transfer_addr = 0;
     s->transfer_remaining = 0;
     s->transfer_func = 0;
@@ -391,6 +578,14 @@ static uint8_t cyw43455_sdio_read_reg(CYW43455SDIOState *s,
                                       unsigned int function,
                                       uint32_t address)
 {
+    if (function == 1 && address >= CYW43455_SB_ACCESS_START &&
+        address < CYW43455_SB_ACCESS_END) {
+        uint32_t backplane_address = cyw43455_sdio_backplane_window(s) |
+                                     (address & CYW43455_SB_OFFSET_MASK);
+
+        return cyw43455_sdio_backplane_readb(s, backplane_address);
+    }
+
     return s->regs[function][address];
 }
 
@@ -401,6 +596,29 @@ static void cyw43455_sdio_write_reg(CYW43455SDIOState *s,
     uint8_t *regs = s->regs[function];
 
     if (function != 0) {
+        if (function == 1 && address >= CYW43455_SB_ACCESS_START &&
+            address < CYW43455_SB_ACCESS_END) {
+            uint32_t backplane_address = cyw43455_sdio_backplane_window(s) |
+                                         (address & CYW43455_SB_OFFSET_MASK);
+
+            cyw43455_sdio_backplane_writeb(s, backplane_address, value);
+            return;
+        }
+        if (function == 1 && address == CYW43455_CHIPCLKCSR) {
+            /*
+             * The clock requests complete immediately in this transport
+             * model.  Availability bits are read-only status, rather than
+             * ordinary bytes that the guest can overwrite.
+             */
+            regs[address] = value & CYW43455_CLKCSR_CONTROL_MASK;
+            if (value & (CYW43455_ALP_AVAIL_REQ | CYW43455_FORCE_ALP)) {
+                regs[address] |= CYW43455_ALP_AVAIL;
+            }
+            if (value & (CYW43455_HT_AVAIL_REQ | CYW43455_FORCE_HT)) {
+                regs[address] |= CYW43455_ALP_AVAIL | CYW43455_HT_AVAIL;
+            }
+            return;
+        }
         regs[address] = value;
         return;
     }
@@ -648,7 +866,7 @@ static void cyw43455_sdio_unrealize(DeviceState *device)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_2DARRAY(regs, CYW43455SDIOState,
@@ -660,6 +878,11 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_BOOL(transfer_write, CYW43455SDIOState),
         VMSTATE_BOOL(transfer_increment, CYW43455SDIOState),
         VMSTATE_BOOL(selected, CYW43455SDIOState),
+        VMSTATE_UINT32_ARRAY_V(wrapper_ioctl, CYW43455SDIOState,
+                               ARRAY_SIZE(cyw43455_sdio_cores), 2),
+        VMSTATE_UINT32_ARRAY_V(wrapper_reset, CYW43455SDIOState,
+                               ARRAY_SIZE(cyw43455_sdio_cores), 2),
+        VMSTATE_UINT32_V(armcr4_bankidx, CYW43455SDIOState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
