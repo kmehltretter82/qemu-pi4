@@ -214,8 +214,10 @@ struct SDState {
  * This is intentionally a local development model, not an assertion that a
  * complete or hardware-faithful CYW43455 is implemented.  In addition to the
  * two-function transport, it provides a synthetic BCM4345/9 chip-discovery
- * surface so that brcmfmac can reach firmware startup.  Firmware execution,
- * SDPCM/BDC, interrupts and radio behavior remain unimplemented.
+ * surface so that brcmfmac can reach firmware startup.  A bounded synthetic
+ * SDPCM control responder is provided for host-driver experiments.  Outbound
+ * data frames are consumed and traced, but firmware execution, receive data,
+ * a network backend and radio behavior remain unimplemented.
  */
 #define CYW43455_SDIO_NUM_FUNCS         2
 #define CYW43455_SDIO_ADDR_SPACE_SIZE   (1U << 17)
@@ -306,6 +308,31 @@ struct SDState {
 #define CYW43455_ARMCR4_BANKINFO         0x0044
 #define CYW43455_ARMCR4_BANK_COUNT       3
 
+#define CYW43455_SDIO_CORE_INDEX         4
+#define CYW43455_SDIO_INTSTATUS          0x0020
+#define CYW43455_SDIO_HOSTINTMASK        0x0024
+#define CYW43455_SDIO_TOSBMAILBOX        0x0040
+#define CYW43455_SDIO_TOHOSTMAILBOX      0x0044
+#define CYW43455_SDIO_TOSBMAILBOXDATA    0x0048
+#define CYW43455_SDIO_TOHOSTMAILBOXDATA  0x004c
+#define CYW43455_I_HMB_FRAME_IND         BIT(6)
+
+#define CYW43455_SDPCM_HEADER_LEN        12
+#define CYW43455_SDPCM_CONTROL_CHANNEL   0
+#define CYW43455_BCDC_HEADER_LEN         16
+#define CYW43455_BCDC_DCMD_ERROR         BIT(0)
+#define CYW43455_BCDC_DCMD_SET           BIT(1)
+#define CYW43455_BCME_UNSUPPORTED        (-23)
+#define CYW43455_C_GET_VERSION           1
+#define CYW43455_C_GET_REVINFO           98
+#define CYW43455_C_GET_BANDLIST          140
+#define CYW43455_C_GET_VAR               262
+#define CYW43455_C_SET_VAR               263
+#define CYW43455_D11AC_IOTYPE            2
+#define CYW43455_WLC_BAND_2G             2
+#define CYW43455_CHANSPEC_2G_CH1_20MHZ   0x1001
+#define CYW43455_F2_FRAME_MAX            (16 * KiB)
+
 typedef struct CYW43455CoreInfo {
     uint16_t id;
     uint8_t revision;
@@ -338,7 +365,286 @@ struct CYW43455SDIOState {
     uint32_t wrapper_ioctl[ARRAY_SIZE(cyw43455_sdio_cores)];
     uint32_t wrapper_reset[ARRAY_SIZE(cyw43455_sdio_cores)];
     uint32_t armcr4_bankidx;
+    uint32_t sdio_intstatus;
+    uint32_t sdio_hostintmask;
+    uint32_t sdio_tosbmailbox;
+    uint32_t sdio_tohostmailbox;
+    uint32_t sdio_tosbmailboxdata;
+    uint32_t sdio_tohostmailboxdata;
+    uint8_t f2_tx_frame[CYW43455_F2_FRAME_MAX];
+    uint8_t f2_rx_frame[CYW43455_F2_FRAME_MAX];
+    uint32_t f2_tx_len;
+    uint32_t f2_rx_len;
+    uint32_t f2_rx_pos;
+    uint8_t f2_rx_seq;
 };
+
+static SDBus *cyw43455_sdio_bus(CYW43455SDIOState *s)
+{
+    BusState *bus = qdev_get_parent_bus(DEVICE(s));
+
+    return bus ? SD_BUS(bus) : NULL;
+}
+
+static bool cyw43455_sdio_card_irq_level(CYW43455SDIOState *s)
+{
+    uint8_t enabled = s->regs[0][SDIO_CCCR_INT_ENABLE];
+    uint8_t pending = s->regs[0][SDIO_CCCR_INT_PENDING];
+
+    return (enabled & BIT(0)) && (enabled & pending & ~BIT(0));
+}
+
+static void cyw43455_sdio_update_irq(CYW43455SDIOState *s)
+{
+    SDBus *bus;
+    bool pending;
+
+    pending = s->sdio_intstatus & s->sdio_hostintmask;
+    s->regs[0][SDIO_CCCR_INT_PENDING] = pending ? BIT(1) : 0;
+
+    bus = cyw43455_sdio_bus(s);
+    if (bus) {
+        sdbus_set_card_irq(bus, cyw43455_sdio_card_irq_level(s));
+    }
+}
+
+static bool cyw43455_sdio_iovar_name(const uint8_t *payload,
+                                     uint32_t payload_len,
+                                     char *name, size_t name_size)
+{
+    const uint8_t *terminator;
+    size_t name_len;
+
+    terminator = memchr(payload, '\0', payload_len);
+    if (!terminator) {
+        return false;
+    }
+
+    name_len = terminator - payload;
+    if (!name_len || name_len >= name_size) {
+        return false;
+    }
+
+    memcpy(name, payload, name_len);
+    name[name_len] = '\0';
+    return true;
+}
+
+static void cyw43455_sdio_store_u32(uint8_t *output, uint32_t output_len,
+                                    uint32_t offset, uint32_t value)
+{
+    if (offset <= output_len && output_len - offset >= sizeof(value)) {
+        stl_le_p(output + offset, value);
+    }
+}
+
+static void cyw43455_sdio_store_string(uint8_t *output, uint32_t output_len,
+                                       const char *value)
+{
+    size_t length = MIN(strlen(value) + 1, output_len);
+
+    memcpy(output, value, length);
+}
+
+static bool cyw43455_sdio_supported_set_iovar(const char *name)
+{
+    static const char *const supported[] = {
+        "bus:txglomalign",
+        "bus:rxglom",
+        "clmload",
+        "cur_etheraddr",
+        "mpc",
+        "join_pref",
+        "event_msgs",
+        "event_msgs_ext",
+        "bcn_timeout",
+        "roam_off",
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(supported); i++) {
+        if (!strcmp(name, supported[i])) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static int32_t cyw43455_sdio_control_reply(uint32_t command, bool set,
+                                           const uint8_t *input,
+                                           uint32_t input_len,
+                                           uint8_t *output,
+                                           uint32_t output_len,
+                                           char *iovar,
+                                           size_t iovar_size)
+{
+    static const uint8_t mac_address[] = { 0x02, 0, 0, 0, 0, 1 };
+
+    if (command == CYW43455_C_GET_VAR || command == CYW43455_C_SET_VAR) {
+        if (!cyw43455_sdio_iovar_name(input, input_len,
+                                      iovar, iovar_size)) {
+            return CYW43455_BCME_UNSUPPORTED;
+        }
+    }
+
+    if (set) {
+        if (command != CYW43455_C_SET_VAR) {
+            return 0;
+        }
+        return cyw43455_sdio_supported_set_iovar(iovar) ?
+               0 : CYW43455_BCME_UNSUPPORTED;
+    }
+
+    switch (command) {
+    case CYW43455_C_GET_VERSION:
+        cyw43455_sdio_store_u32(output, output_len, 0,
+                                CYW43455_D11AC_IOTYPE);
+        return 0;
+    case CYW43455_C_GET_REVINFO:
+        /* Layout matches the 17 little-endian words in brcmf_rev_info_le. */
+        cyw43455_sdio_store_u32(output, output_len, 0, 0x14e4);
+        cyw43455_sdio_store_u32(output, output_len, 4,
+                                CYW43455_SDIO_DEVICE_ID);
+        cyw43455_sdio_store_u32(output, output_len, 12, 9);
+        cyw43455_sdio_store_u32(output, output_len, 44, 4345);
+        return 0;
+    case CYW43455_C_GET_BANDLIST:
+        cyw43455_sdio_store_u32(output, output_len, 0, 1);
+        cyw43455_sdio_store_u32(output, output_len, 4,
+                                CYW43455_WLC_BAND_2G);
+        return 0;
+    case CYW43455_C_GET_VAR:
+        if (!strcmp(iovar, "cur_etheraddr")) {
+            memcpy(output, mac_address, MIN(sizeof(mac_address), output_len));
+        } else if (!strcmp(iovar, "ver")) {
+            cyw43455_sdio_store_string(output, output_len,
+                                       "QEMU CYW43455 synthetic 1.0\n");
+        } else if (!strcmp(iovar, "clmver")) {
+            cyw43455_sdio_store_string(output, output_len,
+                                       "QEMU synthetic CLM 1.0\n");
+        } else if (!strcmp(iovar, "cap") ||
+                   !strcmp(iovar, "event_msgs") ||
+                   !strcmp(iovar, "clmload_status") ||
+                   !strcmp(iovar, "per_chan_info")) {
+            /* The zero-filled response is the intentionally empty value. */
+        } else if (!strcmp(iovar, "nmode") ||
+                   !strcmp(iovar, "vhtmode") ||
+                   !strcmp(iovar, "mimo_bw_cap")) {
+            cyw43455_sdio_store_u32(output, output_len, 0, 0);
+        } else if (!strcmp(iovar, "rxchain")) {
+            cyw43455_sdio_store_u32(output, output_len, 0, 1);
+        } else if (!strcmp(iovar, "chanspec")) {
+            cyw43455_sdio_store_u32(output, output_len, 0,
+                                    CYW43455_CHANSPEC_2G_CH1_20MHZ);
+        } else if (!strcmp(iovar, "chanspecs")) {
+            cyw43455_sdio_store_u32(output, output_len, 0, 1);
+            cyw43455_sdio_store_u32(output, output_len, 4,
+                                    CYW43455_CHANSPEC_2G_CH1_20MHZ);
+        } else {
+            return CYW43455_BCME_UNSUPPORTED;
+        }
+        return 0;
+    default:
+        return CYW43455_BCME_UNSUPPORTED;
+    }
+}
+
+static void cyw43455_sdio_build_control_response(CYW43455SDIOState *s)
+{
+    const uint8_t *request = s->f2_tx_frame;
+    uint8_t *response = s->f2_rx_frame;
+    uint16_t request_len;
+    uint16_t request_checksum;
+    uint8_t data_offset;
+    uint8_t channel;
+    uint8_t software_offset;
+    uint32_t command;
+    uint32_t data_len;
+    uint32_t flags;
+    uint32_t payload_len;
+    uint32_t response_len;
+    int32_t status;
+    bool set;
+    char iovar[64] = { };
+
+    if (s->f2_tx_len < CYW43455_SDPCM_HEADER_LEN +
+                       CYW43455_BCDC_HEADER_LEN) {
+        return;
+    }
+
+    request_len = lduw_le_p(request);
+    request_checksum = lduw_le_p(request + 2);
+    if ((uint16_t)~request_len != request_checksum ||
+        request_len > s->f2_tx_len) {
+        return;
+    }
+
+    software_offset = 4;
+    channel = request[software_offset + 1] & 0xf;
+    data_offset = request[software_offset + 3];
+    if ((data_offset < software_offset + 8 ||
+         data_offset > request_len) &&
+        request_len >= CYW43455_SDPCM_HEADER_LEN + 8 +
+                       CYW43455_BCDC_HEADER_LEN) {
+        /* Transmit glomming inserts an eight-byte hardware extension. */
+        software_offset += 8;
+        channel = request[software_offset + 1] & 0xf;
+        data_offset = request[software_offset + 3];
+    }
+    trace_cyw43455_sdio_frame(request_len, request[software_offset],
+                              channel, data_offset);
+    if (channel != CYW43455_SDPCM_CONTROL_CHANNEL ||
+        data_offset < software_offset + 8 ||
+        data_offset > request_len - CYW43455_BCDC_HEADER_LEN) {
+        return;
+    }
+
+    command = ldl_le_p(request + data_offset);
+    data_len = ldl_le_p(request + data_offset + 4);
+    flags = ldl_le_p(request + data_offset + 8);
+    set = flags & CYW43455_BCDC_DCMD_SET;
+    payload_len = MIN(data_len, request_len - data_offset -
+                                CYW43455_BCDC_HEADER_LEN);
+    response_len = CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_HEADER_LEN +
+                   payload_len;
+    if (response_len > CYW43455_F2_FRAME_MAX) {
+        return;
+    }
+
+    memset(response, 0, QEMU_ALIGN_UP(response_len, 4));
+    stw_le_p(response, response_len);
+    stw_le_p(response + 2, (uint16_t)~response_len);
+    response[4] = s->f2_rx_seq++;
+    response[5] = CYW43455_SDPCM_CONTROL_CHANNEL;
+    response[7] = CYW43455_SDPCM_HEADER_LEN;
+    /* Keep a small, monotonically advancing host transmit window open. */
+    response[9] = request[software_offset] + 8;
+
+    stl_le_p(response + CYW43455_SDPCM_HEADER_LEN, command);
+    stl_le_p(response + CYW43455_SDPCM_HEADER_LEN + 4, data_len);
+    status = cyw43455_sdio_control_reply(
+        command, set,
+        request + data_offset + CYW43455_BCDC_HEADER_LEN, payload_len,
+        response + CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_HEADER_LEN,
+        payload_len, iovar, sizeof(iovar));
+    if (status < 0) {
+        flags |= CYW43455_BCDC_DCMD_ERROR;
+    }
+    stl_le_p(response + CYW43455_SDPCM_HEADER_LEN + 8, flags);
+    stl_le_p(response + CYW43455_SDPCM_HEADER_LEN + 12, status);
+
+    s->f2_rx_len = QEMU_ALIGN_UP(response_len, 4);
+    s->f2_rx_pos = 0;
+    s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
+    trace_cyw43455_sdio_control(command, set,
+                                extract32(flags, 16, 16), data_len);
+    if (iovar[0]) {
+        trace_cyw43455_sdio_iovar(iovar, set,
+                                  extract32(flags, 16, 16), status);
+    }
+    cyw43455_sdio_update_irq(s);
+}
 
 static uint32_t cyw43455_sdio_backplane_window(CYW43455SDIOState *s)
 {
@@ -385,6 +691,7 @@ static uint32_t cyw43455_sdio_backplane_readl(CYW43455SDIOState *s,
                                                uint32_t address)
 {
     unsigned int i;
+    uint32_t sdio_offset;
 
     address &= ~3U;
     if (address == CYW43455_ENUM_BASE) {
@@ -422,6 +729,25 @@ static uint32_t cyw43455_sdio_backplane_readl(CYW43455SDIOState *s,
                0x1f : 0x0f;
     }
 
+    sdio_offset = address -
+                  cyw43455_sdio_cores[CYW43455_SDIO_CORE_INDEX].base;
+    switch (sdio_offset) {
+    case CYW43455_SDIO_INTSTATUS:
+        return s->sdio_intstatus;
+    case CYW43455_SDIO_HOSTINTMASK:
+        return s->sdio_hostintmask;
+    case CYW43455_SDIO_TOSBMAILBOX:
+        return s->sdio_tosbmailbox;
+    case CYW43455_SDIO_TOHOSTMAILBOX:
+        return s->sdio_tohostmailbox;
+    case CYW43455_SDIO_TOSBMAILBOXDATA:
+        return s->sdio_tosbmailboxdata;
+    case CYW43455_SDIO_TOHOSTMAILBOXDATA:
+        return s->sdio_tohostmailboxdata;
+    default:
+        break;
+    }
+
     return 0;
 }
 
@@ -429,6 +755,7 @@ static void cyw43455_sdio_backplane_writel(CYW43455SDIOState *s,
                                             uint32_t address, uint32_t value)
 {
     unsigned int i;
+    uint32_t sdio_offset;
 
     address &= ~3U;
     for (i = 0; i < ARRAY_SIZE(cyw43455_sdio_cores); i++) {
@@ -446,6 +773,34 @@ static void cyw43455_sdio_backplane_writel(CYW43455SDIOState *s,
 
     if (address == cyw43455_sdio_cores[2].base + CYW43455_ARMCR4_BANKIDX) {
         s->armcr4_bankidx = value;
+        return;
+    }
+
+    sdio_offset = address -
+                  cyw43455_sdio_cores[CYW43455_SDIO_CORE_INDEX].base;
+    switch (sdio_offset) {
+    case CYW43455_SDIO_INTSTATUS:
+        s->sdio_intstatus &= ~value;
+        cyw43455_sdio_update_irq(s);
+        break;
+    case CYW43455_SDIO_HOSTINTMASK:
+        s->sdio_hostintmask = value;
+        cyw43455_sdio_update_irq(s);
+        break;
+    case CYW43455_SDIO_TOSBMAILBOX:
+        s->sdio_tosbmailbox = value;
+        break;
+    case CYW43455_SDIO_TOHOSTMAILBOX:
+        s->sdio_tohostmailbox = value;
+        break;
+    case CYW43455_SDIO_TOSBMAILBOXDATA:
+        s->sdio_tosbmailboxdata = value;
+        break;
+    case CYW43455_SDIO_TOHOSTMAILBOXDATA:
+        s->sdio_tohostmailboxdata = value;
+        break;
+    default:
+        break;
     }
 }
 
@@ -462,6 +817,14 @@ static void cyw43455_sdio_backplane_writeb(CYW43455SDIOState *s,
     uint32_t word_address = address & ~3U;
     unsigned int shift = (address & 3) * 8;
     uint32_t word = cyw43455_sdio_backplane_readl(s, word_address);
+
+    if (word_address ==
+        cyw43455_sdio_cores[CYW43455_SDIO_CORE_INDEX].base +
+        CYW43455_SDIO_INTSTATUS) {
+        s->sdio_intstatus &= ~((uint32_t)value << shift);
+        cyw43455_sdio_update_irq(s);
+        return;
+    }
 
     word &= ~(0xffU << shift);
     word |= (uint32_t)value << shift;
@@ -564,6 +927,18 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     memset(s->wrapper_ioctl, 0, sizeof(s->wrapper_ioctl));
     memset(s->wrapper_reset, 0, sizeof(s->wrapper_reset));
     s->armcr4_bankidx = 0;
+    s->sdio_intstatus = 0;
+    s->sdio_hostintmask = 0;
+    s->sdio_tosbmailbox = 0;
+    s->sdio_tohostmailbox = 0;
+    s->sdio_tosbmailboxdata = 0;
+    s->sdio_tohostmailboxdata = 0;
+    memset(s->f2_tx_frame, 0, sizeof(s->f2_tx_frame));
+    memset(s->f2_rx_frame, 0, sizeof(s->f2_rx_frame));
+    s->f2_tx_len = 0;
+    s->f2_rx_len = 0;
+    s->f2_rx_pos = 0;
+    s->f2_rx_seq = 0;
     s->transfer_addr = 0;
     s->transfer_remaining = 0;
     s->transfer_func = 0;
@@ -572,6 +947,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->selected = false;
     sd->dat_lines = 0xf;
     sd->cmd_line = true;
+    cyw43455_sdio_update_irq(s);
 }
 
 static uint8_t cyw43455_sdio_read_reg(CYW43455SDIOState *s,
@@ -632,6 +1008,7 @@ static void cyw43455_sdio_write_reg(CYW43455SDIOState *s,
         break;
     case SDIO_CCCR_INT_ENABLE:
         regs[address] = value & CYW43455_SDIO_INT_MASK;
+        cyw43455_sdio_update_irq(s);
         break;
     case SDIO_CCCR_INT_PENDING:
         break;
@@ -747,6 +1124,9 @@ static size_t cyw43455_sdio_do_command(SDState *sd, SDRequest *request,
             s->transfer_remaining = count;
             s->transfer_write = argument & SDIO_CMD53_WRITE;
             s->transfer_increment = argument & SDIO_CMD53_INCREMENT;
+            if (function == 2 && s->transfer_write) {
+                s->f2_tx_len = 0;
+            }
         }
         return cyw43455_sdio_response(response, response_size, status);
     default:
@@ -763,8 +1143,14 @@ static size_t cyw43455_sdio_read_data(SDState *sd, void *buffer, size_t length)
 
     for (i = 0; i < length; i++) {
         if (!s->transfer_write && s->transfer_remaining) {
-            data[i] = cyw43455_sdio_read_reg(s, s->transfer_func,
-                                             s->transfer_addr);
+            if (s->transfer_func == 2 && s->f2_rx_len) {
+                data[i] = s->f2_rx_pos < s->f2_rx_len ?
+                          s->f2_rx_frame[s->f2_rx_pos] : 0;
+                s->f2_rx_pos++;
+            } else {
+                data[i] = cyw43455_sdio_read_reg(s, s->transfer_func,
+                                                 s->transfer_addr);
+            }
             s->transfer_remaining--;
             if (s->transfer_increment &&
                 s->transfer_addr + 1 < CYW43455_SDIO_ADDR_SPACE_SIZE) {
@@ -786,12 +1172,19 @@ static size_t cyw43455_sdio_write_data(SDState *sd, const void *buffer,
 
     for (i = 0; i < length; i++) {
         if (s->transfer_write && s->transfer_remaining) {
+            if (s->transfer_func == 2 &&
+                s->f2_tx_len < sizeof(s->f2_tx_frame)) {
+                s->f2_tx_frame[s->f2_tx_len++] = data[i];
+            }
             cyw43455_sdio_write_reg(s, s->transfer_func,
                                     s->transfer_addr, data[i]);
             s->transfer_remaining--;
             if (s->transfer_increment &&
                 s->transfer_addr + 1 < CYW43455_SDIO_ADDR_SPACE_SIZE) {
                 s->transfer_addr++;
+            }
+            if (s->transfer_func == 2 && !s->transfer_remaining) {
+                cyw43455_sdio_build_control_response(s);
             }
         }
     }
@@ -824,7 +1217,10 @@ static bool cyw43455_sdio_get_readonly(SDState *sd)
 
 static uint8_t cyw43455_sdio_get_dat_lines(SDState *sd)
 {
-    return 0xf;
+    CYW43455SDIOState *s = CYW43455_SDIO(sd);
+
+    /* In-band SDIO interrupts pull DAT1 low. */
+    return cyw43455_sdio_card_irq_level(s) ? 0xd : 0xf;
 }
 
 static bool cyw43455_sdio_get_cmd_line(SDState *sd)
@@ -860,14 +1256,24 @@ static void cyw43455_sdio_unrealize(DeviceState *device)
     BusState *bus = qdev_get_parent_bus(device);
 
     if (bus != NULL) {
+        sdbus_set_card_irq(SD_BUS(bus), false);
         sdbus_set_inserted(SD_BUS(bus), false);
     }
 }
 
+static int cyw43455_sdio_post_load(void *opaque, int version_id)
+{
+    CYW43455SDIOState *s = opaque;
+
+    cyw43455_sdio_update_irq(s);
+    return 0;
+}
+
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
+    .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_2DARRAY(regs, CYW43455SDIOState,
                              CYW43455_SDIO_NUM_FUNCS + 1,
@@ -883,6 +1289,20 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT32_ARRAY_V(wrapper_reset, CYW43455SDIOState,
                                ARRAY_SIZE(cyw43455_sdio_cores), 2),
         VMSTATE_UINT32_V(armcr4_bankidx, CYW43455SDIOState, 2),
+        VMSTATE_UINT32_V(sdio_intstatus, CYW43455SDIOState, 3),
+        VMSTATE_UINT32_V(sdio_hostintmask, CYW43455SDIOState, 3),
+        VMSTATE_UINT32_V(sdio_tosbmailbox, CYW43455SDIOState, 3),
+        VMSTATE_UINT32_V(sdio_tohostmailbox, CYW43455SDIOState, 3),
+        VMSTATE_UINT32_V(sdio_tosbmailboxdata, CYW43455SDIOState, 3),
+        VMSTATE_UINT32_V(sdio_tohostmailboxdata, CYW43455SDIOState, 3),
+        VMSTATE_UINT8_ARRAY_V(f2_tx_frame, CYW43455SDIOState,
+                              CYW43455_F2_FRAME_MAX, 3),
+        VMSTATE_UINT8_ARRAY_V(f2_rx_frame, CYW43455SDIOState,
+                              CYW43455_F2_FRAME_MAX, 3),
+        VMSTATE_UINT32_V(f2_tx_len, CYW43455SDIOState, 3),
+        VMSTATE_UINT32_V(f2_rx_len, CYW43455SDIOState, 3),
+        VMSTATE_UINT32_V(f2_rx_pos, CYW43455SDIOState, 3),
+        VMSTATE_UINT8_V(f2_rx_seq, CYW43455SDIOState, 3),
         VMSTATE_END_OF_LIST()
     },
 };

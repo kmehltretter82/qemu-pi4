@@ -58,7 +58,8 @@ Implemented devices
  * Frame Buffer
  * Arasan eMMC2 SD/MMC host controller and external SD card
  * Opt-in experimental CYW43455-compatible two-function SDIO endpoint on the
-   non-removable eMMC1 bus, with standard enumeration and register transport
+   non-removable eMMC1 bus, with standard enumeration, register transport,
+   a bounded synthetic control responder and SDIO card interrupts
  * USB2 host controller (DWC2 and MPHI)
  * Broadcom GENET v5 Gigabit Ethernet controller with an external
    BCM54213PE-compatible PHY
@@ -98,9 +99,9 @@ Missing devices
  * Physical BCM2711 PCIe power-management and link-training event behavior
  * AUX SPI DMA, fixed-width or LSB-first framing, clock timing, GPIO pin-mux
    and native chip-select wiring
- * CYW43455 backplane cores, firmware processor, SDPCM/BDC transport and radio
-   behavior; the opt-in SDIO endpoint described below stops at the transport
-   boundary
+ * CYW43455 firmware execution, inbound data, network backend and radio
+   behavior; the opt-in SDIO endpoint described below supplies only a curated
+   driver-testing profile
 
 Booting Linux from an SD image
 ------------------------------
@@ -153,23 +154,37 @@ Clock requests complete immediately.  Function-one backplane windows expose
 the Pi 400's observed BCM4345/9 chip signature, a synthetic five-core AI EROM,
 core-wrapper reset registers and synthetic CR4 TCM-bank geometry.  This
 discovery shim is sufficient for ``brcmfmac`` to select the Pi 400 firmware
-and reach its first firmware control transaction.
+and reach its firmware control transactions.  Rather than execute the
+uploaded image, a bounded synthetic SDPCM/BDC responder recognizes the
+commands and iovars needed by the current Linux probe.  It returns a fixed
+BCM4345/9, single-band profile and raises a level SDIO card interrupt for each
+response.  Control queues, interrupt state and pending response data migrate
+with the machine.
+
+With matching Pi 400 firmware files, this curated profile lets ``brcmfmac``
+finish attach, register ``phy0`` and ``wlan0``, and place ``wlan0``
+administratively up.  Function-two outbound SDPCM frames are consumed and
+trace events decode their sequence, channel and data offset.  This is enough
+to exercise and distinguish control-channel and netpoll data-channel traffic
+through the real guest driver.
 
 The model does **not** implement firmware RAM, the firmware processor,
-SDPCM/BDC control or data responses, interrupt production or an 802.11 radio.
-Unknown backplane reads return zero and writes are ignored.  Consequently,
-the apparent firmware download is not firmware execution: the first control
-transaction times out, no ``wlan0`` is created, and the endpoint cannot yet
-validate a netpoll transmit path.  The synthetic EROM and RAM geometry must
-also be compared with real Pi 400 transactions before they can be treated as
-hardware-faithful.
+inbound frames, a QEMU network backend, association or an 802.11 radio.
+Unknown backplane reads return zero and writes are ignored.  The guest
+interface consequently remains ``NO-CARRIER`` and no packet can reach an
+external UDP receiver.  The responder is test scaffolding, not a claim that
+the uploaded firmware ran or that the modeled profile is hardware-faithful.
+The synthetic EROM, RAM geometry, control values and interrupt behavior must
+still be compared with real Pi 400 transactions.
 
 ``scripts/pi4/cyw43455-sdio-init.sh`` is a focused initramfs probe for this
-boundary.  Install it as ``/init`` alongside a static BusyBox and the
+endpoint.  Install it as ``/init`` alongside a static BusyBox and the
 ``rfkill``, ``cfg80211``, ``brcmutil``, ``brcmfmac`` and ``brcmfmac-cyw``
 modules; it reports the enumerated IDs, module probe result, network devices
 and final kernel log.  A matching firmware binary, NVRAM file and optional
-CLM blob are also required to reach the firmware-control timeout.
+CLM blob are required for the full attach.  The separate local netpoll rig
+configures dynamic netconsole, emits a marker and records outbound channel-2
+frames, but external packet delivery remains outside this model's scope.
 
 Attaching USB storage
 ---------------------
