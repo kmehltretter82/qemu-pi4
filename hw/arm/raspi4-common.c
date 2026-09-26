@@ -23,6 +23,7 @@
 #include "qemu/error-report.h"
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
+#include "net/net.h"
 #include "qom/object.h"
 
 #define SMPBOOT_ADDR    0x300
@@ -143,6 +144,7 @@ void raspi4_common_machine_init(MachineState *machine, BCM2838State *soc)
             exit(1);
         }
         carddev = qdev_new(TYPE_CYW43455_SDIO);
+        qemu_configure_nic_device(carddev, false, NULL);
         qdev_realize_and_unref(carddev, bus, &error_fatal);
     }
 

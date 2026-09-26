@@ -50,6 +50,8 @@
 #include "qemu/log.h"
 #include "qemu/guest-random.h"
 #include "qemu/module.h"
+#include "net/eth.h"
+#include "net/net.h"
 #include "sdmmc-internal.h"
 #include "trace.h"
 #include "crypto/hmac.h"
@@ -319,7 +321,9 @@ struct SDState {
 
 #define CYW43455_SDPCM_HEADER_LEN        12
 #define CYW43455_SDPCM_CONTROL_CHANNEL   0
+#define CYW43455_SDPCM_DATA_CHANNEL      2
 #define CYW43455_BCDC_HEADER_LEN         16
+#define CYW43455_BCDC_DATA_HEADER_LEN    4
 #define CYW43455_BCDC_DCMD_ERROR         BIT(0)
 #define CYW43455_BCDC_DCMD_SET           BIT(1)
 #define CYW43455_BCME_UNSUPPORTED        (-23)
@@ -349,11 +353,17 @@ static const CYW43455CoreInfo cyw43455_sdio_cores[] = {
     { 0x829, 21, 0x18004000, 0x18104000 }, /* SDIO device */
 };
 
+static const uint8_t cyw43455_sdio_default_mac[ETH_ALEN] = {
+    0x02, 0, 0, 0, 0, 1,
+};
+
 OBJECT_DECLARE_SIMPLE_TYPE(CYW43455SDIOState, CYW43455_SDIO)
 
 struct CYW43455SDIOState {
     SDState parent_obj;
 
+    NICConf conf;
+    NICState *nic;
     uint8_t regs[CYW43455_SDIO_NUM_FUNCS + 1]
                 [CYW43455_SDIO_ADDR_SPACE_SIZE];
     uint32_t transfer_addr;
@@ -471,7 +481,8 @@ static bool cyw43455_sdio_supported_set_iovar(const char *name)
     return false;
 }
 
-static int32_t cyw43455_sdio_control_reply(uint32_t command, bool set,
+static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
+                                           uint32_t command, bool set,
                                            const uint8_t *input,
                                            uint32_t input_len,
                                            uint8_t *output,
@@ -479,8 +490,6 @@ static int32_t cyw43455_sdio_control_reply(uint32_t command, bool set,
                                            char *iovar,
                                            size_t iovar_size)
 {
-    static const uint8_t mac_address[] = { 0x02, 0, 0, 0, 0, 1 };
-
     if (command == CYW43455_C_GET_VAR || command == CYW43455_C_SET_VAR) {
         if (!cyw43455_sdio_iovar_name(input, input_len,
                                       iovar, iovar_size)) {
@@ -516,7 +525,8 @@ static int32_t cyw43455_sdio_control_reply(uint32_t command, bool set,
         return 0;
     case CYW43455_C_GET_VAR:
         if (!strcmp(iovar, "cur_etheraddr")) {
-            memcpy(output, mac_address, MIN(sizeof(mac_address), output_len));
+            memcpy(output, s->conf.macaddr.a,
+                   MIN(sizeof(s->conf.macaddr.a), output_len));
         } else if (!strcmp(iovar, "ver")) {
             cyw43455_sdio_store_string(output, output_len,
                                        "QEMU CYW43455 synthetic 1.0\n");
@@ -550,7 +560,78 @@ static int32_t cyw43455_sdio_control_reply(uint32_t command, bool set,
     }
 }
 
-static void cyw43455_sdio_build_control_response(CYW43455SDIOState *s)
+static void cyw43455_sdio_forward_data(CYW43455SDIOState *s,
+                                       const uint8_t *request,
+                                       uint32_t request_len,
+                                       uint8_t software_offset,
+                                       uint8_t data_offset)
+{
+    const struct eth_header *eth;
+    const struct ip_header *ip;
+    const struct udp_header *udp;
+    const uint8_t *packet;
+    uint32_t ethernet_offset;
+    uint32_t ethernet_len;
+    uint32_t frame_len = request_len;
+    uint32_t ip_header_len;
+    uint32_t signal_len;
+    uint16_t ethertype;
+    uint16_t source_port = 0;
+    uint16_t destination_port = 0;
+    uint8_t ip_protocol = 0;
+
+    if (software_offset > 4) {
+        /* The extension length excludes only the four-byte frame tag. */
+        frame_len = lduw_le_p(request + 4) + 4;
+        if (frame_len > request_len || frame_len < software_offset + 8) {
+            return;
+        }
+    }
+    if (data_offset > frame_len ||
+        frame_len - data_offset < CYW43455_BCDC_DATA_HEADER_LEN) {
+        return;
+    }
+
+    signal_len = request[data_offset + 3] * sizeof(uint32_t);
+    if (signal_len > frame_len - data_offset -
+                     CYW43455_BCDC_DATA_HEADER_LEN) {
+        return;
+    }
+    ethernet_offset = data_offset + CYW43455_BCDC_DATA_HEADER_LEN +
+                      signal_len;
+    ethernet_len = frame_len - ethernet_offset;
+    if (ethernet_len < ETH_HLEN) {
+        return;
+    }
+
+    packet = request + ethernet_offset;
+    eth = (const struct eth_header *)packet;
+    ethertype = be16_to_cpu(eth->h_proto);
+    if (ethertype == ETH_P_IP &&
+        ethernet_len >= ETH_HLEN + sizeof(struct ip_header)) {
+        ip = (const struct ip_header *)(packet + ETH_HLEN);
+        ip_header_len = (ip->ip_ver_len & 0xf) * sizeof(uint32_t);
+        if ((ip->ip_ver_len >> 4) == 4 &&
+            ip_header_len >= sizeof(struct ip_header) &&
+            ethernet_len >= ETH_HLEN + ip_header_len) {
+            ip_protocol = ip->ip_p;
+            if (ip_protocol == IP_PROTO_UDP &&
+                ethernet_len >= ETH_HLEN + ip_header_len +
+                                sizeof(struct udp_header)) {
+                udp = (const struct udp_header *)(packet + ETH_HLEN +
+                                                  ip_header_len);
+                source_port = be16_to_cpu(udp->uh_sport);
+                destination_port = be16_to_cpu(udp->uh_dport);
+            }
+        }
+    }
+
+    trace_cyw43455_sdio_data(ethernet_len, ethertype, ip_protocol,
+                             source_port, destination_port);
+    qemu_send_packet(qemu_get_queue(s->nic), packet, ethernet_len);
+}
+
+static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
 {
     const uint8_t *request = s->f2_tx_frame;
     uint8_t *response = s->f2_rx_frame;
@@ -594,6 +675,11 @@ static void cyw43455_sdio_build_control_response(CYW43455SDIOState *s)
     }
     trace_cyw43455_sdio_frame(request_len, request[software_offset],
                               channel, data_offset);
+    if (channel == CYW43455_SDPCM_DATA_CHANNEL) {
+        cyw43455_sdio_forward_data(s, request, request_len,
+                                   software_offset, data_offset);
+        return;
+    }
     if (channel != CYW43455_SDPCM_CONTROL_CHANNEL ||
         data_offset < software_offset + 8 ||
         data_offset > request_len - CYW43455_BCDC_HEADER_LEN) {
@@ -624,7 +710,7 @@ static void cyw43455_sdio_build_control_response(CYW43455SDIOState *s)
     stl_le_p(response + CYW43455_SDPCM_HEADER_LEN, command);
     stl_le_p(response + CYW43455_SDPCM_HEADER_LEN + 4, data_len);
     status = cyw43455_sdio_control_reply(
-        command, set,
+        s, command, set,
         request + data_offset + CYW43455_BCDC_HEADER_LEN, payload_len,
         response + CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_HEADER_LEN,
         payload_len, iovar, sizeof(iovar));
@@ -1184,7 +1270,7 @@ static size_t cyw43455_sdio_write_data(SDState *sd, const void *buffer,
                 s->transfer_addr++;
             }
             if (s->transfer_func == 2 && !s->transfer_remaining) {
-                cyw43455_sdio_build_control_response(s);
+                cyw43455_sdio_process_tx_frame(s);
             }
         }
     }
@@ -1237,14 +1323,39 @@ static void cyw43455_sdio_reset(DeviceState *device)
     cyw43455_sdio_reset_state(CYW43455_SDIO(device));
 }
 
+static ssize_t cyw43455_sdio_receive(NetClientState *nc,
+                                     const uint8_t *buffer, size_t size)
+{
+    trace_cyw43455_sdio_rx_dropped((uint32_t)size);
+    return size;
+}
+
+static NetClientInfo cyw43455_sdio_net_info = {
+    .type = NET_CLIENT_DRIVER_NIC,
+    .size = sizeof(NICState),
+    .receive = cyw43455_sdio_receive,
+};
+
 static void cyw43455_sdio_realize(DeviceState *device, Error **errp)
 {
+    static const MACAddr zero_mac;
+    CYW43455SDIOState *s = CYW43455_SDIO(device);
     BusState *bus = qdev_get_parent_bus(device);
 
     if (bus == NULL || !object_dynamic_cast(OBJECT(bus), TYPE_SD_BUS)) {
         error_setg(errp, "CYW43455 SDIO endpoint requires an SD bus");
         return;
     }
+
+    if (!memcmp(&s->conf.macaddr, &zero_mac, sizeof(zero_mac))) {
+        memcpy(s->conf.macaddr.a, cyw43455_sdio_default_mac,
+               sizeof(s->conf.macaddr.a));
+    }
+    qemu_macaddr_default_if_unset(&s->conf.macaddr);
+    s->nic = qemu_new_nic(&cyw43455_sdio_net_info, &s->conf,
+                          object_get_typename(OBJECT(device)), device->id,
+                          &device->mem_reentrancy_guard, s);
+    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
 
     cyw43455_sdio_reset(device);
     sdbus_set_inserted(SD_BUS(bus), true);
@@ -1253,12 +1364,15 @@ static void cyw43455_sdio_realize(DeviceState *device, Error **errp)
 
 static void cyw43455_sdio_unrealize(DeviceState *device)
 {
+    CYW43455SDIOState *s = CYW43455_SDIO(device);
     BusState *bus = qdev_get_parent_bus(device);
 
     if (bus != NULL) {
         sdbus_set_card_irq(SD_BUS(bus), false);
         sdbus_set_inserted(SD_BUS(bus), false);
     }
+    qemu_del_nic(s->nic);
+    s->nic = NULL;
 }
 
 static int cyw43455_sdio_post_load(void *opaque, int version_id)
@@ -1266,12 +1380,13 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     CYW43455SDIOState *s = opaque;
 
     cyw43455_sdio_update_irq(s);
+    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
     return 0;
 }
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -1303,6 +1418,7 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT32_V(f2_rx_len, CYW43455SDIOState, 3),
         VMSTATE_UINT32_V(f2_rx_pos, CYW43455SDIOState, 3),
         VMSTATE_UINT8_V(f2_rx_seq, CYW43455SDIOState, 3),
+        VMSTATE_BUFFER_V(conf.macaddr.a, CYW43455SDIOState, 4),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -4355,6 +4471,10 @@ static void sd_class_init(ObjectClass *klass, const void *data)
     sc->proto = &sd_proto_sd;
 }
 
+static const Property cyw43455_sdio_properties[] = {
+    DEFINE_NIC_PROPERTIES(CYW43455SDIOState, conf),
+};
+
 static void cyw43455_sdio_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -4365,6 +4485,8 @@ static void cyw43455_sdio_class_init(ObjectClass *klass, const void *data)
     dc->unrealize = cyw43455_sdio_unrealize;
     dc->vmsd = &cyw43455_sdio_vmstate;
     device_class_set_legacy_reset(dc, cyw43455_sdio_reset);
+    device_class_set_props(dc, cyw43455_sdio_properties);
+    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 
     sc->set_voltage = cyw43455_sdio_set_voltage;
     sc->get_dat_lines = cyw43455_sdio_get_dat_lines;

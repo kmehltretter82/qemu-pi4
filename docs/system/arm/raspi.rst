@@ -59,7 +59,8 @@ Implemented devices
  * Arasan eMMC2 SD/MMC host controller and external SD card
  * Opt-in experimental CYW43455-compatible two-function SDIO endpoint on the
    non-removable eMMC1 bus, with standard enumeration, register transport,
-   a bounded synthetic control responder and SDIO card interrupts
+   a bounded synthetic control responder, SDIO card interrupts and an
+   outbound-only QEMU network backend
  * USB2 host controller (DWC2 and MPHI)
  * Broadcom GENET v5 Gigabit Ethernet controller with an external
    BCM54213PE-compatible PHY
@@ -99,9 +100,9 @@ Missing devices
  * Physical BCM2711 PCIe power-management and link-training event behavior
  * AUX SPI DMA, fixed-width or LSB-first framing, clock timing, GPIO pin-mux
    and native chip-select wiring
- * CYW43455 firmware execution, inbound data, network backend and radio
-   behavior; the opt-in SDIO endpoint described below supplies only a curated
-   driver-testing profile
+ * CYW43455 firmware execution, inbound data, association and radio behavior;
+   the opt-in SDIO endpoint described below supplies only a curated
+   driver-testing profile and an outbound Ethernet bridge
 
 Booting Linux from an SD image
 ------------------------------
@@ -168,14 +169,22 @@ trace events decode their sequence, channel and data offset.  This is enough
 to exercise and distinguish control-channel and netpoll data-channel traffic
 through the real guest driver.
 
+An optional standard QEMU backend can receive the Ethernet payloads from
+outbound SDPCM data frames.  Select this device explicitly because the board
+also contains GENET.  For example, user-mode networking can deliver an
+outbound UDP packet addressed to its ``10.0.2.2`` host gateway::
+
+  -nic user,id=wifi,model=cyw43455-sdio,net=10.0.2.0/24,host=10.0.2.2
+
 The model does **not** implement firmware RAM, the firmware processor,
-inbound frames, a QEMU network backend, association or an 802.11 radio.
-Unknown backplane reads return zero and writes are ignored.  The guest
-interface consequently remains ``NO-CARRIER`` and no packet can reach an
-external UDP receiver.  The responder is test scaffolding, not a claim that
-the uploaded firmware ran or that the modeled profile is hardware-faithful.
-The synthetic EROM, RAM geometry, control values and interrupt behavior must
-still be compared with real Pi 400 transactions.
+inbound frames, association or an 802.11 radio.  Frames arriving from a QEMU
+backend are dropped, and the guest interface remains ``NO-CARRIER`` even
+though statically addressed outbound packets can reach the backend.  Unknown
+backplane reads return zero and writes are ignored.  The responder and
+outbound bridge are test scaffolding, not a claim that the uploaded firmware
+ran or that the modeled profile is hardware-faithful.  The synthetic EROM,
+RAM geometry, control values and interrupt behavior must still be compared
+with real Pi 400 transactions.
 
 ``scripts/pi4/cyw43455-sdio-init.sh`` is a focused initramfs probe for this
 endpoint.  Install it as ``/init`` alongside a static BusyBox and the
@@ -183,8 +192,10 @@ endpoint.  Install it as ``/init`` alongside a static BusyBox and the
 modules; it reports the enumerated IDs, module probe result, network devices
 and final kernel log.  A matching firmware binary, NVRAM file and optional
 CLM blob are required for the full attach.  The separate local netpoll rig
-configures dynamic netconsole, emits a marker and records outbound channel-2
-frames, but external packet delivery remains outside this model's scope.
+configures dynamic netconsole, emits a marker, records outbound channel-2
+frames and can use the outbound backend to validate UDP delivery to a host
+listener.  It still cannot validate Wi-Fi association, receive traffic or
+radio behavior.
 
 Attaching USB storage
 ---------------------

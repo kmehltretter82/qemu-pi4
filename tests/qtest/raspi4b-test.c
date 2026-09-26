@@ -85,7 +85,9 @@
 #define CYW43455_SDIO_HOSTINTMASK  (CYW43455_SDIO_CORE_BASE + 0x24)
 #define CYW43455_SDIO_FRAME_IND    BIT(6)
 #define CYW43455_SDPCM_HEADER_LEN  12
+#define CYW43455_SDPCM_DATA_CHANNEL 2
 #define CYW43455_BCDC_HEADER_LEN   16
+#define CYW43455_BCDC_DATA_HEADER_LEN 4
 #define CYW43455_C_GET_VAR         262
 
 #define PROPERTY_RESPONSE_SUCCESS 0x80000000
@@ -2933,6 +2935,29 @@ static size_t cyw43455_sdio_build_cur_etheraddr_request(uint8_t *frame,
     return frame_len;
 }
 
+static size_t cyw43455_sdio_build_data_request(uint8_t *frame,
+                                               size_t frame_size,
+                                               const uint8_t *packet,
+                                               size_t packet_len)
+{
+    size_t frame_len = CYW43455_SDPCM_HEADER_LEN +
+                       CYW43455_BCDC_DATA_HEADER_LEN + packet_len;
+
+    g_assert_cmpuint(frame_size, >=, frame_len);
+    g_assert_cmpuint(frame_len, <=, UINT16_MAX);
+    memset(frame, 0, frame_len);
+    stw_le_p(frame, frame_len);
+    stw_le_p(frame + 2, (uint16_t)~frame_len);
+    frame[4] = 1;
+    frame[5] = CYW43455_SDPCM_DATA_CHANNEL;
+    frame[7] = CYW43455_SDPCM_HEADER_LEN;
+    frame[CYW43455_SDPCM_HEADER_LEN] = 2 << 4; /* BCDC protocol version. */
+    memcpy(frame + CYW43455_SDPCM_HEADER_LEN +
+                   CYW43455_BCDC_DATA_HEADER_LEN,
+           packet, packet_len);
+    return frame_len;
+}
+
 static void cyw43455_sdio_enable_control_irq_qtest(QTestState *qts)
 {
     uint16_t interrupt_enable;
@@ -3150,6 +3175,71 @@ static void test_cyw43455_sdio_endpoint(void)
 }
 
 #ifndef _WIN32
+static void cyw43455_sdio_recv_all(int socket_fd, void *buffer, size_t size)
+{
+    uint8_t *p = buffer;
+
+    while (size) {
+        GPollFD pollfd = {
+            .fd = socket_fd,
+            .events = G_IO_IN | G_IO_HUP | G_IO_ERR,
+        };
+        ssize_t ret;
+
+        g_assert_cmpint(g_poll(&pollfd, 1, 5000), >, 0);
+        ret = recv(socket_fd, p, size, 0);
+        g_assert_cmpint(ret, >, 0);
+        p += ret;
+        size -= ret;
+    }
+}
+
+static void test_cyw43455_sdio_network_backend(void)
+{
+    static const uint8_t packet[64] = {
+        0x02, 0, 0, 0, 0, 2,
+        0x02, 0, 0, 0, 0, 1,
+        0x08, 0x00,
+        0x45, 0x00, 0x00, 0x32, 0x00, 0x00, 0x40, 0x00,
+        0x40, 0x11, 0x00, 0x00, 0xc0, 0x00, 0x02, 0x02,
+        0xc0, 0x00, 0x02, 0x01, 0x1a, 0x0a, 0x1a, 0x0a,
+        0x00, 0x1e, 0x00, 0x00,
+        'q', 'e', 'm', 'u', '-', 'c', 'y', 'w', '4', '3', '4', '5', '5',
+    };
+    g_autoptr(GString) command = g_string_new(
+        "-machine raspi4b,sdio-wifi=on");
+    QTestState *qts;
+    uint8_t sdpcm_frame[CYW43455_SDPCM_HEADER_LEN +
+                        CYW43455_BCDC_DATA_HEADER_LEN + sizeof(packet)];
+    uint8_t received[sizeof(packet)];
+    uint32_t received_len;
+    size_t sdpcm_len;
+    int net_sockets[2];
+    int ret;
+
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
+    g_assert_cmpint(ret, !=, -1);
+    g_string_append_printf(command,
+                           " -nic socket,fd=%d,model=cyw43455-sdio",
+                           net_sockets[1]);
+    qts = qtest_init(command->str);
+    close(net_sockets[1]);
+
+    cyw43455_sdio_select_qtest(qts);
+    sdpcm_len = cyw43455_sdio_build_data_request(
+        sdpcm_frame, sizeof(sdpcm_frame), packet, sizeof(packet));
+    cyw43455_sdio_function2_write_qtest(qts, sdpcm_frame, sdpcm_len);
+
+    cyw43455_sdio_recv_all(net_sockets[0], &received_len,
+                            sizeof(received_len));
+    g_assert_cmpuint(ntohl(received_len), ==, sizeof(packet));
+    cyw43455_sdio_recv_all(net_sockets[0], received, sizeof(received));
+    g_assert_cmpmem(received, sizeof(received), packet, sizeof(packet));
+
+    qtest_quit(qts);
+    close(net_sockets[0]);
+}
+
 static void test_cyw43455_sdio_migration(void)
 {
     g_autoptr(GError) error = NULL;
@@ -4748,6 +4838,8 @@ int main(int argc, char **argv)
                                test_cyw43455_sdio_endpoint,
                                " -machine sdio-wifi=on");
 #ifndef _WIN32
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_network_backend",
+                     test_cyw43455_sdio_network_backend);
     raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio_migration",
                                test_cyw43455_sdio_migration,
                                " -machine sdio-wifi=on");
