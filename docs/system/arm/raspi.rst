@@ -57,6 +57,8 @@ Implemented devices
    UART's supported RTS control and CTS status bits
  * Frame Buffer
  * Arasan eMMC2 SD/MMC host controller and external SD card
+ * Opt-in experimental CYW43455-compatible two-function SDIO endpoint on the
+   non-removable eMMC1 bus, with standard enumeration and register transport
  * USB2 host controller (DWC2 and MPHI)
  * Broadcom GENET v5 Gigabit Ethernet controller with an external
    BCM54213PE-compatible PHY
@@ -96,6 +98,9 @@ Missing devices
  * Physical BCM2711 PCIe power-management and link-training event behavior
  * AUX SPI DMA, fixed-width or LSB-first framing, clock timing, GPIO pin-mux
    and native chip-select wiring
+ * CYW43455 backplane cores, firmware processor, SDPCM/BDC transport and radio
+   behavior; the opt-in SDIO endpoint described below stops at the transport
+   boundary
 
 Booting Linux from an SD image
 ------------------------------
@@ -126,6 +131,37 @@ For a Pi 400 guest, change the machine and device tree together::
 
 Supplying a Pi 4 Model B DTB to ``raspi400`` (or the reverse) gives the guest
 the wrong board identity and peripherals even though both boards use BCM2711.
+
+Experimental CYW43455 SDIO endpoint
+-----------------------------------
+
+The non-removable eMMC1/SDHCI slot can be populated with an experimental
+CYW43455-compatible endpoint::
+
+  -machine raspi400,sdio-wifi=on
+
+The same option is available on ``raspi4b``.  It is disabled by default so
+that an incomplete wireless model does not change existing guests.  Because
+the virtual endpoint is always powered, enabling it also removes the Wi-Fi
+controller's ``mmc-pwrseq`` reference from the guest DT; the default DT is
+unchanged.  The endpoint reports Broadcom SDIO ID ``02d0:a9bf`` on two
+functions and implements the CMD5, CMD3, CMD7, CMD13, CMD52 and CMD53 paths
+needed for standard Linux SDIO discovery.  Its CCCR, FBR and CIS data describe
+SDIO 2.00, function-ready state and the two function block sizes.  CMD53 byte
+and block transfers use migratable, byte-addressed function register spaces.
+
+This first-stage model does **not** implement the CYW43455 backplane cores,
+firmware processor, firmware upload/boot protocol, SDPCM/BDC framing,
+interrupt production or an 802.11 radio.  Consequently, enumerating the SDIO
+functions is not evidence that ``brcmfmac`` can create a network interface,
+and it cannot yet validate a netpoll transmit path.  Those layers must be
+added and compared with real Pi 400 traces before the endpoint can be treated
+as hardware-faithful.
+
+``scripts/pi4/cyw43455-sdio-init.sh`` is a focused initramfs probe for this
+boundary.  Install it as ``/init`` alongside a static BusyBox and the
+``rfkill``, ``cfg80211``, ``brcmutil`` and ``brcmfmac`` modules; it reports the
+enumerated IDs, module probe result, network devices and final kernel log.
 
 Attaching USB storage
 ---------------------

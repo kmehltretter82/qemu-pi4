@@ -90,6 +90,9 @@ DECLARE_INSTANCE_CHECKER(SDState, SD_CARD_SPI, TYPE_SD_CARD_SPI)
 #define TYPE_EMMC "emmc"
 DECLARE_INSTANCE_CHECKER(SDState, EMMC, TYPE_EMMC)
 
+/* Experimental SDIO endpoint used by the Raspberry Pi 4/400 model. */
+#define TYPE_CYW43455_SDIO "cyw43455-sdio"
+
 struct SDCardClass {
     /*< private >*/
     DeviceClass parent_class;

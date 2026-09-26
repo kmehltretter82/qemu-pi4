@@ -11,6 +11,7 @@
 #include "hw/pci/pci_regs.h"
 #include "hw/usb/dwc2-regs.h"
 #include "libqtest-single.h"
+#include "libqos/sdhci-cmd.h"
 #include "qemu/bswap.h"
 #include "qemu/iov.h"
 #include "qemu/sockets.h"
@@ -36,6 +37,26 @@
 #define RASPI4_POWER_USB_HCD_ID 3
 #define RASPI4_EMMC2_BASE      0xfe340000
 #define RASPI4_EMMC2_CAPAREG   0x0000a52545ee6432ULL
+#define RASPI4_EMMC1_BASE      0xfe300000
+
+#define SDIO_CMD_IO_SEND_OP_COND  5
+#define SDIO_CMD_IO_RW_DIRECT    52
+#define SDIO_CMD_IO_RW_EXTENDED  53
+#define SDIO_CMD52_WRITE          (1U << 31)
+#define SDIO_CMD52_RAW            (1U << 27)
+#define SDIO_CMD53_WRITE          (1U << 31)
+#define SDIO_CMD53_BLOCK_MODE     (1U << 27)
+#define SDIO_CMD53_INCREMENT      (1U << 26)
+#define SDIO_CMD_FUNC_SHIFT       28
+#define SDIO_CMD_ADDR_SHIFT       9
+
+#define CYW43455_SDIO_OCR_RESPONSE 0xa0ff8000U
+#define CYW43455_SDIO_RCA          1
+#define CYW43455_SDIO_CCCR_REV     0x00
+#define CYW43455_SDIO_CCCR_IOEX    0x02
+#define CYW43455_SDIO_CCCR_IORX    0x03
+#define CYW43455_SDIO_CCCR_CIS     0x09
+#define CYW43455_SDIO_CIS_COMMON   0x1000
 
 #define PROPERTY_RESPONSE_SUCCESS 0x80000000
 #define PROPERTY_RESPONSE_ERROR   0x80000001
@@ -366,11 +387,12 @@ static void property_request_qtest(QTestState *qts, uint32_t tag,
                                    size_t response_bytes);
 static uint32_t property_payload_qtest(QTestState *qts, size_t word);
 
-static bool qom_bus_has_sd_card(const char *path)
+static bool qom_bus_has_device_type(const char *path, const char *type)
 {
     QDict *response;
     QList *properties;
     QListEntry *entry;
+    g_autofree char *link_type = g_strdup_printf("link<%s>", type);
     bool found = false;
 
     response = qtest_qmp(global_qtest,
@@ -382,7 +404,7 @@ static bool qom_bus_has_sd_card(const char *path)
     QLIST_FOREACH_ENTRY(properties, entry) {
         QDict *property = qobject_to(QDict, qlist_entry_obj(entry));
 
-        if (g_str_equal(qdict_get_str(property, "type"), "link<sd-card>")) {
+        if (g_str_equal(qdict_get_str(property, "type"), link_type)) {
             found = true;
             break;
         }
@@ -390,6 +412,11 @@ static bool qom_bus_has_sd_card(const char *path)
 
     qobject_unref(response);
     return found;
+}
+
+static bool qom_bus_has_sd_card(const char *path)
+{
+    return qom_bus_has_device_type(path, "sd-card");
 }
 
 static uint32_t pcie_cfg_index(unsigned int bus, unsigned int slot,
@@ -2702,7 +2729,200 @@ static void test_sd_card_on_emmc2(void)
     g_assert_cmpstr(qdict_get_str(response, "return"), ==,
                     "/machine/soc/peripherals/bcm2835-gpu[0]");
     qobject_unref(response);
+    g_assert_false(qom_bus_has_device_type(
+        "/machine/soc/peripherals/sdhci/sd-bus", "cyw43455-sdio"));
 }
+
+static uint32_t cyw43455_sdio_cmd52_qtest(QTestState *qts, bool write,
+                                          bool read_after_write,
+                                          unsigned int function,
+                                          uint32_t address, uint8_t value)
+{
+    uint32_t argument = function << SDIO_CMD_FUNC_SHIFT;
+
+    argument |= address << SDIO_CMD_ADDR_SHIFT;
+    argument |= value;
+    if (write) {
+        argument |= SDIO_CMD52_WRITE;
+    }
+    if (read_after_write) {
+        argument |= SDIO_CMD52_RAW;
+    }
+    sdhci_cmd_regs(qts, RASPI4_EMMC1_BASE, 0, 0, argument, 0,
+                   (SDIO_CMD_IO_RW_DIRECT << 8) | SDHC_CMD_RESPONSE);
+    return qtest_readl(qts, RASPI4_EMMC1_BASE + SDHC_RSPREG0);
+}
+
+static uint32_t cyw43455_sdio_cmd52(bool write, bool read_after_write,
+                                    unsigned int function, uint32_t address,
+                                    uint8_t value)
+{
+    return cyw43455_sdio_cmd52_qtest(global_qtest, write,
+                                     read_after_write, function, address,
+                                     value);
+}
+
+static void cyw43455_sdio_select_qtest(QTestState *qts)
+{
+    qtest_writeb(qts, RASPI4_EMMC1_BASE + SDHC_SWRST, SDHC_RESET_ALL);
+    qtest_writew(qts, RASPI4_EMMC1_BASE + SDHC_CLKCON,
+                 SDHC_CLOCK_SDCLK_EN | SDHC_CLOCK_INT_STABLE |
+                 SDHC_CLOCK_INT_EN);
+
+    sdhci_cmd_regs(qts, RASPI4_EMMC1_BASE, 0, 0, 0, 0,
+                   (SDIO_CMD_IO_SEND_OP_COND << 8) | SDHC_CMD_RESPONSE);
+    g_assert_cmphex(qtest_readl(qts, RASPI4_EMMC1_BASE + SDHC_RSPREG0),
+                    ==, CYW43455_SDIO_OCR_RESPONSE);
+
+    sdhci_cmd_regs(qts, RASPI4_EMMC1_BASE, 0, 0, 0, 0,
+                   SDHC_SEND_RELATIVE_ADDR | SDHC_CMD_RESPONSE);
+    g_assert_cmphex(qtest_readl(qts, RASPI4_EMMC1_BASE + SDHC_RSPREG0),
+                    ==, CYW43455_SDIO_RCA << 16);
+    sdhci_cmd_regs(qts, RASPI4_EMMC1_BASE, 0, 0,
+                   CYW43455_SDIO_RCA << 16, 0,
+                   SDHC_SELECT_DESELECT_CARD | SDHC_CMD_RESPONSE);
+}
+
+static void test_cyw43455_sdio_endpoint(void)
+{
+    const char *bus_path = "/machine/soc/peripherals/sdhci/sd-bus";
+    uint32_t argument;
+    uint32_t response;
+    uint32_t cis;
+
+    g_assert_true(qom_bus_has_device_type(bus_path, "cyw43455-sdio"));
+
+    cyw43455_sdio_select_qtest(global_qtest);
+
+    response = cyw43455_sdio_cmd52(false, false, 0,
+                                   CYW43455_SDIO_CCCR_REV, 0);
+    g_assert_cmphex(response & 0xff, ==, 0x32);
+
+    cis = cyw43455_sdio_cmd52(false, false, 0,
+                              CYW43455_SDIO_CCCR_CIS, 0) & 0xff;
+    cis |= (cyw43455_sdio_cmd52(false, false, 0,
+                                CYW43455_SDIO_CCCR_CIS + 1, 0) & 0xff) << 8;
+    cis |= (cyw43455_sdio_cmd52(false, false, 0,
+                                CYW43455_SDIO_CCCR_CIS + 2, 0) & 0xff) << 16;
+    g_assert_cmphex(cis, ==, CYW43455_SDIO_CIS_COMMON);
+    g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis, 0) & 0xff,
+                    ==, 0x20); /* CISTPL_MANFID */
+    g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 1, 0) & 0xff,
+                    ==, 4);
+    g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 2, 0) & 0xff,
+                    ==, 0xd0);
+    g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 3, 0) & 0xff,
+                    ==, 0x02);
+    g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 4, 0) & 0xff,
+                    ==, 0xbf);
+    g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 5, 0) & 0xff,
+                    ==, 0xa9);
+
+    response = cyw43455_sdio_cmd52(true, true, 0,
+                                   CYW43455_SDIO_CCCR_IOEX,
+                                   BIT(1) | BIT(2));
+    g_assert_cmphex(response & 0xff, ==, BIT(1) | BIT(2));
+    response = cyw43455_sdio_cmd52(false, false, 0,
+                                   CYW43455_SDIO_CCCR_IORX, 0);
+    g_assert_cmphex(response & 0xff, ==, BIT(1) | BIT(2));
+
+    /* Exercise an incrementing, byte-mode CMD53 transaction on function 1. */
+    argument = SDIO_CMD53_WRITE | (1U << SDIO_CMD_FUNC_SHIFT) |
+               SDIO_CMD53_INCREMENT | (0x400U << SDIO_CMD_ADDR_SHIFT) | 4;
+    sdhci_cmd_regs(global_qtest, RASPI4_EMMC1_BASE, 4, 1, argument,
+                   SDHC_TRNS_BLK_CNT_EN,
+                   (SDIO_CMD_IO_RW_EXTENDED << 8) |
+                   SDHC_CMD_DATA_PRESENT | SDHC_CMD_RESPONSE);
+    writel(RASPI4_EMMC1_BASE + SDHC_BDATA, 0x44332211);
+
+    argument &= ~SDIO_CMD53_WRITE;
+    sdhci_cmd_regs(global_qtest, RASPI4_EMMC1_BASE, 4, 1, argument,
+                   SDHC_TRNS_BLK_CNT_EN | SDHC_TRNS_READ,
+                   (SDIO_CMD_IO_RW_EXTENDED << 8) |
+                   SDHC_CMD_DATA_PRESENT | SDHC_CMD_RESPONSE);
+    g_assert_cmphex(readl(RASPI4_EMMC1_BASE + SDHC_BDATA), ==,
+                    0x44332211);
+
+    /* Exercise a full 512-byte block-mode transfer on function two. */
+    argument = SDIO_CMD53_WRITE | (2U << SDIO_CMD_FUNC_SHIFT) |
+               SDIO_CMD53_BLOCK_MODE | SDIO_CMD53_INCREMENT |
+               (0x800U << SDIO_CMD_ADDR_SHIFT) | 1;
+    sdhci_cmd_regs(global_qtest, RASPI4_EMMC1_BASE, 512, 1, argument,
+                   SDHC_TRNS_BLK_CNT_EN,
+                   (SDIO_CMD_IO_RW_EXTENDED << 8) |
+                   SDHC_CMD_DATA_PRESENT | SDHC_CMD_RESPONSE);
+    for (unsigned int i = 0; i < 512 / sizeof(uint32_t); i++) {
+        writel(RASPI4_EMMC1_BASE + SDHC_BDATA, 0x80000000U | i);
+    }
+
+    argument &= ~SDIO_CMD53_WRITE;
+    sdhci_cmd_regs(global_qtest, RASPI4_EMMC1_BASE, 512, 1, argument,
+                   SDHC_TRNS_BLK_CNT_EN | SDHC_TRNS_READ,
+                   (SDIO_CMD_IO_RW_EXTENDED << 8) |
+                   SDHC_CMD_DATA_PRESENT | SDHC_CMD_RESPONSE);
+    for (unsigned int i = 0; i < 512 / sizeof(uint32_t); i++) {
+        g_assert_cmphex(readl(RASPI4_EMMC1_BASE + SDHC_BDATA), ==,
+                        0x80000000U | i);
+    }
+}
+
+#ifndef _WIN32
+static void test_cyw43455_sdio_migration(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autoptr(GString) cmd_line =
+        g_string_new("-machine raspi4b,sdio-wifi=on");
+    QTestState *source = global_qtest;
+    QTestState *destination;
+    int net_sockets[2];
+    int ret;
+
+    cyw43455_sdio_select_qtest(source);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(source, true, true, 1,
+                                              0x400, 0x5a) & 0xff,
+                    ==, 0x5a);
+
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("raspi4b-cyw43455-migration-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    raspi4b_wait_for_migration(source);
+
+    if (pcie_has_edu) {
+        g_string_append(cmd_line,
+                        " -device edu,id=edu0,bus=pcie.1,addr=1,"
+                        "dma_mask=0xffffffffffffffff");
+    }
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
+    g_assert_cmpint(ret, !=, -1);
+    g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
+                           net_sockets[1]);
+    g_string_append(cmd_line, " -incoming defer");
+    destination = qtest_init(cmd_line->str);
+    close(net_sockets[1]);
+    qtest_qmp_assert_success(destination,
+        "{ 'execute': 'migrate-incoming', 'arguments': { "
+        "'uri': %s, 'exit-on-error': false } }", uri);
+    raspi4b_wait_for_migration(destination);
+
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(destination, false, false, 1,
+                                              0x400, 0) & 0xff,
+                    ==, 0x5a);
+
+    qtest_quit(destination);
+    close(net_sockets[0]);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+#endif
 
 static void property_request_qtest(QTestState *qts, uint32_t tag,
                                    const uint32_t *payload, size_t words,
@@ -4215,6 +4435,14 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/thermal/temperature",
                      test_thermal_temperature);
     raspi4b_add_test("/raspi4b/sd/card_on_emmc2", test_sd_card_on_emmc2);
+    raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio",
+                               test_cyw43455_sdio_endpoint,
+                               " -machine sdio-wifi=on");
+#ifndef _WIN32
+    raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio_migration",
+                               test_cyw43455_sdio_migration,
+                               " -machine sdio-wifi=on");
+#endif
     raspi4b_add_test("/raspi4b/firmware_gpio", test_firmware_gpio);
     raspi4b_add_test("/raspi4b/firmware_dma_channels",
                      test_firmware_dma_channels);

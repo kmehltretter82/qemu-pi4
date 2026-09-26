@@ -208,6 +208,462 @@ struct SDState {
     char *preset_auth_key;
 };
 
+/*
+ * Minimal CYW43455 SDIO transport endpoint.
+ *
+ * This is intentionally an SDIO card model, not an assertion that the
+ * CYW43455 backplane, firmware CPU, or radio is implemented.  It provides
+ * the standard two-function enumeration surface and byte-addressed function
+ * spaces needed to develop those layers incrementally.
+ */
+#define CYW43455_SDIO_NUM_FUNCS         2
+#define CYW43455_SDIO_ADDR_SPACE_SIZE   (1U << 17)
+#define CYW43455_SDIO_OCR               0x00ff8000U
+#define CYW43455_SDIO_RCA               1
+#define CYW43455_SDIO_VENDOR_ID         0x02d0
+#define CYW43455_SDIO_DEVICE_ID         0xa9bf
+#define CYW43455_SDIO_FUNC_MASK         \
+    (((1U << (CYW43455_SDIO_NUM_FUNCS + 1)) - 1) & ~1U)
+#define CYW43455_SDIO_INT_MASK          \
+    ((1U << (CYW43455_SDIO_NUM_FUNCS + 1)) - 1)
+
+#define SDIO_CCCR_REV                   0x00
+#define SDIO_CCCR_SD_REV                0x01
+#define SDIO_CCCR_IO_ENABLE             0x02
+#define SDIO_CCCR_IO_READY              0x03
+#define SDIO_CCCR_INT_ENABLE            0x04
+#define SDIO_CCCR_INT_PENDING           0x05
+#define SDIO_CCCR_ABORT                 0x06
+#define SDIO_CCCR_BUS_IF                0x07
+#define SDIO_CCCR_CAPS                  0x08
+#define SDIO_CCCR_CIS_PTR               0x09
+#define SDIO_CCCR_POWER                 0x12
+#define SDIO_CCCR_SPEED                 0x13
+
+#define SDIO_FBR_SIZE                   0x100
+#define SDIO_FBR_CIS_PTR                0x09
+#define SDIO_FBR_BLOCK_SIZE             0x10
+
+#define SDIO_CISTPL_MANFID              0x20
+#define SDIO_CISTPL_FUNCID              0x21
+#define SDIO_CISTPL_FUNCE               0x22
+#define SDIO_CISTPL_END                 0xff
+
+#define SDIO_R4_READY                   BIT(31)
+#define SDIO_R4_NUM_FUNCS_SHIFT         28
+#define SDIO_R5_FUNCTION_NUMBER         BIT(9)
+#define SDIO_R5_OUT_OF_RANGE            BIT(8)
+
+#define SDIO_CMD52_WRITE                BIT(31)
+#define SDIO_CMD52_FUNC_SHIFT           28
+#define SDIO_CMD52_RAW                  BIT(27)
+#define SDIO_CMD52_ADDR_SHIFT           9
+
+#define SDIO_CMD53_WRITE                BIT(31)
+#define SDIO_CMD53_FUNC_SHIFT           28
+#define SDIO_CMD53_BLOCK_MODE           BIT(27)
+#define SDIO_CMD53_INCREMENT            BIT(26)
+#define SDIO_CMD53_ADDR_SHIFT           9
+
+#define CYW43455_CIS_COMMON             0x1000
+#define CYW43455_CIS_FUNC1              0x1100
+#define CYW43455_CIS_FUNC2              0x1200
+
+OBJECT_DECLARE_SIMPLE_TYPE(CYW43455SDIOState, CYW43455_SDIO)
+
+struct CYW43455SDIOState {
+    SDState parent_obj;
+
+    uint8_t regs[CYW43455_SDIO_NUM_FUNCS + 1]
+                [CYW43455_SDIO_ADDR_SPACE_SIZE];
+    uint32_t transfer_addr;
+    uint32_t transfer_remaining;
+    uint8_t transfer_func;
+    bool transfer_write;
+    bool transfer_increment;
+    bool selected;
+};
+
+static void cyw43455_sdio_set_cis_pointer(CYW43455SDIOState *s,
+                                          unsigned int function,
+                                          uint32_t pointer)
+{
+    uint32_t base = function * SDIO_FBR_SIZE + SDIO_FBR_CIS_PTR;
+
+    s->regs[0][base] = pointer;
+    s->regs[0][base + 1] = pointer >> 8;
+    s->regs[0][base + 2] = pointer >> 16;
+}
+
+static uint32_t cyw43455_sdio_add_manfid(CYW43455SDIOState *s,
+                                         uint32_t offset)
+{
+    uint8_t *regs = s->regs[0];
+
+    regs[offset++] = SDIO_CISTPL_MANFID;
+    regs[offset++] = 4;
+    regs[offset++] = CYW43455_SDIO_VENDOR_ID & 0xff;
+    regs[offset++] = CYW43455_SDIO_VENDOR_ID >> 8;
+    regs[offset++] = CYW43455_SDIO_DEVICE_ID & 0xff;
+    regs[offset++] = CYW43455_SDIO_DEVICE_ID >> 8;
+    return offset;
+}
+
+static void cyw43455_sdio_add_function_cis(CYW43455SDIOState *s,
+                                           uint32_t offset,
+                                           uint16_t block_size)
+{
+    uint8_t *regs = s->regs[0];
+    uint32_t tuple;
+
+    offset = cyw43455_sdio_add_manfid(s, offset);
+    regs[offset++] = SDIO_CISTPL_FUNCID;
+    regs[offset++] = 2;
+    regs[offset++] = 0x0c; /* SDIO function */
+    regs[offset++] = 0x00;
+
+    regs[offset++] = SDIO_CISTPL_FUNCE;
+    regs[offset++] = 42;
+    tuple = offset;
+    memset(&regs[tuple], 0, 42);
+    regs[tuple] = 0x01; /* function-extension tuple */
+    regs[tuple + 12] = block_size;
+    regs[tuple + 13] = block_size >> 8;
+    regs[tuple + 28] = 100; /* 100 * 10 ms enable timeout */
+    offset += 42;
+    regs[offset] = SDIO_CISTPL_END;
+}
+
+static void cyw43455_sdio_init_registers(CYW43455SDIOState *s)
+{
+    uint8_t *regs = s->regs[0];
+    uint32_t offset;
+
+    memset(s->regs, 0, sizeof(s->regs));
+
+    /* CCCR 1.20, SDIO 2.00, SD Physical Layer 2.00. */
+    regs[SDIO_CCCR_REV] = 0x32;
+    regs[SDIO_CCCR_SD_REV] = 0x02;
+    regs[SDIO_CCCR_CAPS] = 0x03; /* direct-during-transfer, multi-block */
+    regs[SDIO_CCCR_POWER] = 0x01; /* high-power mode supported */
+    regs[SDIO_CCCR_SPEED] = 0x01; /* high-speed mode supported */
+
+    cyw43455_sdio_set_cis_pointer(s, 0, CYW43455_CIS_COMMON);
+    cyw43455_sdio_set_cis_pointer(s, 1, CYW43455_CIS_FUNC1);
+    cyw43455_sdio_set_cis_pointer(s, 2, CYW43455_CIS_FUNC2);
+
+    /* Function zero and function one use 64-byte blocks initially. */
+    regs[SDIO_FBR_BLOCK_SIZE] = 64;
+    regs[SDIO_FBR_SIZE + SDIO_FBR_BLOCK_SIZE] = 64;
+    /* Function two is the frame transport and starts at 512 bytes. */
+    regs[2 * SDIO_FBR_SIZE + SDIO_FBR_BLOCK_SIZE] = 0;
+    regs[2 * SDIO_FBR_SIZE + SDIO_FBR_BLOCK_SIZE + 1] = 2;
+
+    offset = cyw43455_sdio_add_manfid(s, CYW43455_CIS_COMMON);
+    regs[offset++] = SDIO_CISTPL_FUNCE;
+    regs[offset++] = 4;
+    regs[offset++] = 0x00; /* common-extension tuple */
+    regs[offset++] = 0x00; /* 512-byte maximum block size */
+    regs[offset++] = 0x02;
+    regs[offset++] = 0x32; /* 25 Mbit/s encoded transfer speed */
+    regs[offset] = SDIO_CISTPL_END;
+
+    cyw43455_sdio_add_function_cis(s, CYW43455_CIS_FUNC1, 512);
+    cyw43455_sdio_add_function_cis(s, CYW43455_CIS_FUNC2, 512);
+}
+
+static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
+{
+    SDState *sd = &s->parent_obj;
+
+    cyw43455_sdio_init_registers(s);
+    s->transfer_addr = 0;
+    s->transfer_remaining = 0;
+    s->transfer_func = 0;
+    s->transfer_write = false;
+    s->transfer_increment = false;
+    s->selected = false;
+    sd->dat_lines = 0xf;
+    sd->cmd_line = true;
+}
+
+static uint8_t cyw43455_sdio_read_reg(CYW43455SDIOState *s,
+                                      unsigned int function,
+                                      uint32_t address)
+{
+    return s->regs[function][address];
+}
+
+static void cyw43455_sdio_write_reg(CYW43455SDIOState *s,
+                                    unsigned int function,
+                                    uint32_t address, uint8_t value)
+{
+    uint8_t *regs = s->regs[function];
+
+    if (function != 0) {
+        regs[address] = value;
+        return;
+    }
+
+    switch (address) {
+    case SDIO_CCCR_IO_ENABLE:
+        value &= CYW43455_SDIO_FUNC_MASK;
+        regs[SDIO_CCCR_IO_ENABLE] = value;
+        /* The model has no power-up latency, so functions are ready now. */
+        regs[SDIO_CCCR_IO_READY] = value;
+        break;
+    case SDIO_CCCR_INT_ENABLE:
+        regs[address] = value & CYW43455_SDIO_INT_MASK;
+        break;
+    case SDIO_CCCR_INT_PENDING:
+        break;
+    case SDIO_CCCR_ABORT:
+        if (value & BIT(3)) {
+            cyw43455_sdio_reset_state(s);
+        } else {
+            regs[address] = value & 0x7;
+        }
+        break;
+    case SDIO_CCCR_BUS_IF:
+        regs[address] = value & 0x83;
+        break;
+    case SDIO_CCCR_SPEED:
+        regs[address] = 0x01 | (value & 0x02);
+        break;
+    case SDIO_CCCR_REV:
+    case SDIO_CCCR_SD_REV:
+    case SDIO_CCCR_IO_READY:
+    case SDIO_CCCR_CAPS:
+    case SDIO_CCCR_CIS_PTR ... SDIO_CCCR_CIS_PTR + 2:
+    case SDIO_CCCR_POWER:
+        break;
+    default:
+        /* Includes FBR block sizes and Broadcom's vendor CCCR range. */
+        regs[address] = value;
+        break;
+    }
+}
+
+static size_t cyw43455_sdio_response(uint8_t *response, size_t response_size,
+                                     uint32_t value)
+{
+    if (response_size < sizeof(value)) {
+        return 0;
+    }
+    stl_be_p(response, value);
+    return sizeof(value);
+}
+
+static size_t cyw43455_sdio_do_command(SDState *sd, SDRequest *request,
+                                       uint8_t *response,
+                                       size_t response_size)
+{
+    CYW43455SDIOState *s = CYW43455_SDIO(sd);
+    uint32_t argument = request->arg;
+    uint32_t address;
+    uint32_t count;
+    uint32_t status = 0;
+    unsigned int function;
+    uint8_t value = 0;
+
+    switch (request->cmd) {
+    case 0: /* GO_IDLE_STATE */
+        cyw43455_sdio_reset_state(s);
+        return 0;
+    case 5: /* IO_SEND_OP_COND (R4) */
+        status = SDIO_R4_READY |
+                 (CYW43455_SDIO_NUM_FUNCS << SDIO_R4_NUM_FUNCS_SHIFT) |
+                 CYW43455_SDIO_OCR;
+        return cyw43455_sdio_response(response, response_size, status);
+    case 3: /* SEND_RELATIVE_ADDR (R6) */
+        status = CYW43455_SDIO_RCA << 16;
+        return cyw43455_sdio_response(response, response_size, status);
+    case 7: /* SELECT/DESELECT_CARD (R1) */
+        s->selected = (argument >> 16) == CYW43455_SDIO_RCA;
+        return cyw43455_sdio_response(response, response_size, 0);
+    case 13: /* SEND_STATUS (R1) */
+        return cyw43455_sdio_response(response, response_size, 0);
+    case 52: /* IO_RW_DIRECT (R5) */
+        function = extract32(argument, SDIO_CMD52_FUNC_SHIFT, 3);
+        address = extract32(argument, SDIO_CMD52_ADDR_SHIFT, 17);
+        if (function > CYW43455_SDIO_NUM_FUNCS) {
+            status = SDIO_R5_FUNCTION_NUMBER;
+        } else if (address >= CYW43455_SDIO_ADDR_SPACE_SIZE) {
+            status = SDIO_R5_OUT_OF_RANGE;
+        } else {
+            if (argument & SDIO_CMD52_WRITE) {
+                cyw43455_sdio_write_reg(s, function, address, argument);
+                value = argument & SDIO_CMD52_RAW ?
+                        cyw43455_sdio_read_reg(s, function, address) :
+                        extract32(argument, 0, 8);
+            } else {
+                value = cyw43455_sdio_read_reg(s, function, address);
+            }
+            status = value;
+        }
+        return cyw43455_sdio_response(response, response_size, status);
+    case 53: /* IO_RW_EXTENDED (R5) */
+        function = extract32(argument, SDIO_CMD53_FUNC_SHIFT, 3);
+        address = extract32(argument, SDIO_CMD53_ADDR_SHIFT, 17);
+        if (function > CYW43455_SDIO_NUM_FUNCS) {
+            status = SDIO_R5_FUNCTION_NUMBER;
+        } else if (address >= CYW43455_SDIO_ADDR_SPACE_SIZE) {
+            status = SDIO_R5_OUT_OF_RANGE;
+        } else {
+            count = extract32(argument, 0, 9);
+            count = count ? count : 512;
+            if (argument & SDIO_CMD53_BLOCK_MODE) {
+                uint32_t base = function * SDIO_FBR_SIZE;
+                uint32_t block_size;
+
+                block_size = s->regs[0][base + SDIO_FBR_BLOCK_SIZE];
+                block_size |= s->regs[0][base + SDIO_FBR_BLOCK_SIZE + 1]
+                              << 8;
+                if (block_size == 0) {
+                    block_size = 512;
+                }
+                count *= block_size;
+            }
+            s->transfer_func = function;
+            s->transfer_addr = address;
+            s->transfer_remaining = count;
+            s->transfer_write = argument & SDIO_CMD53_WRITE;
+            s->transfer_increment = argument & SDIO_CMD53_INCREMENT;
+        }
+        return cyw43455_sdio_response(response, response_size, status);
+    default:
+        /* Unsupported commands time out, as they do on an SDIO-only card. */
+        return 0;
+    }
+}
+
+static size_t cyw43455_sdio_read_data(SDState *sd, void *buffer, size_t length)
+{
+    CYW43455SDIOState *s = CYW43455_SDIO(sd);
+    uint8_t *data = buffer;
+    size_t i;
+
+    for (i = 0; i < length; i++) {
+        if (!s->transfer_write && s->transfer_remaining) {
+            data[i] = cyw43455_sdio_read_reg(s, s->transfer_func,
+                                             s->transfer_addr);
+            s->transfer_remaining--;
+            if (s->transfer_increment &&
+                s->transfer_addr + 1 < CYW43455_SDIO_ADDR_SPACE_SIZE) {
+                s->transfer_addr++;
+            }
+        } else {
+            data[i] = 0xff;
+        }
+    }
+    return length;
+}
+
+static size_t cyw43455_sdio_write_data(SDState *sd, const void *buffer,
+                                       size_t length)
+{
+    CYW43455SDIOState *s = CYW43455_SDIO(sd);
+    const uint8_t *data = buffer;
+    size_t i;
+
+    for (i = 0; i < length; i++) {
+        if (s->transfer_write && s->transfer_remaining) {
+            cyw43455_sdio_write_reg(s, s->transfer_func,
+                                    s->transfer_addr, data[i]);
+            s->transfer_remaining--;
+            if (s->transfer_increment &&
+                s->transfer_addr + 1 < CYW43455_SDIO_ADDR_SPACE_SIZE) {
+                s->transfer_addr++;
+            }
+        }
+    }
+    return length;
+}
+
+static bool cyw43455_sdio_receive_ready(SDState *sd)
+{
+    CYW43455SDIOState *s = CYW43455_SDIO(sd);
+
+    return s->transfer_write && s->transfer_remaining;
+}
+
+static bool cyw43455_sdio_data_ready(SDState *sd)
+{
+    CYW43455SDIOState *s = CYW43455_SDIO(sd);
+
+    return !s->transfer_write && s->transfer_remaining;
+}
+
+static bool cyw43455_sdio_get_inserted(SDState *sd)
+{
+    return true;
+}
+
+static bool cyw43455_sdio_get_readonly(SDState *sd)
+{
+    return false;
+}
+
+static uint8_t cyw43455_sdio_get_dat_lines(SDState *sd)
+{
+    return 0xf;
+}
+
+static bool cyw43455_sdio_get_cmd_line(SDState *sd)
+{
+    return true;
+}
+
+static void cyw43455_sdio_set_voltage(SDState *sd, uint16_t millivolts)
+{
+}
+
+static void cyw43455_sdio_reset(DeviceState *device)
+{
+    cyw43455_sdio_reset_state(CYW43455_SDIO(device));
+}
+
+static void cyw43455_sdio_realize(DeviceState *device, Error **errp)
+{
+    BusState *bus = qdev_get_parent_bus(device);
+
+    if (bus == NULL || !object_dynamic_cast(OBJECT(bus), TYPE_SD_BUS)) {
+        error_setg(errp, "CYW43455 SDIO endpoint requires an SD bus");
+        return;
+    }
+
+    cyw43455_sdio_reset(device);
+    sdbus_set_inserted(SD_BUS(bus), true);
+    sdbus_set_readonly(SD_BUS(bus), false);
+}
+
+static void cyw43455_sdio_unrealize(DeviceState *device)
+{
+    BusState *bus = qdev_get_parent_bus(device);
+
+    if (bus != NULL) {
+        sdbus_set_inserted(SD_BUS(bus), false);
+    }
+}
+
+static const VMStateDescription cyw43455_sdio_vmstate = {
+    .name = TYPE_CYW43455_SDIO,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_2DARRAY(regs, CYW43455SDIOState,
+                             CYW43455_SDIO_NUM_FUNCS + 1,
+                             CYW43455_SDIO_ADDR_SPACE_SIZE),
+        VMSTATE_UINT32(transfer_addr, CYW43455SDIOState),
+        VMSTATE_UINT32(transfer_remaining, CYW43455SDIOState),
+        VMSTATE_UINT8(transfer_func, CYW43455SDIOState),
+        VMSTATE_BOOL(transfer_write, CYW43455SDIOState),
+        VMSTATE_BOOL(transfer_increment, CYW43455SDIOState),
+        VMSTATE_BOOL(selected, CYW43455SDIOState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static void sd_realize(DeviceState *dev, Error **errp);
 
 static const SDProto sd_proto_spi;
@@ -3256,6 +3712,29 @@ static void sd_class_init(ObjectClass *klass, const void *data)
     sc->proto = &sd_proto_sd;
 }
 
+static void cyw43455_sdio_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    SDCardClass *sc = SDMMC_COMMON_CLASS(klass);
+
+    dc->desc = "Experimental CYW43455 SDIO endpoint";
+    dc->realize = cyw43455_sdio_realize;
+    dc->unrealize = cyw43455_sdio_unrealize;
+    dc->vmsd = &cyw43455_sdio_vmstate;
+    device_class_set_legacy_reset(dc, cyw43455_sdio_reset);
+
+    sc->set_voltage = cyw43455_sdio_set_voltage;
+    sc->get_dat_lines = cyw43455_sdio_get_dat_lines;
+    sc->get_cmd_line = cyw43455_sdio_get_cmd_line;
+    sc->do_command = cyw43455_sdio_do_command;
+    sc->write_data = cyw43455_sdio_write_data;
+    sc->read_data = cyw43455_sdio_read_data;
+    sc->receive_ready = cyw43455_sdio_receive_ready;
+    sc->data_ready = cyw43455_sdio_data_ready;
+    sc->get_inserted = cyw43455_sdio_get_inserted;
+    sc->get_readonly = cyw43455_sdio_get_readonly;
+}
+
 /*
  * We do not model the chip select pin, so allow the board to select
  * whether card should be in SSI or MMC/SD mode.  It is also up to the
@@ -3308,6 +3787,12 @@ static const TypeInfo sd_types[] = {
         .name           = TYPE_SD_CARD_SPI,
         .parent         = TYPE_SD_CARD,
         .class_init     = sd_spi_class_init,
+    },
+    {
+        .name           = TYPE_CYW43455_SDIO,
+        .parent         = TYPE_SDMMC_COMMON,
+        .instance_size  = sizeof(CYW43455SDIOState),
+        .class_init     = cyw43455_sdio_class_init,
     },
     {
         .name           = TYPE_EMMC,
