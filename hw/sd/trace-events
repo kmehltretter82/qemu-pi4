@@ -39,6 +39,9 @@ sdhci_capareg(const char *desc, uint16_t val) "%s: %u"
 # sd.c
 cyw43455_sdio_frame(uint32_t length, uint8_t sequence, uint8_t channel, uint8_t data_offset) "synthetic SDPCM tx length=%" PRIu32 " sequence=%u channel=%u data-offset=%u"
 cyw43455_sdio_data(uint32_t length, uint16_t ethertype, uint8_t ip_protocol, uint16_t source_port, uint16_t destination_port) "synthetic data tx length=%" PRIu32 " ethertype=0x%04x ip-protocol=%u source-port=%u destination-port=%u"
+cyw43455_sdio_glom(uint32_t length, unsigned int frames, uint8_t last_sequence) "synthetic tx glom length=%" PRIu32 " frames=%u last-sequence=%u"
+cyw43455_sdio_credit_scheduled(uint8_t tx_sequence, uint8_t tx_max, uint32_t delay_ms) "synthetic credit scheduled tx-sequence=%u tx-max=%u delay-ms=%" PRIu32
+cyw43455_sdio_credit_emitted(uint8_t tx_sequence, uint8_t tx_max) "synthetic credit emitted tx-sequence=%u tx-max=%u"
 cyw43455_sdio_rx_dropped(uint32_t length) "synthetic inbound frame dropped length=%" PRIu32
 cyw43455_sdio_control(uint32_t command, bool set, uint32_t request_id, uint32_t length) "synthetic control command=%" PRIu32 " set=%u id=%" PRIu32 " length=%" PRIu32
 cyw43455_sdio_iovar(const char *name, bool set, uint32_t request_id, int32_t status) "synthetic iovar name=%s set=%u id=%" PRIu32 " status=%" PRIi32

@@ -84,11 +84,16 @@
 #define CYW43455_SDIO_INTSTATUS    (CYW43455_SDIO_CORE_BASE + 0x20)
 #define CYW43455_SDIO_HOSTINTMASK  (CYW43455_SDIO_CORE_BASE + 0x24)
 #define CYW43455_SDIO_FRAME_IND    BIT(6)
+#define CYW43455_SDPCM_HW_HEADER_LEN 4
+#define CYW43455_SDPCM_HWEXT_LEN   8
+#define CYW43455_SDPCM_HWEXT_LAST  BIT(24)
 #define CYW43455_SDPCM_HEADER_LEN  12
 #define CYW43455_SDPCM_DATA_CHANNEL 2
 #define CYW43455_BCDC_HEADER_LEN   16
 #define CYW43455_BCDC_DATA_HEADER_LEN 4
 #define CYW43455_C_GET_VAR         262
+#define CYW43455_TEST_CREDIT_DELAY_MS 25
+#define CYW43455_TEST_CREDIT_WINDOW 5
 
 #define PROPERTY_RESPONSE_SUCCESS 0x80000000
 #define PROPERTY_RESPONSE_ERROR   0x80000001
@@ -2958,6 +2963,54 @@ static size_t cyw43455_sdio_build_data_request(uint8_t *frame,
     return frame_len;
 }
 
+static size_t cyw43455_sdio_build_two_data_glom(uint8_t *frame,
+                                                size_t frame_size,
+                                                const uint8_t *packet,
+                                                size_t packet_len)
+{
+    const size_t header_len = CYW43455_SDPCM_HW_HEADER_LEN +
+                              CYW43455_SDPCM_HWEXT_LEN + 8;
+    const size_t subframe_len = header_len +
+                                CYW43455_BCDC_DATA_HEADER_LEN + packet_len;
+    const size_t total_len = 2 * subframe_len;
+    size_t offset;
+    unsigned int i;
+
+    g_assert_cmpuint(frame_size, >=, total_len);
+    g_assert_cmpuint(total_len, <=, UINT16_MAX);
+    g_assert_cmpuint(subframe_len % sizeof(uint32_t), ==, 0);
+    memset(frame, 0, total_len);
+
+    for (i = 0, offset = 0; i < 2; i++, offset += subframe_len) {
+        uint32_t extension = subframe_len -
+                             CYW43455_SDPCM_HW_HEADER_LEN;
+
+        if (i == 1) {
+            extension |= CYW43455_SDPCM_HWEXT_LAST;
+        }
+        stw_le_p(frame + offset, subframe_len);
+        stw_le_p(frame + offset + 2, (uint16_t)~subframe_len);
+        stl_le_p(frame + offset + CYW43455_SDPCM_HW_HEADER_LEN,
+                 extension);
+        frame[offset + CYW43455_SDPCM_HW_HEADER_LEN +
+              CYW43455_SDPCM_HWEXT_LEN] = i + 1;
+        frame[offset + CYW43455_SDPCM_HW_HEADER_LEN +
+              CYW43455_SDPCM_HWEXT_LEN + 1] =
+            CYW43455_SDPCM_DATA_CHANNEL;
+        frame[offset + CYW43455_SDPCM_HW_HEADER_LEN +
+              CYW43455_SDPCM_HWEXT_LEN + 3] = header_len;
+        frame[offset + header_len] = 2 << 4;
+        memcpy(frame + offset + header_len +
+                       CYW43455_BCDC_DATA_HEADER_LEN,
+               packet, packet_len);
+    }
+
+    /* A transmit glom replaces the first hardware length with chain length. */
+    stw_le_p(frame, total_len);
+    stw_le_p(frame + 2, (uint16_t)~total_len);
+    return total_len;
+}
+
 static void cyw43455_sdio_enable_control_irq_qtest(QTestState *qts)
 {
     uint16_t interrupt_enable;
@@ -3002,14 +3055,33 @@ static void cyw43455_sdio_assert_cur_etheraddr_response(const uint8_t *frame,
                     expected_mac, sizeof(expected_mac));
 }
 
+static void cyw43455_sdio_assert_credit_update(const uint8_t *frame,
+                                                size_t frame_len,
+                                                uint8_t tx_sequence)
+{
+    g_assert_cmpuint(frame_len, ==, CYW43455_SDPCM_HEADER_LEN);
+    g_assert_cmpuint(lduw_le_p(frame), ==, frame_len);
+    g_assert_cmphex(lduw_le_p(frame + 2), ==, (uint16_t)~frame_len);
+    g_assert_cmpuint(frame[5] & 0xf, ==, CYW43455_SDPCM_DATA_CHANNEL);
+    g_assert_cmpuint(frame[7], ==, CYW43455_SDPCM_HEADER_LEN);
+    g_assert_cmpuint(frame[9], ==,
+                     (uint8_t)(tx_sequence +
+                               CYW43455_TEST_CREDIT_WINDOW));
+}
+
 static void test_cyw43455_sdio_endpoint(void)
 {
     const char *bus_path = "/machine/soc/peripherals/sdhci/sd-bus";
+    static const uint8_t packet[16] = { 0 };
     uint32_t argument;
     uint32_t response;
     uint32_t cis;
     uint8_t control_frame[48];
+    uint8_t credit_frame[CYW43455_SDPCM_HEADER_LEN];
+    uint8_t data_frame[CYW43455_SDPCM_HEADER_LEN +
+                       CYW43455_BCDC_DATA_HEADER_LEN + sizeof(packet)];
     size_t control_len;
+    size_t data_len;
 
     g_assert_true(qom_bus_has_device_type(bus_path, "cyw43455-sdio"));
 
@@ -3172,6 +3244,30 @@ static void test_cyw43455_sdio_endpoint(void)
                     ==, 0);
     g_assert_cmphex(readw(RASPI4_EMMC1_BASE + SDHC_NORINTSTS) &
                     SDHC_NIS_CARDINT, ==, 0);
+
+    /* Data transmit credits arrive only after the configured delay. */
+    data_len = cyw43455_sdio_build_data_request(
+        data_frame, sizeof(data_frame), packet, sizeof(packet));
+    cyw43455_sdio_function2_write_qtest(global_qtest, data_frame, data_len);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+    qtest_clock_step(global_qtest,
+                     (CYW43455_TEST_CREDIT_DELAY_MS - 1) * SCALE_MS);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+    qtest_clock_step(global_qtest, SCALE_MS);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest, CYW43455_SDIO_INTSTATUS),
+                    ==, CYW43455_SDIO_FRAME_IND);
+    memset(credit_frame, 0, sizeof(credit_frame));
+    cyw43455_sdio_function2_read_qtest(global_qtest, credit_frame,
+                                        sizeof(credit_frame));
+    cyw43455_sdio_assert_credit_update(credit_frame, sizeof(credit_frame),
+                                        data_frame[4]);
+    cyw43455_sdio_backplane_writel_qtest(
+        global_qtest, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 }
 
 #ifndef _WIN32
@@ -3211,6 +3307,9 @@ static void test_cyw43455_sdio_network_backend(void)
     QTestState *qts;
     uint8_t sdpcm_frame[CYW43455_SDPCM_HEADER_LEN +
                         CYW43455_BCDC_DATA_HEADER_LEN + sizeof(packet)];
+    uint8_t glom_frame[2 * (CYW43455_SDPCM_HW_HEADER_LEN +
+                            CYW43455_SDPCM_HWEXT_LEN + 8 +
+                            CYW43455_BCDC_DATA_HEADER_LEN + sizeof(packet))];
     uint8_t received[sizeof(packet)];
     uint32_t received_len;
     size_t sdpcm_len;
@@ -3235,6 +3334,18 @@ static void test_cyw43455_sdio_network_backend(void)
     g_assert_cmpuint(ntohl(received_len), ==, sizeof(packet));
     cyw43455_sdio_recv_all(net_sockets[0], received, sizeof(received));
     g_assert_cmpmem(received, sizeof(received), packet, sizeof(packet));
+
+    sdpcm_len = cyw43455_sdio_build_two_data_glom(
+        glom_frame, sizeof(glom_frame), packet, sizeof(packet));
+    cyw43455_sdio_function2_write_qtest(qts, glom_frame, sdpcm_len);
+    for (unsigned int i = 0; i < 2; i++) {
+        cyw43455_sdio_recv_all(net_sockets[0], &received_len,
+                               sizeof(received_len));
+        g_assert_cmpuint(ntohl(received_len), ==, sizeof(packet));
+        cyw43455_sdio_recv_all(net_sockets[0], received,
+                               sizeof(received));
+        g_assert_cmpmem(received, sizeof(received), packet, sizeof(packet));
+    }
 
     qtest_quit(qts);
     close(net_sockets[0]);
@@ -4836,7 +4947,11 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/sd/card_on_emmc2", test_sd_card_on_emmc2);
     raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio",
                                test_cyw43455_sdio_endpoint,
-                               " -machine sdio-wifi=on");
+                               " -machine sdio-wifi=on"
+                               " -global cyw43455-sdio."
+                               "tx-credit-delay-ms=25"
+                               " -global cyw43455-sdio."
+                               "tx-credit-window=5");
 #ifndef _WIN32
     raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_network_backend",
                      test_cyw43455_sdio_network_backend);

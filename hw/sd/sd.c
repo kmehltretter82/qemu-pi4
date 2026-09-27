@@ -319,6 +319,10 @@ struct SDState {
 #define CYW43455_SDIO_TOHOSTMAILBOXDATA  0x004c
 #define CYW43455_I_HMB_FRAME_IND         BIT(6)
 
+#define CYW43455_SDPCM_HW_HEADER_LEN     4
+#define CYW43455_SDPCM_HWEXT_LEN         8
+#define CYW43455_SDPCM_HWEXT_LAST        BIT(24)
+#define CYW43455_SDPCM_HWEXT_LENGTH_MASK 0x00ffffff
 #define CYW43455_SDPCM_HEADER_LEN        12
 #define CYW43455_SDPCM_CONTROL_CHANNEL   0
 #define CYW43455_SDPCM_DATA_CHANNEL      2
@@ -336,6 +340,8 @@ struct SDState {
 #define CYW43455_WLC_BAND_2G             2
 #define CYW43455_CHANSPEC_2G_CH1_20MHZ   0x1001
 #define CYW43455_F2_FRAME_MAX            (16 * KiB)
+#define CYW43455_TX_CREDIT_WINDOW_DEFAULT 8
+#define CYW43455_TX_CREDIT_WINDOW_MAX    64
 
 typedef struct CYW43455CoreInfo {
     uint16_t id;
@@ -387,6 +393,11 @@ struct CYW43455SDIOState {
     uint32_t f2_rx_len;
     uint32_t f2_rx_pos;
     uint8_t f2_rx_seq;
+    QEMUTimer *tx_credit_timer;
+    uint32_t tx_credit_delay_ms;
+    uint8_t tx_credit_window;
+    uint8_t tx_credit_seq;
+    bool tx_credit_pending;
 };
 
 static SDBus *cyw43455_sdio_bus(CYW43455SDIOState *s)
@@ -631,6 +642,114 @@ static void cyw43455_sdio_forward_data(CYW43455SDIOState *s,
     qemu_send_packet(qemu_get_queue(s->nic), packet, ethernet_len);
 }
 
+static uint8_t cyw43455_sdio_forward_glom(CYW43455SDIOState *s,
+                                          const uint8_t *request,
+                                          uint32_t request_len)
+{
+    uint32_t offset = 0;
+    unsigned int frames = 0;
+    uint8_t last_sequence = request[CYW43455_SDPCM_HW_HEADER_LEN +
+                                    CYW43455_SDPCM_HWEXT_LEN];
+
+    while (request_len - offset >= CYW43455_SDPCM_HEADER_LEN +
+                                   CYW43455_SDPCM_HWEXT_LEN) {
+        const uint8_t *frame = request + offset;
+        uint32_t extension = ldl_le_p(frame +
+                                      CYW43455_SDPCM_HW_HEADER_LEN);
+        uint32_t extension2 = ldl_le_p(
+            frame + CYW43455_SDPCM_HW_HEADER_LEN + sizeof(extension));
+        uint32_t frame_len = (extension &
+                              CYW43455_SDPCM_HWEXT_LENGTH_MASK) +
+                             CYW43455_SDPCM_HW_HEADER_LEN;
+        uint32_t tail_pad = extract32(extension2, 16, 16);
+        uint32_t stored_len;
+        uint8_t software_offset = CYW43455_SDPCM_HW_HEADER_LEN +
+                                  CYW43455_SDPCM_HWEXT_LEN;
+        uint8_t data_offset;
+
+        if (frame_len > request_len - offset ||
+            tail_pad > request_len - offset - frame_len) {
+            break;
+        }
+        stored_len = frame_len + tail_pad;
+        data_offset = frame[software_offset + 3];
+        if ((frame[software_offset + 1] & 0xf) !=
+            CYW43455_SDPCM_DATA_CHANNEL ||
+            data_offset < software_offset + 8 ||
+            data_offset > frame_len) {
+            break;
+        }
+
+        cyw43455_sdio_forward_data(s, frame, frame_len,
+                                   software_offset, data_offset);
+        last_sequence = frame[software_offset];
+        frames++;
+        if (extension & CYW43455_SDPCM_HWEXT_LAST) {
+            break;
+        }
+        if (!stored_len) {
+            break;
+        }
+        offset += stored_len;
+    }
+
+    trace_cyw43455_sdio_glom(request_len, frames, last_sequence);
+    return last_sequence;
+}
+
+static uint8_t cyw43455_sdio_tx_max(CYW43455SDIOState *s,
+                                    uint8_t tx_sequence)
+{
+    return tx_sequence + s->tx_credit_window;
+}
+
+static void cyw43455_sdio_emit_tx_credit(void *opaque)
+{
+    CYW43455SDIOState *s = opaque;
+    uint8_t *response = s->f2_rx_frame;
+    uint8_t tx_max;
+
+    if (!s->tx_credit_pending) {
+        return;
+    }
+
+    /* Do not overwrite a control response or an earlier credit update. */
+    if (s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND) {
+        timer_mod(s->tx_credit_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
+        return;
+    }
+
+    memset(response, 0, CYW43455_SDPCM_HEADER_LEN);
+    stw_le_p(response, CYW43455_SDPCM_HEADER_LEN);
+    stw_le_p(response + 2, (uint16_t)~CYW43455_SDPCM_HEADER_LEN);
+    response[4] = s->f2_rx_seq++;
+    response[5] = CYW43455_SDPCM_DATA_CHANNEL;
+    response[7] = CYW43455_SDPCM_HEADER_LEN;
+    tx_max = cyw43455_sdio_tx_max(s, s->tx_credit_seq);
+    response[9] = tx_max;
+
+    s->f2_rx_len = CYW43455_SDPCM_HEADER_LEN;
+    s->f2_rx_pos = 0;
+    s->tx_credit_pending = false;
+    s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
+    trace_cyw43455_sdio_credit_emitted(s->tx_credit_seq, tx_max);
+    cyw43455_sdio_update_irq(s);
+}
+
+static void cyw43455_sdio_schedule_tx_credit(CYW43455SDIOState *s,
+                                             uint8_t tx_sequence)
+{
+    s->tx_credit_seq = tx_sequence;
+    s->tx_credit_pending = true;
+    trace_cyw43455_sdio_credit_scheduled(
+        tx_sequence, cyw43455_sdio_tx_max(s, tx_sequence),
+        s->tx_credit_delay_ms);
+    timer_mod(s->tx_credit_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+              s->tx_credit_delay_ms);
+}
+
 static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
 {
     const uint8_t *request = s->f2_tx_frame;
@@ -676,8 +795,16 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
     trace_cyw43455_sdio_frame(request_len, request[software_offset],
                               channel, data_offset);
     if (channel == CYW43455_SDPCM_DATA_CHANNEL) {
-        cyw43455_sdio_forward_data(s, request, request_len,
-                                   software_offset, data_offset);
+        uint8_t tx_sequence = request[software_offset];
+
+        if (software_offset > CYW43455_SDPCM_HW_HEADER_LEN) {
+            tx_sequence = cyw43455_sdio_forward_glom(s, request,
+                                                     request_len);
+        } else {
+            cyw43455_sdio_forward_data(s, request, request_len,
+                                       software_offset, data_offset);
+        }
+        cyw43455_sdio_schedule_tx_credit(s, tx_sequence);
         return;
     }
     if (channel != CYW43455_SDPCM_CONTROL_CHANNEL ||
@@ -704,8 +831,11 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
     response[4] = s->f2_rx_seq++;
     response[5] = CYW43455_SDPCM_CONTROL_CHANNEL;
     response[7] = CYW43455_SDPCM_HEADER_LEN;
-    /* Keep a small, monotonically advancing host transmit window open. */
-    response[9] = request[software_offset] + 8;
+    /* A control response also acknowledges outstanding host transmit data. */
+    response[9] = cyw43455_sdio_tx_max(s, request[software_offset]);
+
+    s->tx_credit_pending = false;
+    timer_del(s->tx_credit_timer);
 
     stl_le_p(response + CYW43455_SDPCM_HEADER_LEN, command);
     stl_le_p(response + CYW43455_SDPCM_HEADER_LEN + 4, data_len);
@@ -1009,6 +1139,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
 {
     SDState *sd = &s->parent_obj;
 
+    timer_del(s->tx_credit_timer);
     cyw43455_sdio_init_registers(s);
     memset(s->wrapper_ioctl, 0, sizeof(s->wrapper_ioctl));
     memset(s->wrapper_reset, 0, sizeof(s->wrapper_reset));
@@ -1025,6 +1156,8 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->f2_rx_len = 0;
     s->f2_rx_pos = 0;
     s->f2_rx_seq = 0;
+    s->tx_credit_seq = 0;
+    s->tx_credit_pending = false;
     s->transfer_addr = 0;
     s->transfer_remaining = 0;
     s->transfer_func = 0;
@@ -1346,6 +1479,15 @@ static void cyw43455_sdio_realize(DeviceState *device, Error **errp)
         error_setg(errp, "CYW43455 SDIO endpoint requires an SD bus");
         return;
     }
+    if (s->tx_credit_window < 2 ||
+        s->tx_credit_window > CYW43455_TX_CREDIT_WINDOW_MAX) {
+        error_setg(errp, "tx-credit-window must be between 2 and %u",
+                   CYW43455_TX_CREDIT_WINDOW_MAX);
+        return;
+    }
+
+    s->tx_credit_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                      cyw43455_sdio_emit_tx_credit, s);
 
     if (!memcmp(&s->conf.macaddr, &zero_mac, sizeof(zero_mac))) {
         memcpy(s->conf.macaddr.a, cyw43455_sdio_default_mac,
@@ -1371,6 +1513,8 @@ static void cyw43455_sdio_unrealize(DeviceState *device)
         sdbus_set_card_irq(SD_BUS(bus), false);
         sdbus_set_inserted(SD_BUS(bus), false);
     }
+    timer_free(s->tx_credit_timer);
+    s->tx_credit_timer = NULL;
     qemu_del_nic(s->nic);
     s->nic = NULL;
 }
@@ -1386,7 +1530,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -1419,6 +1563,9 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT32_V(f2_rx_pos, CYW43455SDIOState, 3),
         VMSTATE_UINT8_V(f2_rx_seq, CYW43455SDIOState, 3),
         VMSTATE_BUFFER_V(conf.macaddr.a, CYW43455SDIOState, 4),
+        VMSTATE_UINT8_V(tx_credit_seq, CYW43455SDIOState, 5),
+        VMSTATE_BOOL_V(tx_credit_pending, CYW43455SDIOState, 5),
+        VMSTATE_TIMER_PTR_V(tx_credit_timer, CYW43455SDIOState, 5),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -4473,6 +4620,11 @@ static void sd_class_init(ObjectClass *klass, const void *data)
 
 static const Property cyw43455_sdio_properties[] = {
     DEFINE_NIC_PROPERTIES(CYW43455SDIOState, conf),
+    DEFINE_PROP_UINT32("tx-credit-delay-ms", CYW43455SDIOState,
+                       tx_credit_delay_ms, 0),
+    DEFINE_PROP_UINT8("tx-credit-window", CYW43455SDIOState,
+                      tx_credit_window,
+                      CYW43455_TX_CREDIT_WINDOW_DEFAULT),
 };
 
 static void cyw43455_sdio_class_init(ObjectClass *klass, const void *data)
