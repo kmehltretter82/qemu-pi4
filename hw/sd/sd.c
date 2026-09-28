@@ -370,6 +370,23 @@ struct SDState {
 #define CYW43455_MFP_NONE                   0
 #define CYW43455_MFP_CAPABLE                1
 #define CYW43455_MFP_REQUIRED               2
+#define CYW43455_PNO_VERSION                 2
+#define CYW43455_PNO_MIN_PERIOD             10
+#define CYW43455_PNO_MAX_PERIOD            508
+#define CYW43455_PNO_PARAM_LEN              24
+#define CYW43455_PNO_CONFIG_LEN            140
+#define CYW43455_PNO_NET_PARAM_LEN          56
+#define CYW43455_PNO_MACADDR_LEN             8
+#define CYW43455_PNO_MACADDR_VERSION         1
+#define CYW43455_PNO_MAC_FLAGS_MASK          3
+#define CYW43455_PNO_GSCAN_VERSION           2
+#define CYW43455_PNO_GSCAN_HEADER_LEN        10
+#define CYW43455_PNO_GSCAN_BUCKET_LEN         8
+#define CYW43455_PNO_MAX_BUCKETS              1
+#define CYW43455_PNO_MAX_CHANNELS            64
+#define CYW43455_PNO_MAX_NETWORKS            16
+#define CYW43455_PNO_SSID_MAX_LEN            32
+#define CYW43455_PNO_HIDDEN                 BIT(2)
 #define CYW43455_CHANSPEC_2G_CH1_20MHZ   0x1001
 #define CYW43455_CHANSPEC_2G_CH13_40MHZ  0x190b
 #define CYW43455_CHANSPEC_CHANNEL_MASK   0x00ff
@@ -619,6 +636,18 @@ struct CYW43455SDIOState {
     int32_t obss_coex;
     uint32_t qtxpower;
     uint32_t mfp_mode;
+    uint16_t pfn_channels[CYW43455_PNO_MAX_CHANNELS];
+    uint8_t pfn_ssid_len[CYW43455_PNO_MAX_NETWORKS];
+    uint8_t pfn_ssids[CYW43455_PNO_MAX_NETWORKS]
+                     [CYW43455_PNO_SSID_MAX_LEN];
+    uint32_t pfn_network_flags[CYW43455_PNO_MAX_NETWORKS];
+    uint8_t pfn_scan_mac[ETH_ALEN];
+    uint32_t pfn_scan_freq;
+    uint32_t pfn_channel_count;
+    uint32_t pfn_network_count;
+    uint8_t pfn_scan_mac_flags;
+    uint8_t pfn_bucket_count;
+    bool pfn_enabled;
     uint64_t tx_bytes;
     uint64_t rx_bytes;
     uint64_t tx_multicast_bytes;
@@ -1513,12 +1542,175 @@ static bool cyw43455_sdio_supported_set_iovar(const char *name)
     return false;
 }
 
+static void cyw43455_sdio_pfn_clear(CYW43455SDIOState *s)
+{
+    memset(s->pfn_channels, 0, sizeof(s->pfn_channels));
+    memset(s->pfn_ssid_len, 0, sizeof(s->pfn_ssid_len));
+    memset(s->pfn_ssids, 0, sizeof(s->pfn_ssids));
+    memset(s->pfn_network_flags, 0, sizeof(s->pfn_network_flags));
+    s->pfn_scan_freq = 0;
+    s->pfn_channel_count = 0;
+    s->pfn_network_count = 0;
+    s->pfn_bucket_count = 0;
+}
+
+static int32_t cyw43455_sdio_set_pfn(CYW43455SDIOState *s,
+                                      const char *name,
+                                      const uint8_t *data,
+                                      uint32_t data_len)
+{
+    uint32_t value;
+    unsigned int i;
+
+    if (!strcmp(name, "pfn")) {
+        int32_t status = 0;
+
+        if (data_len != sizeof(value)) {
+            status = CYW43455_BCME_BADLEN;
+        } else {
+            value = ldl_le_p(data);
+            if (value > 1 ||
+                (value && (!s->pfn_scan_freq ||
+                           !s->pfn_channel_count ||
+                           !s->pfn_network_count ||
+                           !s->pfn_bucket_count))) {
+                status = CYW43455_BCME_BADARG;
+            } else {
+                s->pfn_enabled = value;
+            }
+        }
+        trace_cyw43455_sdio_pno(true, s->pfn_enabled,
+                                s->pfn_scan_freq, s->pfn_channel_count,
+                                s->pfn_network_count, status);
+        return status;
+    }
+    if (!strcmp(name, "pfnclear")) {
+        if (data_len) {
+            return CYW43455_BCME_BADLEN;
+        }
+        if (s->pfn_enabled) {
+            return CYW43455_BCME_BUSY;
+        }
+        cyw43455_sdio_pfn_clear(s);
+        return 0;
+    }
+    if (!strcmp(name, "pfn_set")) {
+        uint32_t scan_freq;
+
+        if (data_len != CYW43455_PNO_PARAM_LEN) {
+            return CYW43455_BCME_BADLEN;
+        }
+        scan_freq = ldl_le_p(data + 4);
+        if (ldl_le_p(data) != CYW43455_PNO_VERSION ||
+            scan_freq < CYW43455_PNO_MIN_PERIOD ||
+            scan_freq > CYW43455_PNO_MAX_PERIOD ||
+            ldl_le_p(data + 8) || lduw_le_p(data + 12) != 0x48 ||
+            lduw_le_p(data + 14) || data[16] || data[17] ||
+            data[18] != 4 || data[19] != 3 || ldl_le_p(data + 20)) {
+            return CYW43455_BCME_BADARG;
+        }
+        s->pfn_scan_freq = scan_freq;
+        return 0;
+    }
+    if (!strcmp(name, "pfn_cfg")) {
+        uint32_t count;
+
+        if (data_len != CYW43455_PNO_CONFIG_LEN) {
+            return CYW43455_BCME_BADLEN;
+        }
+        count = ldl_le_p(data + 4);
+        if (ldl_le_p(data) || ldl_le_p(data + 136) || !count ||
+            count > CYW43455_PNO_MAX_CHANNELS) {
+            return CYW43455_BCME_BADARG;
+        }
+        for (i = 0; i < count; i++) {
+            uint16_t channel = lduw_le_p(data + 8 + i * sizeof(channel));
+
+            if (channel < CYW43455_CHANNEL_2G_MIN ||
+                channel > CYW43455_CHANNEL_2G_MAX) {
+                return CYW43455_BCME_BADARG;
+            }
+            s->pfn_channels[i] = channel;
+        }
+        memset(s->pfn_channels + count, 0,
+               sizeof(s->pfn_channels) - count * sizeof(s->pfn_channels[0]));
+        s->pfn_channel_count = count;
+        return 0;
+    }
+    if (!strcmp(name, "pfn_gscan_cfg")) {
+        uint8_t count;
+
+        if (data_len < CYW43455_PNO_GSCAN_HEADER_LEN) {
+            return CYW43455_BCME_BADLEN;
+        }
+        count = data[6];
+        if (data_len != CYW43455_PNO_GSCAN_HEADER_LEN +
+                        count * CYW43455_PNO_GSCAN_BUCKET_LEN) {
+            return CYW43455_BCME_BADLEN;
+        }
+        if (lduw_le_p(data) != CYW43455_PNO_GSCAN_VERSION ||
+            !count || count > CYW43455_PNO_MAX_BUCKETS ||
+            (data[2] & ~BIT(3)) ||
+            data[CYW43455_PNO_GSCAN_HEADER_LEN] >=
+                s->pfn_channel_count) {
+            return CYW43455_BCME_BADARG;
+        }
+        s->pfn_bucket_count = count;
+        return 0;
+    }
+    if (!strcmp(name, "pfn_macaddr")) {
+        static const uint8_t zero_mac[ETH_ALEN];
+
+        if (data_len != CYW43455_PNO_MACADDR_LEN) {
+            return CYW43455_BCME_BADLEN;
+        }
+        if (data[0] != CYW43455_PNO_MACADDR_VERSION ||
+            (data[1] & ~CYW43455_PNO_MAC_FLAGS_MASK) ||
+            (data[2] & 1) || !memcmp(data + 2, zero_mac, ETH_ALEN)) {
+            return CYW43455_BCME_BADARG;
+        }
+        s->pfn_scan_mac_flags = data[1];
+        memcpy(s->pfn_scan_mac, data + 2, ETH_ALEN);
+        return 0;
+    }
+    if (!strcmp(name, "pfn_add")) {
+        uint32_t ssid_len;
+        uint32_t flags;
+
+        if (data_len != CYW43455_PNO_NET_PARAM_LEN) {
+            return CYW43455_BCME_BADLEN;
+        }
+        ssid_len = ldl_le_p(data);
+        flags = ldl_le_p(data + 36);
+        if (!ssid_len || ssid_len > CYW43455_PNO_SSID_MAX_LEN ||
+            (flags & ~CYW43455_PNO_HIDDEN) ||
+            ldl_le_p(data + 40) != 1 || ldl_le_p(data + 44) ||
+            ldl_le_p(data + 48) != UINT32_MAX || ldl_le_p(data + 52) ||
+            s->pfn_network_count == CYW43455_PNO_MAX_NETWORKS) {
+            return CYW43455_BCME_BADARG;
+        }
+        i = s->pfn_network_count++;
+        s->pfn_ssid_len[i] = ssid_len;
+        memcpy(s->pfn_ssids[i], data + 4, ssid_len);
+        s->pfn_network_flags[i] = flags;
+        return 0;
+    }
+    return CYW43455_BCME_UNSUPPORTED;
+}
+
 static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
                                        const char *name,
                                        const uint8_t *data,
                                        uint32_t data_len)
 {
     uint32_t count;
+
+    if (!strcmp(name, "pfn") || !strcmp(name, "pfnclear") ||
+        !strcmp(name, "pfn_set") || !strcmp(name, "pfn_cfg") ||
+        !strcmp(name, "pfn_gscan_cfg") ||
+        !strcmp(name, "pfn_macaddr") || !strcmp(name, "pfn_add")) {
+        return cyw43455_sdio_set_pfn(s, name, data, data_len);
+    }
 
     if (!strcmp(name, "cur_etheraddr")) {
         static const uint8_t zero_mac[ETH_ALEN];
@@ -1832,6 +2024,20 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
         } else if (!strcmp(iovar, "clmver")) {
             cyw43455_sdio_store_string(output, output_len,
                                        "QEMU synthetic CLM 1.0\n");
+        } else if (!strcmp(iovar, "pfn")) {
+            cyw43455_sdio_store_u32(output, output_len, 0,
+                                    s->pfn_enabled);
+            trace_cyw43455_sdio_pno(false, s->pfn_enabled,
+                                    s->pfn_scan_freq,
+                                    s->pfn_channel_count,
+                                    s->pfn_network_count, 0);
+        } else if (!strcmp(iovar, "pfn_macaddr")) {
+            if (output_len < CYW43455_PNO_MACADDR_LEN) {
+                return CYW43455_BCME_BADLEN;
+            }
+            output[0] = CYW43455_PNO_MACADDR_VERSION;
+            output[1] = s->pfn_scan_mac_flags;
+            memcpy(output + 2, s->pfn_scan_mac, ETH_ALEN);
         } else if (!strcmp(iovar, "cap") ||
                    !strcmp(iovar, "event_msgs") ||
                    !strcmp(iovar, "clmload_status") ||
@@ -2596,6 +2802,10 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->obss_coex = CYW43455_OBSS_COEX_OFF;
     s->qtxpower = CYW43455_QTXPOWER_DEFAULT_QDBM;
     s->mfp_mode = CYW43455_MFP_NONE;
+    cyw43455_sdio_pfn_clear(s);
+    memset(s->pfn_scan_mac, 0, sizeof(s->pfn_scan_mac));
+    s->pfn_scan_mac_flags = 0;
+    s->pfn_enabled = false;
     s->tx_bytes = 0;
     s->rx_bytes = 0;
     s->tx_multicast_bytes = 0;
@@ -3263,6 +3473,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     CYW43455SDIOState *s = opaque;
     uint8_t bandwidth_mhz;
     uint8_t control_channel;
+    unsigned int i;
 
     if (version_id < 10) {
         cyw43455_sdio_init_function3(s);
@@ -3319,6 +3530,12 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     if (version_id < 22) {
         s->mfp_mode = CYW43455_MFP_NONE;
     }
+    if (version_id < 23) {
+        cyw43455_sdio_pfn_clear(s);
+        memset(s->pfn_scan_mac, 0, sizeof(s->pfn_scan_mac));
+        s->pfn_scan_mac_flags = 0;
+        s->pfn_enabled = false;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -3330,6 +3547,31 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     }
     if (s->escan_event_phase > CYW43455_ESCAN_EVENT_COMPLETE) {
         return -EINVAL;
+    }
+    if (s->pfn_channel_count > CYW43455_PNO_MAX_CHANNELS ||
+        s->pfn_network_count > CYW43455_PNO_MAX_NETWORKS ||
+        s->pfn_bucket_count > CYW43455_PNO_MAX_BUCKETS ||
+        (s->pfn_scan_freq &&
+         (s->pfn_scan_freq < CYW43455_PNO_MIN_PERIOD ||
+          s->pfn_scan_freq > CYW43455_PNO_MAX_PERIOD)) ||
+        (s->pfn_scan_mac_flags & ~CYW43455_PNO_MAC_FLAGS_MASK) ||
+        (s->pfn_enabled &&
+         (!s->pfn_scan_freq || !s->pfn_channel_count ||
+          !s->pfn_network_count || !s->pfn_bucket_count))) {
+        return -EINVAL;
+    }
+    for (i = 0; i < s->pfn_channel_count; i++) {
+        if (s->pfn_channels[i] < CYW43455_CHANNEL_2G_MIN ||
+            s->pfn_channels[i] > CYW43455_CHANNEL_2G_MAX) {
+            return -EINVAL;
+        }
+    }
+    for (i = 0; i < s->pfn_network_count; i++) {
+        if (!s->pfn_ssid_len[i] ||
+            s->pfn_ssid_len[i] > CYW43455_PNO_SSID_MAX_LEN ||
+            (s->pfn_network_flags[i] & ~CYW43455_PNO_HIDDEN)) {
+            return -EINVAL;
+        }
     }
     if (!cyw43455_sdio_chanspec_info(s->ap_chanspec, &control_channel,
                                      &bandwidth_mhz) ||
@@ -3353,7 +3595,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 22,
+    .version_id = 23,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -3436,6 +3678,23 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_INT32_V(obss_coex, CYW43455SDIOState, 20),
         VMSTATE_UINT32_V(qtxpower, CYW43455SDIOState, 21),
         VMSTATE_UINT32_V(mfp_mode, CYW43455SDIOState, 22),
+        VMSTATE_UINT16_ARRAY_V(pfn_channels, CYW43455SDIOState,
+                               CYW43455_PNO_MAX_CHANNELS, 23),
+        VMSTATE_UINT8_ARRAY_V(pfn_ssid_len, CYW43455SDIOState,
+                              CYW43455_PNO_MAX_NETWORKS, 23),
+        VMSTATE_UINT8_2DARRAY_V(pfn_ssids, CYW43455SDIOState,
+                                CYW43455_PNO_MAX_NETWORKS,
+                                CYW43455_PNO_SSID_MAX_LEN, 23),
+        VMSTATE_UINT32_ARRAY_V(pfn_network_flags, CYW43455SDIOState,
+                               CYW43455_PNO_MAX_NETWORKS, 23),
+        VMSTATE_UINT8_ARRAY_V(pfn_scan_mac, CYW43455SDIOState,
+                              ETH_ALEN, 23),
+        VMSTATE_UINT32_V(pfn_scan_freq, CYW43455SDIOState, 23),
+        VMSTATE_UINT32_V(pfn_channel_count, CYW43455SDIOState, 23),
+        VMSTATE_UINT32_V(pfn_network_count, CYW43455SDIOState, 23),
+        VMSTATE_UINT8_V(pfn_scan_mac_flags, CYW43455SDIOState, 23),
+        VMSTATE_UINT8_V(pfn_bucket_count, CYW43455SDIOState, 23),
+        VMSTATE_BOOL_V(pfn_enabled, CYW43455SDIOState, 23),
         VMSTATE_END_OF_LIST()
     },
 };
