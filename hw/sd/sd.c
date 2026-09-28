@@ -342,6 +342,7 @@ struct SDState {
 #define CYW43455_BCME_BADARG             (-2)
 #define CYW43455_BCME_UNSUPPORTED        (-23)
 #define CYW43455_BCME_BADLEN             (-24)
+#define CYW43455_BCME_NOTASSOCIATED      (-28)
 #define CYW43455_C_GET_VERSION           1
 #define CYW43455_C_SET_PROMISC           10
 #define CYW43455_C_GET_REVINFO           98
@@ -362,6 +363,44 @@ struct SDState {
 #define CYW43455_ICMP6_NS                135
 #define CYW43455_ICMP6_NA                136
 #define CYW43455_ND_PAYLOAD_LEN          32
+#define CYW43455_STA_INFO_VERSION        4
+#define CYW43455_STA_INFO_LEN            172
+#define CYW43455_STA_INFO_FLAGS_OFFSET   8
+#define CYW43455_STA_INFO_IDLE_OFFSET    12
+#define CYW43455_STA_INFO_EA_OFFSET      16
+#define CYW43455_STA_INFO_COUNT_OFFSET   24
+#define CYW43455_STA_INFO_RATES_OFFSET   28
+#define CYW43455_STA_INFO_IN_OFFSET      44
+#define CYW43455_STA_INFO_TX_PKTS_OFFSET 52
+#define CYW43455_STA_INFO_TX_FAIL_OFFSET 56
+#define CYW43455_STA_INFO_RX_UCAST_OFFSET 60
+#define CYW43455_STA_INFO_RX_MCAST_OFFSET 64
+#define CYW43455_STA_INFO_TX_RATE_OFFSET 68
+#define CYW43455_STA_INFO_RX_RATE_OFFSET 72
+#define CYW43455_STA_INFO_TX_TOTAL_OFFSET 84
+#define CYW43455_STA_INFO_RX_TOTAL_OFFSET 88
+#define CYW43455_STA_INFO_TX_MCAST_OFFSET 92
+#define CYW43455_STA_INFO_TX_BYTES_OFFSET 96
+#define CYW43455_STA_INFO_RX_BYTES_OFFSET 104
+#define CYW43455_STA_INFO_TX_UCAST_BYTES_OFFSET 112
+#define CYW43455_STA_INFO_TX_MCAST_BYTES_OFFSET 120
+#define CYW43455_STA_INFO_RX_UCAST_BYTES_OFFSET 128
+#define CYW43455_STA_INFO_RX_MCAST_BYTES_OFFSET 136
+#define CYW43455_STA_INFO_RSSI_OFFSET    144
+#define CYW43455_STA_INFO_NF_OFFSET      148
+#define CYW43455_STA_INFO_AID_OFFSET     152
+#define CYW43455_STA_INFO_RX_LAST_RSSI_OFFSET 168
+#define CYW43455_STA_WME                 BIT(1)
+#define CYW43455_STA_AUTHE               BIT(3)
+#define CYW43455_STA_ASSOC               BIT(4)
+#define CYW43455_STA_AUTHO               BIT(5)
+#define CYW43455_STA_SCBSTATS            BIT(14)
+#define CYW43455_STA_FLAGS               \
+    (CYW43455_STA_WME | CYW43455_STA_AUTHE | CYW43455_STA_ASSOC | \
+     CYW43455_STA_AUTHO | CYW43455_STA_SCBSTATS)
+#define CYW43455_LINK_RATE_KBPS          72200
+#define CYW43455_SIGNAL_DBM              (-28)
+#define CYW43455_NOISE_DBM               (-95)
 #define CYW43455_BRCM_EVENT_HEADER_LEN   10
 #define CYW43455_EVENT_MSG_LEN           48
 #define CYW43455_EVENT_ETHERTYPE         0x886c
@@ -454,6 +493,15 @@ struct CYW43455SDIOState {
     uint8_t nd_hostip[CYW43455_ND_HOSTIP_MAX][16];
     uint32_t nd_hostip_count;
     uint32_t pm2_sleep_ret;
+    uint64_t tx_bytes;
+    uint64_t rx_bytes;
+    uint64_t tx_multicast_bytes;
+    uint64_t rx_multicast_bytes;
+    uint32_t tx_packets;
+    uint32_t rx_packets;
+    uint32_t tx_multicast_packets;
+    uint32_t rx_multicast_packets;
+    int64_t association_time_ms;
     bool arp_offload;
     bool nd_offload;
     bool allmulti;
@@ -556,6 +604,11 @@ static void cyw43455_sdio_emit_link_event(CYW43455SDIOState *s)
     s->f2_rx_pos = 0;
     s->link_event_pending = false;
     s->link_event_sent = s->link_event_up;
+    if (s->link_event_up && !s->firmware_connected) {
+        s->association_time_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    } else if (!s->link_event_up) {
+        s->association_time_ms = -1;
+    }
     s->firmware_connected = s->link_event_up;
     s->backend_link_events_armed |= s->link_event_up;
     s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
@@ -642,6 +695,82 @@ static void cyw43455_sdio_store_string(uint8_t *output, uint32_t output_len,
     size_t length = MIN(strlen(value) + 1, output_len);
 
     memcpy(output, value, length);
+}
+
+static int32_t cyw43455_sdio_station_info(CYW43455SDIOState *s,
+                                          const uint8_t *data,
+                                          uint32_t data_len,
+                                          uint8_t *output,
+                                          uint32_t output_len)
+{
+    uint64_t tx_unicast_bytes = s->tx_bytes - s->tx_multicast_bytes;
+    uint64_t rx_unicast_bytes = s->rx_bytes - s->rx_multicast_bytes;
+    uint32_t tx_unicast = s->tx_packets - s->tx_multicast_packets;
+    uint32_t rx_unicast = s->rx_packets - s->rx_multicast_packets;
+    uint32_t connected_seconds = 0;
+    int64_t now_ms;
+
+    if (!s->firmware_connected) {
+        return CYW43455_BCME_NOTASSOCIATED;
+    }
+    if (data_len < ETH_ALEN ||
+        memcmp(data, cyw43455_sdio_peer_mac, ETH_ALEN)) {
+        return CYW43455_BCME_BADARG;
+    }
+    if (output_len < CYW43455_STA_INFO_LEN) {
+        return CYW43455_BCME_BADLEN;
+    }
+
+    now_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    if (s->association_time_ms >= 0 && now_ms > s->association_time_ms) {
+        connected_seconds = MIN((uint64_t)(now_ms -
+                                            s->association_time_ms) / 1000,
+                                (uint64_t)UINT32_MAX);
+    }
+
+    stw_le_p(output, CYW43455_STA_INFO_VERSION);
+    stw_le_p(output + 2, CYW43455_STA_INFO_LEN);
+    stw_le_p(output + 4, BIT(10)); /* short-slot-time capability */
+    stl_le_p(output + CYW43455_STA_INFO_FLAGS_OFFSET,
+             CYW43455_STA_FLAGS);
+    stl_le_p(output + CYW43455_STA_INFO_IDLE_OFFSET, 0);
+    memcpy(output + CYW43455_STA_INFO_EA_OFFSET,
+           cyw43455_sdio_peer_mac, ETH_ALEN);
+    stl_le_p(output + CYW43455_STA_INFO_COUNT_OFFSET, 1);
+    output[CYW43455_STA_INFO_RATES_OFFSET] = 144; /* 72 Mbit/s */
+    stl_le_p(output + CYW43455_STA_INFO_IN_OFFSET, connected_seconds);
+    stl_le_p(output + CYW43455_STA_INFO_TX_PKTS_OFFSET, tx_unicast);
+    stl_le_p(output + CYW43455_STA_INFO_TX_FAIL_OFFSET, 0);
+    stl_le_p(output + CYW43455_STA_INFO_RX_UCAST_OFFSET, rx_unicast);
+    stl_le_p(output + CYW43455_STA_INFO_RX_MCAST_OFFSET,
+             s->rx_multicast_packets);
+    stl_le_p(output + CYW43455_STA_INFO_TX_RATE_OFFSET,
+             CYW43455_LINK_RATE_KBPS);
+    stl_le_p(output + CYW43455_STA_INFO_RX_RATE_OFFSET,
+             CYW43455_LINK_RATE_KBPS);
+    stl_le_p(output + CYW43455_STA_INFO_TX_TOTAL_OFFSET, s->tx_packets);
+    stl_le_p(output + CYW43455_STA_INFO_RX_TOTAL_OFFSET, s->rx_packets);
+    stl_le_p(output + CYW43455_STA_INFO_TX_MCAST_OFFSET,
+             s->tx_multicast_packets);
+    stq_le_p(output + CYW43455_STA_INFO_TX_BYTES_OFFSET, s->tx_bytes);
+    stq_le_p(output + CYW43455_STA_INFO_RX_BYTES_OFFSET, s->rx_bytes);
+    stq_le_p(output + CYW43455_STA_INFO_TX_UCAST_BYTES_OFFSET,
+             tx_unicast_bytes);
+    stq_le_p(output + CYW43455_STA_INFO_TX_MCAST_BYTES_OFFSET,
+             s->tx_multicast_bytes);
+    stq_le_p(output + CYW43455_STA_INFO_RX_UCAST_BYTES_OFFSET,
+             rx_unicast_bytes);
+    stq_le_p(output + CYW43455_STA_INFO_RX_MCAST_BYTES_OFFSET,
+             s->rx_multicast_bytes);
+    output[CYW43455_STA_INFO_RSSI_OFFSET] = CYW43455_SIGNAL_DBM;
+    output[CYW43455_STA_INFO_NF_OFFSET] = CYW43455_NOISE_DBM;
+    stw_le_p(output + CYW43455_STA_INFO_AID_OFFSET, 1);
+    output[CYW43455_STA_INFO_RX_LAST_RSSI_OFFSET] = CYW43455_SIGNAL_DBM;
+
+    trace_cyw43455_sdio_station(s->tx_packets, s->rx_packets,
+                                s->tx_bytes, s->rx_bytes,
+                                CYW43455_SIGNAL_DBM);
+    return 0;
 }
 
 static bool cyw43455_sdio_supported_set_iovar(const char *name)
@@ -916,6 +1045,10 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
             memcpy(output, s->nd_hostip,
                    MIN(output_len, s->nd_hostip_count *
                                    sizeof(s->nd_hostip[0])));
+        } else if (!strcmp(iovar, "sta_info")) {
+            return cyw43455_sdio_station_info(s, iovar_data,
+                                              iovar_data_len, output,
+                                              output_len);
         } else if (!strcmp(iovar, "pm2_sleep_ret")) {
             cyw43455_sdio_store_u32(output, output_len, 0,
                                     s->pm2_sleep_ret);
@@ -1006,6 +1139,12 @@ static void cyw43455_sdio_forward_data(CYW43455SDIOState *s,
 
     trace_cyw43455_sdio_data(ethernet_len, ethertype, ip_protocol,
                              source_port, destination_port);
+    s->tx_packets++;
+    s->tx_bytes += ethernet_len;
+    if (packet[0] & 1) {
+        s->tx_multicast_packets++;
+        s->tx_multicast_bytes += ethernet_len;
+    }
     qemu_send_packet(qemu_get_queue(s->nic), packet, ethernet_len);
 }
 
@@ -1597,6 +1736,15 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     memset(s->nd_hostip, 0, sizeof(s->nd_hostip));
     s->nd_hostip_count = 0;
     s->pm2_sleep_ret = 0;
+    s->tx_bytes = 0;
+    s->rx_bytes = 0;
+    s->tx_multicast_bytes = 0;
+    s->rx_multicast_bytes = 0;
+    s->tx_packets = 0;
+    s->rx_packets = 0;
+    s->tx_multicast_packets = 0;
+    s->rx_multicast_packets = 0;
+    s->association_time_ms = -1;
     s->arp_offload = false;
     s->nd_offload = false;
     s->allmulti = false;
@@ -2144,6 +2292,13 @@ static ssize_t cyw43455_sdio_receive(NetClientState *nc,
                    CYW43455_BCDC_DATA_HEADER_LEN,
            buffer, size);
 
+    s->rx_packets++;
+    s->rx_bytes += size;
+    if (buffer[0] & 1) {
+        s->rx_multicast_packets++;
+        s->rx_multicast_bytes += size;
+    }
+
     s->f2_rx_len = stored_len;
     s->f2_rx_pos = 0;
     s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
@@ -2261,6 +2416,18 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         s->nd_hostip_count = 0;
         s->nd_offload = false;
     }
+    if (version_id < 15) {
+        s->tx_bytes = 0;
+        s->rx_bytes = 0;
+        s->tx_multicast_bytes = 0;
+        s->rx_multicast_bytes = 0;
+        s->tx_packets = 0;
+        s->rx_packets = 0;
+        s->tx_multicast_packets = 0;
+        s->rx_multicast_packets = 0;
+        s->association_time_ms = s->firmware_connected ?
+            qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) : -1;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -2278,7 +2445,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 14,
+    .version_id = 15,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -2342,6 +2509,15 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
                                 CYW43455_ND_HOSTIP_MAX, 16, 14),
         VMSTATE_UINT32_V(nd_hostip_count, CYW43455SDIOState, 14),
         VMSTATE_BOOL_V(nd_offload, CYW43455SDIOState, 14),
+        VMSTATE_UINT64_V(tx_bytes, CYW43455SDIOState, 15),
+        VMSTATE_UINT64_V(rx_bytes, CYW43455SDIOState, 15),
+        VMSTATE_UINT64_V(tx_multicast_bytes, CYW43455SDIOState, 15),
+        VMSTATE_UINT64_V(rx_multicast_bytes, CYW43455SDIOState, 15),
+        VMSTATE_UINT32_V(tx_packets, CYW43455SDIOState, 15),
+        VMSTATE_UINT32_V(rx_packets, CYW43455SDIOState, 15),
+        VMSTATE_UINT32_V(tx_multicast_packets, CYW43455SDIOState, 15),
+        VMSTATE_UINT32_V(rx_multicast_packets, CYW43455SDIOState, 15),
+        VMSTATE_INT64_V(association_time_ms, CYW43455SDIOState, 15),
         VMSTATE_END_OF_LIST()
     },
 };
