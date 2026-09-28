@@ -98,6 +98,7 @@
 #define CYW43455_BCDC_DCMD_ERROR   BIT(0)
 #define CYW43455_BCDC_DCMD_SET     BIT(1)
 #define CYW43455_BCME_BADARG       (-2)
+#define CYW43455_BCME_BADLEN       (-24)
 #define CYW43455_C_SET_PROMISC     10
 #define CYW43455_C_GET_PHY_NOISE   135
 #define CYW43455_C_GET_BSS_INFO    136
@@ -164,6 +165,7 @@
 #define CYW43455_LINK_RATE_KBPS    72200
 #define CYW43455_SIGNAL_DBM        (-28)
 #define CYW43455_NOISE_DBM         (-95)
+#define CYW43455_WLC_VERSION_LEN   16
 #define CYW43455_STA_PAYLOAD_LEN   256
 #define CYW43455_ETH_HEADER_LEN    14
 #define CYW43455_BRCM_EVENT_HEADER_LEN 10
@@ -5273,6 +5275,53 @@ static void test_cyw43455_sdio_survey_migration(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
+static void test_cyw43455_sdio_wlc_version(void)
+{
+    static const uint8_t expected_version[CYW43455_WLC_VERSION_LEN] = {
+        1, 0, 16, 0, 7, 0, 84, 0,
+        17, 0, 1, 0, 7, 0, 84, 0,
+    };
+    QTestState *qts = global_qtest;
+    const uint8_t *payload;
+    uint8_t control_frame[64];
+    uint32_t scalar = 0;
+    size_t control_len;
+
+    cyw43455_sdio_select_qtest(qts);
+    cyw43455_sdio_enable_control_irq_qtest(qts);
+
+    control_len = cyw43455_sdio_build_iovar_request(
+        control_frame, sizeof(control_frame), "wlc_ver", 0, 1);
+    cyw43455_sdio_function2_write_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(qts);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_assert_iovar_value_response(
+        control_frame, control_len, 0, 1, expected_version,
+        sizeof(expected_version));
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    /* The full fixed-size structure must fit in the advertised buffer. */
+    control_len = cyw43455_sdio_build_iovar_data_request(
+        control_frame, sizeof(control_frame), "wlc_ver", &scalar,
+        sizeof(scalar), 12, 1, 2);
+    cyw43455_sdio_function2_write_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(qts);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(qts, control_frame, control_len);
+    payload = cyw43455_sdio_assert_iovar_data_response(
+        control_frame, control_len, 12, 1, 2, CYW43455_BCME_BADLEN);
+    for (size_t i = 0; i < 12; i++) {
+        g_assert_cmphex(payload[i], ==, 0);
+    }
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+}
+
 static void test_cyw43455_sdio_migration(void)
 {
     static const uint8_t multicast[6] = {
@@ -7179,6 +7228,9 @@ int main(int argc, char **argv)
                                "tx-credit-delay-ms=25"
                                " -global cyw43455-sdio."
                                "tx-credit-window=5");
+    raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio_wlc_version",
+                               test_cyw43455_sdio_wlc_version,
+                               " -machine sdio-wifi=on");
 #ifndef _WIN32
     raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_network_backend",
                      test_cyw43455_sdio_network_backend);

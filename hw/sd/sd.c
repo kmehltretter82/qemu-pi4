@@ -434,6 +434,14 @@ struct SDState {
 #define CYW43455_LINK_RATE_KBPS          72200
 #define CYW43455_SIGNAL_DBM              (-28)
 #define CYW43455_NOISE_DBM               (-95)
+#define CYW43455_WLC_VERSION_STRUCT_VERSION 1
+#define CYW43455_WLC_VERSION_LEN         16
+#define CYW43455_EPI_VERSION_MAJOR       7
+#define CYW43455_EPI_VERSION_MINOR       84
+#define CYW43455_EPI_VERSION_RC          17
+#define CYW43455_EPI_VERSION_INCREMENT   1
+#define CYW43455_WLC_VERSION_MAJOR       7
+#define CYW43455_WLC_VERSION_MINOR       84
 #define CYW43455_BRCM_EVENT_HEADER_LEN   10
 #define CYW43455_EVENT_MSG_LEN           48
 #define CYW43455_EVENT_ETHERTYPE         0x886c
@@ -877,6 +885,25 @@ static void cyw43455_sdio_store_string(uint8_t *output, uint32_t output_len,
     size_t length = MIN(strlen(value) + 1, output_len);
 
     memcpy(output, value, length);
+}
+
+static int32_t cyw43455_sdio_wlc_version(uint8_t *output,
+                                          uint32_t output_len)
+{
+    if (output_len < CYW43455_WLC_VERSION_LEN) {
+        return CYW43455_BCME_BADLEN;
+    }
+
+    /* Match the 7.84.17.1 firmware revision reported by the Pi 400. */
+    stw_le_p(output, CYW43455_WLC_VERSION_STRUCT_VERSION);
+    stw_le_p(output + 2, CYW43455_WLC_VERSION_LEN);
+    stw_le_p(output + 4, CYW43455_EPI_VERSION_MAJOR);
+    stw_le_p(output + 6, CYW43455_EPI_VERSION_MINOR);
+    stw_le_p(output + 8, CYW43455_EPI_VERSION_RC);
+    stw_le_p(output + 10, CYW43455_EPI_VERSION_INCREMENT);
+    stw_le_p(output + 12, CYW43455_WLC_VERSION_MAJOR);
+    stw_le_p(output + 14, CYW43455_WLC_VERSION_MINOR);
+    return 0;
 }
 
 static int32_t cyw43455_sdio_dump_obss(CYW43455SDIOState *s,
@@ -1493,6 +1520,8 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
         } else if (!strcmp(iovar, "scan_ver")) {
             cyw43455_sdio_store_u32(output, output_len, 0,
                                     CYW43455_ESCAN_REQ_VERSION_V2);
+        } else if (!strcmp(iovar, "wlc_ver")) {
+            return cyw43455_sdio_wlc_version(output, output_len);
         } else if (!strcmp(iovar, "nmode") ||
                    !strcmp(iovar, "vhtmode") ||
                    !strcmp(iovar, "mimo_bw_cap")) {
