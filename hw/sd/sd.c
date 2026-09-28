@@ -362,6 +362,7 @@ struct SDState {
 #define CYW43455_EVENT_MSG_VERSION       2
 #define CYW43455_EVENT_MSG_LINK          BIT(0)
 #define CYW43455_EVENT_SET_SSID          0
+#define CYW43455_EVENT_LINK              16
 #define CYW43455_LINK_EVENT_LEN          \
     (CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_DATA_HEADER_LEN + \
      ETH_HLEN + CYW43455_BRCM_EVENT_HEADER_LEN + CYW43455_EVENT_MSG_LEN)
@@ -433,6 +434,9 @@ struct CYW43455SDIOState {
     bool auto_associate;
     bool link_event_pending;
     bool link_event_sent;
+    bool link_event_up;
+    bool firmware_connected;
+    bool backend_link_events_armed;
     uint8_t multicast[CYW43455_MULTICAST_MAX][ETH_ALEN];
     uint32_t multicast_count;
     uint32_t pm2_sleep_ret;
@@ -526,17 +530,20 @@ static void cyw43455_sdio_emit_link_event(CYW43455SDIOState *s)
     stw_be_p(brcm + 8, CYW43455_EVENT_USER_SUBTYPE);
 
     stw_be_p(event, CYW43455_EVENT_MSG_VERSION);
-    stw_be_p(event + 2, CYW43455_EVENT_MSG_LINK);
-    stl_be_p(event + 4, CYW43455_EVENT_SET_SSID);
+    stw_be_p(event + 2, s->link_event_up ? CYW43455_EVENT_MSG_LINK : 0);
+    stl_be_p(event + 4, s->link_event_up ? CYW43455_EVENT_SET_SSID :
+                                          CYW43455_EVENT_LINK);
     memcpy(event + 24, cyw43455_sdio_peer_mac, ETH_ALEN);
     memcpy(event + 30, "wlan0", sizeof("wlan0"));
 
     s->f2_rx_len = stored_len;
     s->f2_rx_pos = 0;
     s->link_event_pending = false;
-    s->link_event_sent = true;
+    s->link_event_sent = s->link_event_up;
+    s->firmware_connected = s->link_event_up;
+    s->backend_link_events_armed |= s->link_event_up;
     s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
-    trace_cyw43455_sdio_link_event(frame[4], frame[9]);
+    trace_cyw43455_sdio_link_event(s->link_event_up, frame[4], frame[9]);
     cyw43455_sdio_update_irq(s);
 }
 
@@ -1121,8 +1128,10 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
         trace_cyw43455_sdio_link_rearmed();
     }
     if (s->auto_associate && set && command == CYW43455_C_SET_PROMISC &&
-        status == 0 && !s->link_event_sent) {
+        status == 0 && !s->link_event_sent && !s->link_event_pending &&
+        !qemu_get_queue(s->nic)->link_down) {
         /* Netdev open has completed before this asynchronous filter update. */
+        s->link_event_up = true;
         s->link_event_pending = true;
     }
     if (!response_queued) {
@@ -1443,6 +1452,9 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->rx_data_enabled = false;
     s->link_event_pending = false;
     s->link_event_sent = false;
+    s->link_event_up = true;
+    s->firmware_connected = false;
+    s->backend_link_events_armed = false;
     memset(s->multicast, 0, sizeof(s->multicast));
     s->multicast_count = 0;
     s->pm2_sleep_ret = 0;
@@ -1852,11 +1864,36 @@ static ssize_t cyw43455_sdio_receive(NetClientState *nc,
     return size;
 }
 
+static void cyw43455_sdio_link_status_changed(NetClientState *nc)
+{
+    CYW43455SDIOState *s = qemu_get_nic_opaque(nc);
+    bool link_up = !nc->link_down;
+
+    if (!s->auto_associate || !s->backend_link_events_armed) {
+        return;
+    }
+
+    if (link_up == s->firmware_connected) {
+        if (s->link_event_pending && s->link_event_up != link_up) {
+            s->link_event_pending = false;
+        }
+        return;
+    }
+
+    s->link_event_up = link_up;
+    s->link_event_pending = true;
+    cyw43455_sdio_advance_rx(s);
+    if (link_up) {
+        qemu_flush_queued_packets(nc);
+    }
+}
+
 static NetClientInfo cyw43455_sdio_net_info = {
     .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
     .can_receive = cyw43455_sdio_can_receive,
     .receive = cyw43455_sdio_receive,
+    .link_status_changed = cyw43455_sdio_link_status_changed,
 };
 
 static void cyw43455_sdio_realize(DeviceState *device, Error **errp)
@@ -1916,6 +1953,11 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     if (version_id < 10) {
         cyw43455_sdio_init_function3(s);
     }
+    if (version_id < 11) {
+        s->link_event_up = true;
+        s->firmware_connected = s->link_event_sent;
+        s->backend_link_events_armed = s->link_event_sent;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -1927,7 +1969,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 10,
+    .version_id = 11,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -1977,6 +2019,9 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_BOOL_V(promiscuous, CYW43455SDIOState, 9),
         VMSTATE_UINT8_ARRAY_V(f3_regs, CYW43455SDIOState,
                               CYW43455_SDIO_ADDR_SPACE_SIZE, 10),
+        VMSTATE_BOOL_V(link_event_up, CYW43455SDIOState, 11),
+        VMSTATE_BOOL_V(firmware_connected, CYW43455SDIOState, 11),
+        VMSTATE_BOOL_V(backend_link_events_armed, CYW43455SDIOState, 11),
         VMSTATE_END_OF_LIST()
     },
 };

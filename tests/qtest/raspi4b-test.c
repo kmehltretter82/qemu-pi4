@@ -3259,7 +3259,7 @@ static void cyw43455_sdio_assert_command_response(const uint8_t *frame,
 static void cyw43455_sdio_assert_link_event(const uint8_t *frame,
                                              size_t stored_len,
                                              uint8_t sequence,
-                                             uint8_t tx_max)
+                                             uint8_t tx_max, bool link_up)
 {
     static const uint8_t guest_mac[CYW43455_MAC_LEN] = {
         0x02, 0, 0, 0, 0, 1,
@@ -3297,8 +3297,8 @@ static void cyw43455_sdio_assert_link_event(const uint8_t *frame,
     g_assert_cmpmem(brcm + 5, sizeof(oui), oui, sizeof(oui));
     g_assert_cmpuint(lduw_be_p(brcm + 8), ==, 1);
     g_assert_cmpuint(lduw_be_p(event), ==, 2);
-    g_assert_cmphex(lduw_be_p(event + 2), ==, 1);
-    g_assert_cmpuint(ldl_be_p(event + 4), ==, 0);
+    g_assert_cmphex(lduw_be_p(event + 2), ==, link_up ? 1 : 0);
+    g_assert_cmpuint(ldl_be_p(event + 4), ==, link_up ? 0 : 16);
     g_assert_cmpuint(ldl_be_p(event + 8), ==, 0);
     g_assert_cmpuint(ldl_be_p(event + 12), ==, 0);
     g_assert_cmpuint(ldl_be_p(event + 16), ==, 0);
@@ -3700,7 +3700,8 @@ static void test_cyw43455_sdio_network_backend(void)
     ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
     g_assert_cmpint(ret, !=, -1);
     g_string_append_printf(command,
-                           " -nic socket,fd=%d,model=cyw43455-sdio,"
+                           " -nic socket,id=wifi-test,fd=%d,"
+                           "model=cyw43455-sdio,"
                            "mac=02:00:00:00:00:01",
                            net_sockets[1]);
     qts = qtest_init(command->str);
@@ -3708,6 +3709,17 @@ static void test_cyw43455_sdio_network_backend(void)
 
     cyw43455_sdio_select_qtest(qts);
     cyw43455_sdio_enable_control_irq_qtest(qts);
+
+    /* Backend changes cannot associate before firmware startup completes. */
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'set_link', 'arguments': { "
+        "'name': 'wifi-test', 'up': false } }");
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'set_link', 'arguments': { "
+        "'name': 'wifi-test', 'up': true } }");
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
 
     /* Backend input waits for function two and synthetic firmware startup. */
     cyw43455_sdio_send_packet(net_sockets[0], inbound_packet,
@@ -3819,7 +3831,7 @@ static void test_cyw43455_sdio_network_backend(void)
                                        sizeof(event_frame));
     cyw43455_sdio_assert_link_event(
         event_frame, sizeof(event_frame), 5,
-        4 + CYW43455_DEFAULT_CREDIT_WINDOW);
+        4 + CYW43455_DEFAULT_CREDIT_WINDOW, true);
     cyw43455_sdio_backplane_writel_qtest(
         qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 
@@ -3869,7 +3881,7 @@ static void test_cyw43455_sdio_network_backend(void)
                                        sizeof(event_frame));
     cyw43455_sdio_assert_link_event(
         event_frame, sizeof(event_frame), 9,
-        7 + CYW43455_DEFAULT_CREDIT_WINDOW);
+        7 + CYW43455_DEFAULT_CREDIT_WINDOW, true);
     cyw43455_sdio_backplane_writel_qtest(
         qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
     g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
@@ -4039,6 +4051,32 @@ static void test_cyw43455_sdio_network_backend(void)
     g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
                         qts, CYW43455_SDIO_INTSTATUS),
                     ==, 0);
+
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'set_link', 'arguments': { "
+        "'name': 'wifi-test', 'up': false } }");
+    cyw43455_sdio_wait_for_frame(qts);
+    memset(event_frame, 0xff, sizeof(event_frame));
+    cyw43455_sdio_function2_read_qtest(qts, event_frame,
+                                       sizeof(event_frame));
+    cyw43455_sdio_assert_link_event(
+        event_frame, sizeof(event_frame), 20,
+        13 + CYW43455_DEFAULT_CREDIT_WINDOW, false);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'set_link', 'arguments': { "
+        "'name': 'wifi-test', 'up': true } }");
+    cyw43455_sdio_wait_for_frame(qts);
+    memset(event_frame, 0xff, sizeof(event_frame));
+    cyw43455_sdio_function2_read_qtest(qts, event_frame,
+                                       sizeof(event_frame));
+    cyw43455_sdio_assert_link_event(
+        event_frame, sizeof(event_frame), 21,
+        13 + CYW43455_DEFAULT_CREDIT_WINDOW, true);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 
     sdpcm_len = cyw43455_sdio_build_data_request(
         sdpcm_frame, sizeof(sdpcm_frame), packet, sizeof(packet));
@@ -4231,7 +4269,7 @@ static void test_cyw43455_sdio_migration(void)
                                        sizeof(event_frame));
     cyw43455_sdio_assert_link_event(
         event_frame, sizeof(event_frame), 6,
-        5 + CYW43455_DEFAULT_CREDIT_WINDOW);
+        5 + CYW43455_DEFAULT_CREDIT_WINDOW, true);
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
     g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
