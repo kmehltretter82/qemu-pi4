@@ -361,6 +361,9 @@ struct SDState {
 #define CYW43455_PM_OFF                   0
 #define CYW43455_PM_MAX                   1
 #define CYW43455_PM_FAST                  2
+#define CYW43455_OBSS_COEX_AUTO          (-1)
+#define CYW43455_OBSS_COEX_OFF             0
+#define CYW43455_OBSS_COEX_ON              1
 #define CYW43455_CHANSPEC_2G_CH1_20MHZ   0x1001
 #define CYW43455_CHANSPEC_2G_CH13_40MHZ  0x190b
 #define CYW43455_CHANSPEC_CHANNEL_MASK   0x00ff
@@ -607,6 +610,7 @@ struct CYW43455SDIOState {
     uint32_t nd_hostip_count;
     uint32_t pm2_sleep_ret;
     uint32_t power_mode;
+    int32_t obss_coex;
     uint64_t tx_bytes;
     uint64_t rx_bytes;
     uint64_t tx_multicast_bytes;
@@ -1661,6 +1665,23 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
         s->pm2_sleep_ret = ldl_le_p(data);
         return 0;
     }
+    if (!strcmp(name, "obss_coex")) {
+        int32_t mode;
+
+        if (data_len != sizeof(mode)) {
+            trace_cyw43455_sdio_obss_coex(0, CYW43455_BCME_BADLEN);
+            return CYW43455_BCME_BADLEN;
+        }
+        mode = ldl_le_p(data);
+        if (mode < CYW43455_OBSS_COEX_AUTO ||
+            mode > CYW43455_OBSS_COEX_ON) {
+            trace_cyw43455_sdio_obss_coex(mode, CYW43455_BCME_BADARG);
+            return CYW43455_BCME_BADARG;
+        }
+        s->obss_coex = mode;
+        trace_cyw43455_sdio_obss_coex(mode, 0);
+        return 0;
+    }
     return cyw43455_sdio_supported_set_iovar(name) ?
            0 : CYW43455_BCME_UNSUPPORTED;
 }
@@ -1821,6 +1842,9 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
         } else if (!strcmp(iovar, "pm2_sleep_ret")) {
             cyw43455_sdio_store_u32(output, output_len, 0,
                                     s->pm2_sleep_ret);
+        } else if (!strcmp(iovar, "obss_coex")) {
+            cyw43455_sdio_store_u32(output, output_len, 0,
+                                    s->obss_coex);
         } else if (!strcmp(iovar, "mcast_list")) {
             uint32_t list_len = output_len > sizeof(uint32_t) ?
                 MIN(output_len - sizeof(uint32_t),
@@ -2513,6 +2537,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->nd_hostip_count = 0;
     s->pm2_sleep_ret = 0;
     s->power_mode = CYW43455_PM_OFF;
+    s->obss_coex = CYW43455_OBSS_COEX_OFF;
     s->tx_bytes = 0;
     s->rx_bytes = 0;
     s->tx_multicast_bytes = 0;
@@ -3227,6 +3252,9 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     if (version_id < 19) {
         s->power_mode = CYW43455_PM_OFF;
     }
+    if (version_id < 20) {
+        s->obss_coex = CYW43455_OBSS_COEX_OFF;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -3244,6 +3272,8 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         !cyw43455_sdio_chanspec_info(s->chanspec, &control_channel,
                                      &bandwidth_mhz) ||
         s->power_mode > CYW43455_PM_FAST ||
+        s->obss_coex < CYW43455_OBSS_COEX_AUTO ||
+        s->obss_coex > CYW43455_OBSS_COEX_ON ||
         s->survey_duration_ms > 60000 ||
         (s->survey_active && !s->survey_duration_ms)) {
         return -EINVAL;
@@ -3256,7 +3286,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 19,
+    .version_id = 20,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -3336,6 +3366,7 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_BOOL_V(survey_active, CYW43455SDIOState, 17),
         VMSTATE_UINT32_V(ap_chanspec, CYW43455SDIOState, 18),
         VMSTATE_UINT32_V(power_mode, CYW43455SDIOState, 19),
+        VMSTATE_INT32_V(obss_coex, CYW43455SDIOState, 20),
         VMSTATE_END_OF_LIST()
     },
 };
