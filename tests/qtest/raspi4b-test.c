@@ -100,6 +100,8 @@
 #define CYW43455_BCME_BADARG       (-2)
 #define CYW43455_BCME_BADLEN       (-24)
 #define CYW43455_C_SET_PROMISC     10
+#define CYW43455_C_GET_PM           85
+#define CYW43455_C_SET_PM           86
 #define CYW43455_C_GET_PHY_NOISE   135
 #define CYW43455_C_GET_BSS_INFO    136
 #define CYW43455_C_GET_VAR         262
@@ -163,6 +165,8 @@
 #define CYW43455_BSS_PAYLOAD_LEN   160
 #define CYW43455_WLC_BAND_5G       1
 #define CYW43455_WLC_BAND_2G       2
+#define CYW43455_PM_OFF             0
+#define CYW43455_PM_FAST            2
 #define CYW43455_BW_CAP_20MHZ      BIT(0)
 #define CYW43455_BW_CAP_40MHZ      BIT(1)
 #define CYW43455_BW_CAP_2G         \
@@ -3624,12 +3628,16 @@ static void cyw43455_sdio_assert_bss_info_response(
     }
 }
 
-static void cyw43455_sdio_assert_command_response(const uint8_t *frame,
-                                                   size_t frame_len,
-                                                   uint32_t command,
-                                                   uint8_t sequence,
-                                                   uint16_t request_id)
+static void cyw43455_sdio_assert_command_status_response(
+    const uint8_t *frame, size_t frame_len, uint32_t command,
+    uint8_t sequence, uint16_t request_id, int32_t status)
 {
+    uint32_t flags = ((uint32_t)request_id << 16) |
+                     CYW43455_BCDC_DCMD_SET;
+
+    if (status < 0) {
+        flags |= CYW43455_BCDC_DCMD_ERROR;
+    }
     g_assert_cmpuint(lduw_le_p(frame), ==, frame_len);
     g_assert_cmphex(lduw_le_p(frame + 2), ==, (uint16_t)~frame_len);
     g_assert_cmpuint(frame[4], ==, sequence);
@@ -3638,10 +3646,20 @@ static void cyw43455_sdio_assert_command_response(const uint8_t *frame,
     g_assert_cmpuint(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN), ==,
                      command);
     g_assert_cmphex(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8), ==,
-                    ((uint32_t)request_id << 16) |
-                    CYW43455_BCDC_DCMD_SET);
+                    flags);
     g_assert_cmpint((int32_t)ldl_le_p(frame +
-                                     CYW43455_SDPCM_HEADER_LEN + 12), ==, 0);
+                                     CYW43455_SDPCM_HEADER_LEN + 12), ==,
+                    status);
+}
+
+static void cyw43455_sdio_assert_command_response(const uint8_t *frame,
+                                                   size_t frame_len,
+                                                   uint32_t command,
+                                                   uint8_t sequence,
+                                                   uint16_t request_id)
+{
+    cyw43455_sdio_assert_command_status_response(
+        frame, frame_len, command, sequence, request_id, 0);
 }
 
 static void cyw43455_sdio_assert_query_command_value_response(
@@ -5138,6 +5156,151 @@ static void test_cyw43455_sdio_bandwidth_channels(void)
     g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
                         qts, CYW43455_SDIO_INTSTATUS),
                     ==, 0);
+}
+
+static void test_cyw43455_sdio_power_save_migration(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autoptr(GString) cmd_line =
+        g_string_new("-machine raspi4b,sdio-wifi=on");
+    QTestState *source = global_qtest;
+    QTestState *destination;
+    uint8_t control_frame[64];
+    size_t control_len;
+    int net_sockets[2];
+    int ret;
+
+    cyw43455_sdio_select_qtest(source);
+    cyw43455_sdio_enable_control_irq_qtest(source);
+
+    control_len = cyw43455_sdio_build_query_command_request(
+        control_frame, sizeof(control_frame), CYW43455_C_GET_PM,
+        sizeof(uint32_t), 0, 1);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    cyw43455_sdio_assert_query_command_value_response(
+        control_frame, control_len, CYW43455_C_GET_PM, CYW43455_PM_OFF,
+        0, 1);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    control_len = cyw43455_sdio_build_command_request(
+        control_frame, sizeof(control_frame), CYW43455_C_SET_PM, 3, 1, 2);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    cyw43455_sdio_assert_command_status_response(
+        control_frame, control_len, CYW43455_C_SET_PM, 1, 2,
+        CYW43455_BCME_BADARG);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    control_len = cyw43455_sdio_build_command_request(
+        control_frame, sizeof(control_frame), CYW43455_C_SET_PM,
+        CYW43455_PM_FAST, 2, 3);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    cyw43455_sdio_assert_command_response(
+        control_frame, control_len, CYW43455_C_SET_PM, 2, 3);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    control_len = cyw43455_sdio_build_query_command_request(
+        control_frame, sizeof(control_frame), CYW43455_C_GET_PM,
+        sizeof(uint32_t), 3, 4);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    cyw43455_sdio_assert_query_command_value_response(
+        control_frame, control_len, CYW43455_C_GET_PM, CYW43455_PM_FAST,
+        3, 4);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("raspi4b-cyw43455-power-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    raspi4b_wait_for_migration(source);
+
+    if (pcie_has_edu) {
+        g_string_append(cmd_line,
+                        " -device edu,id=edu0,bus=pcie.1,addr=1,"
+                        "dma_mask=0xffffffffffffffff");
+    }
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
+    g_assert_cmpint(ret, !=, -1);
+    g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
+                           net_sockets[1]);
+    g_string_append(cmd_line, " -incoming defer");
+    destination = qtest_init(cmd_line->str);
+    close(net_sockets[1]);
+    qtest_qmp_assert_success(destination,
+        "{ 'execute': 'migrate-incoming', 'arguments': { "
+        "'uri': %s, 'exit-on-error': false } }", uri);
+    raspi4b_wait_for_migration(destination);
+
+    control_len = cyw43455_sdio_build_query_command_request(
+        control_frame, sizeof(control_frame), CYW43455_C_GET_PM,
+        sizeof(uint32_t), 4, 5);
+    cyw43455_sdio_function2_write_qtest(destination, control_frame,
+                                        control_len);
+    cyw43455_sdio_wait_for_frame(destination);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(destination, control_frame,
+                                       control_len);
+    cyw43455_sdio_assert_query_command_value_response(
+        control_frame, control_len, CYW43455_C_GET_PM, CYW43455_PM_FAST,
+        4, 5);
+    cyw43455_sdio_backplane_writel_qtest(
+        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    control_len = cyw43455_sdio_build_command_request(
+        control_frame, sizeof(control_frame), CYW43455_C_SET_PM,
+        CYW43455_PM_OFF, 5, 6);
+    cyw43455_sdio_function2_write_qtest(destination, control_frame,
+                                        control_len);
+    cyw43455_sdio_wait_for_frame(destination);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(destination, control_frame,
+                                       control_len);
+    cyw43455_sdio_assert_command_response(
+        control_frame, control_len, CYW43455_C_SET_PM, 5, 6);
+    cyw43455_sdio_backplane_writel_qtest(
+        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    control_len = cyw43455_sdio_build_query_command_request(
+        control_frame, sizeof(control_frame), CYW43455_C_GET_PM,
+        sizeof(uint32_t), 6, 7);
+    cyw43455_sdio_function2_write_qtest(destination, control_frame,
+                                        control_len);
+    cyw43455_sdio_wait_for_frame(destination);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(destination, control_frame,
+                                       control_len);
+    cyw43455_sdio_assert_query_command_value_response(
+        control_frame, control_len, CYW43455_C_GET_PM, CYW43455_PM_OFF,
+        6, 7);
+    cyw43455_sdio_backplane_writel_qtest(
+        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    qtest_quit(destination);
+    close(net_sockets[0]);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
 static void test_cyw43455_sdio_scan_migration(void)
@@ -7412,6 +7575,10 @@ int main(int argc, char **argv)
         " -machine sdio-wifi=on"
         " -global cyw43455-sdio.ap-chanspec=0x190b");
 #ifndef _WIN32
+    raspi4b_add_test_with_args(
+        "/raspi4b/sd/cyw43455_sdio_power_save_migration",
+        test_cyw43455_sdio_power_save_migration,
+        " -machine sdio-wifi=on");
     raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_network_backend",
                      test_cyw43455_sdio_network_backend);
     raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio_migration",

@@ -347,6 +347,8 @@ struct SDState {
 #define CYW43455_BCME_NOTASSOCIATED      (-28)
 #define CYW43455_C_GET_VERSION           1
 #define CYW43455_C_SET_PROMISC           10
+#define CYW43455_C_GET_PM                 85
+#define CYW43455_C_SET_PM                 86
 #define CYW43455_C_GET_REVINFO           98
 #define CYW43455_C_GET_PHY_NOISE         135
 #define CYW43455_C_GET_BSS_INFO          136
@@ -356,6 +358,9 @@ struct SDState {
 #define CYW43455_D11AC_IOTYPE            2
 #define CYW43455_WLC_BAND_5G             1
 #define CYW43455_WLC_BAND_2G             2
+#define CYW43455_PM_OFF                   0
+#define CYW43455_PM_MAX                   1
+#define CYW43455_PM_FAST                  2
 #define CYW43455_CHANSPEC_2G_CH1_20MHZ   0x1001
 #define CYW43455_CHANSPEC_2G_CH13_40MHZ  0x190b
 #define CYW43455_CHANSPEC_CHANNEL_MASK   0x00ff
@@ -601,6 +606,7 @@ struct CYW43455SDIOState {
     uint8_t nd_hostip[CYW43455_ND_HOSTIP_MAX][16];
     uint32_t nd_hostip_count;
     uint32_t pm2_sleep_ret;
+    uint32_t power_mode;
     uint64_t tx_bytes;
     uint64_t rx_bytes;
     uint64_t tx_multicast_bytes;
@@ -1682,6 +1688,23 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
     }
 
     if (set) {
+        if (command == CYW43455_C_SET_PM) {
+            uint32_t power_mode = UINT32_MAX;
+            int32_t status = 0;
+
+            if (input_len != sizeof(power_mode)) {
+                status = CYW43455_BCME_BADLEN;
+            } else {
+                power_mode = ldl_le_p(input);
+                if (power_mode > CYW43455_PM_FAST) {
+                    status = CYW43455_BCME_BADARG;
+                } else {
+                    s->power_mode = power_mode;
+                }
+            }
+            trace_cyw43455_sdio_power_mode(true, power_mode, status);
+            return status;
+        }
         if (command == CYW43455_C_SET_PROMISC) {
             if (input_len != sizeof(uint32_t)) {
                 return CYW43455_BCME_BADLEN;
@@ -1699,6 +1722,15 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
     }
 
     switch (command) {
+    case CYW43455_C_GET_PM:
+        if (output_len < sizeof(s->power_mode)) {
+            trace_cyw43455_sdio_power_mode(false, s->power_mode,
+                                           CYW43455_BCME_BADLEN);
+            return CYW43455_BCME_BADLEN;
+        }
+        cyw43455_sdio_store_u32(output, output_len, 0, s->power_mode);
+        trace_cyw43455_sdio_power_mode(false, s->power_mode, 0);
+        return 0;
     case CYW43455_C_GET_VERSION:
         cyw43455_sdio_store_u32(output, output_len, 0,
                                 CYW43455_D11AC_IOTYPE);
@@ -2480,6 +2512,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     memset(s->nd_hostip, 0, sizeof(s->nd_hostip));
     s->nd_hostip_count = 0;
     s->pm2_sleep_ret = 0;
+    s->power_mode = CYW43455_PM_OFF;
     s->tx_bytes = 0;
     s->rx_bytes = 0;
     s->tx_multicast_bytes = 0;
@@ -3191,6 +3224,9 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         s->survey_duration_ms = 0;
         s->survey_active = false;
     }
+    if (version_id < 19) {
+        s->power_mode = CYW43455_PM_OFF;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -3207,6 +3243,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
                                      &bandwidth_mhz) ||
         !cyw43455_sdio_chanspec_info(s->chanspec, &control_channel,
                                      &bandwidth_mhz) ||
+        s->power_mode > CYW43455_PM_FAST ||
         s->survey_duration_ms > 60000 ||
         (s->survey_active && !s->survey_duration_ms)) {
         return -EINVAL;
@@ -3219,7 +3256,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 18,
+    .version_id = 19,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -3298,6 +3335,7 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT32_V(survey_duration_ms, CYW43455SDIOState, 17),
         VMSTATE_BOOL_V(survey_active, CYW43455SDIOState, 17),
         VMSTATE_UINT32_V(ap_chanspec, CYW43455SDIOState, 18),
+        VMSTATE_UINT32_V(power_mode, CYW43455SDIOState, 19),
         VMSTATE_END_OF_LIST()
     },
 };
