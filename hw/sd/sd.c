@@ -648,6 +648,7 @@ struct CYW43455SDIOState {
     uint8_t pfn_scan_mac_flags;
     uint8_t pfn_bucket_count;
     bool pfn_enabled;
+    bool tdls_enabled;
     uint64_t tx_bytes;
     uint64_t rx_bytes;
     uint64_t tx_multicast_bytes;
@@ -1920,6 +1921,23 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
         trace_cyw43455_sdio_mfp(true, mode, status);
         return status;
     }
+    if (!strcmp(name, "tdls_enable")) {
+        uint32_t enabled = 0;
+        int32_t status = 0;
+
+        if (data_len != sizeof(enabled)) {
+            status = CYW43455_BCME_BADLEN;
+        } else {
+            enabled = ldl_le_p(data);
+            if (enabled > 1) {
+                status = CYW43455_BCME_BADARG;
+            } else {
+                s->tdls_enabled = enabled;
+            }
+        }
+        trace_cyw43455_sdio_tdls(true, s->tdls_enabled, status);
+        return status;
+    }
     return cyw43455_sdio_supported_set_iovar(name) ?
            0 : CYW43455_BCME_UNSUPPORTED;
 }
@@ -2107,6 +2125,10 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
             cyw43455_sdio_store_u32(output, output_len, 0,
                                     s->mfp_mode);
             trace_cyw43455_sdio_mfp(false, s->mfp_mode, 0);
+        } else if (!strcmp(iovar, "tdls_enable")) {
+            cyw43455_sdio_store_u32(output, output_len, 0,
+                                    s->tdls_enabled);
+            trace_cyw43455_sdio_tdls(false, s->tdls_enabled, 0);
         } else if (!strcmp(iovar, "mcast_list")) {
             uint32_t list_len = output_len > sizeof(uint32_t) ?
                 MIN(output_len - sizeof(uint32_t),
@@ -2806,6 +2828,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     memset(s->pfn_scan_mac, 0, sizeof(s->pfn_scan_mac));
     s->pfn_scan_mac_flags = 0;
     s->pfn_enabled = false;
+    s->tdls_enabled = false;
     s->tx_bytes = 0;
     s->rx_bytes = 0;
     s->tx_multicast_bytes = 0;
@@ -3536,6 +3559,9 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         s->pfn_scan_mac_flags = 0;
         s->pfn_enabled = false;
     }
+    if (version_id < 24) {
+        s->tdls_enabled = false;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -3595,7 +3621,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 23,
+    .version_id = 24,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -3695,6 +3721,7 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT8_V(pfn_scan_mac_flags, CYW43455SDIOState, 23),
         VMSTATE_UINT8_V(pfn_bucket_count, CYW43455SDIOState, 23),
         VMSTATE_BOOL_V(pfn_enabled, CYW43455SDIOState, 23),
+        VMSTATE_BOOL_V(tdls_enabled, CYW43455SDIOState, 24),
         VMSTATE_END_OF_LIST()
     },
 };
