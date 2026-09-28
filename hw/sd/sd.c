@@ -333,7 +333,9 @@ struct SDState {
 #define CYW43455_BCDC_PROTO_VER          2
 #define CYW43455_BCDC_DCMD_ERROR         BIT(0)
 #define CYW43455_BCDC_DCMD_SET           BIT(1)
+#define CYW43455_BCME_BADARG             (-2)
 #define CYW43455_BCME_UNSUPPORTED        (-23)
+#define CYW43455_BCME_BADLEN             (-24)
 #define CYW43455_C_GET_VERSION           1
 #define CYW43455_C_SET_PROMISC           10
 #define CYW43455_C_GET_REVINFO           98
@@ -346,6 +348,7 @@ struct SDState {
 #define CYW43455_F2_FRAME_MAX            (16 * KiB)
 #define CYW43455_TX_CREDIT_WINDOW_DEFAULT 8
 #define CYW43455_TX_CREDIT_WINDOW_MAX    64
+#define CYW43455_MULTICAST_MAX           32
 #define CYW43455_BRCM_EVENT_HEADER_LEN   10
 #define CYW43455_EVENT_MSG_LEN           48
 #define CYW43455_EVENT_ETHERTYPE         0x886c
@@ -423,6 +426,11 @@ struct CYW43455SDIOState {
     bool auto_associate;
     bool link_event_pending;
     bool link_event_sent;
+    uint8_t multicast[CYW43455_MULTICAST_MAX][ETH_ALEN];
+    uint32_t multicast_count;
+    uint32_t pm2_sleep_ret;
+    bool allmulti;
+    bool promiscuous;
 };
 
 static SDBus *cyw43455_sdio_bus(CYW43455SDIOState *s)
@@ -625,6 +633,51 @@ static bool cyw43455_sdio_supported_set_iovar(const char *name)
     return false;
 }
 
+static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
+                                       const char *name,
+                                       const uint8_t *data,
+                                       uint32_t data_len)
+{
+    uint32_t count;
+
+    if (!strcmp(name, "mcast_list")) {
+        if (data_len < sizeof(count)) {
+            return CYW43455_BCME_BADLEN;
+        }
+        count = ldl_le_p(data);
+        if (count > CYW43455_MULTICAST_MAX) {
+            return CYW43455_BCME_BADARG;
+        }
+        if (data_len != sizeof(count) + count * ETH_ALEN) {
+            return CYW43455_BCME_BADLEN;
+        }
+        memset(s->multicast, 0, sizeof(s->multicast));
+        memcpy(s->multicast, data + sizeof(count), count * ETH_ALEN);
+        s->multicast_count = count;
+        trace_cyw43455_sdio_filter(s->multicast_count, s->allmulti,
+                                   s->promiscuous);
+        return 0;
+    }
+    if (!strcmp(name, "allmulti")) {
+        if (data_len != sizeof(uint32_t)) {
+            return CYW43455_BCME_BADLEN;
+        }
+        s->allmulti = ldl_le_p(data) != 0;
+        trace_cyw43455_sdio_filter(s->multicast_count, s->allmulti,
+                                   s->promiscuous);
+        return 0;
+    }
+    if (!strcmp(name, "pm2_sleep_ret")) {
+        if (data_len != sizeof(uint32_t)) {
+            return CYW43455_BCME_BADLEN;
+        }
+        s->pm2_sleep_ret = ldl_le_p(data);
+        return 0;
+    }
+    return cyw43455_sdio_supported_set_iovar(name) ?
+           0 : CYW43455_BCME_UNSUPPORTED;
+}
+
 static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
                                            uint32_t command, bool set,
                                            const uint8_t *input,
@@ -634,19 +687,34 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
                                            char *iovar,
                                            size_t iovar_size)
 {
+    const uint8_t *iovar_data = NULL;
+    uint32_t iovar_data_len = 0;
+
     if (command == CYW43455_C_GET_VAR || command == CYW43455_C_SET_VAR) {
         if (!cyw43455_sdio_iovar_name(input, input_len,
                                       iovar, iovar_size)) {
             return CYW43455_BCME_UNSUPPORTED;
         }
+        iovar_data_len = strlen(iovar) + 1;
+        iovar_data = input + iovar_data_len;
+        iovar_data_len = input_len - iovar_data_len;
     }
 
     if (set) {
+        if (command == CYW43455_C_SET_PROMISC) {
+            if (input_len != sizeof(uint32_t)) {
+                return CYW43455_BCME_BADLEN;
+            }
+            s->promiscuous = ldl_le_p(input) != 0;
+            trace_cyw43455_sdio_filter(s->multicast_count, s->allmulti,
+                                       s->promiscuous);
+            return 0;
+        }
         if (command != CYW43455_C_SET_VAR) {
             return 0;
         }
-        return cyw43455_sdio_supported_set_iovar(iovar) ?
-               0 : CYW43455_BCME_UNSUPPORTED;
+        return cyw43455_sdio_set_iovar(s, iovar, iovar_data,
+                                       iovar_data_len);
     }
 
     switch (command) {
@@ -696,6 +764,21 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
             cyw43455_sdio_store_u32(output, output_len, 0, 1);
             cyw43455_sdio_store_u32(output, output_len, 4,
                                     CYW43455_CHANSPEC_2G_CH1_20MHZ);
+        } else if (!strcmp(iovar, "allmulti")) {
+            cyw43455_sdio_store_u32(output, output_len, 0, s->allmulti);
+        } else if (!strcmp(iovar, "pm2_sleep_ret")) {
+            cyw43455_sdio_store_u32(output, output_len, 0,
+                                    s->pm2_sleep_ret);
+        } else if (!strcmp(iovar, "mcast_list")) {
+            uint32_t list_len = output_len > sizeof(uint32_t) ?
+                MIN(output_len - sizeof(uint32_t),
+                    s->multicast_count * ETH_ALEN) : 0;
+
+            cyw43455_sdio_store_u32(output, output_len, 0,
+                                    s->multicast_count);
+            if (output_len > sizeof(uint32_t)) {
+                memcpy(output + sizeof(uint32_t), s->multicast, list_len);
+            }
         } else {
             return CYW43455_BCME_UNSUPPORTED;
         }
@@ -1333,6 +1416,11 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->rx_data_enabled = false;
     s->link_event_pending = false;
     s->link_event_sent = false;
+    memset(s->multicast, 0, sizeof(s->multicast));
+    s->multicast_count = 0;
+    s->pm2_sleep_ret = 0;
+    s->allmulti = false;
+    s->promiscuous = false;
     s->transfer_addr = 0;
     s->transfer_remaining = 0;
     s->transfer_func = 0;
@@ -1661,6 +1749,37 @@ static bool cyw43455_sdio_can_receive(NetClientState *nc)
     return cyw43455_sdio_rx_ready(s);
 }
 
+static bool cyw43455_sdio_accept_packet(CYW43455SDIOState *s,
+                                        const uint8_t *buffer, size_t size)
+{
+    static const uint8_t broadcast[ETH_ALEN] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    };
+    const uint8_t *destination = buffer;
+    unsigned int i;
+
+    if (size < ETH_ALEN) {
+        return false;
+    }
+    if (s->promiscuous ||
+        !memcmp(destination, s->conf.macaddr.a, ETH_ALEN) ||
+        !memcmp(destination, broadcast, ETH_ALEN)) {
+        return true;
+    }
+    if (!(destination[0] & 1)) {
+        return false;
+    }
+    if (s->allmulti) {
+        return true;
+    }
+    for (i = 0; i < s->multicast_count; i++) {
+        if (!memcmp(destination, s->multicast[i], ETH_ALEN)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static ssize_t cyw43455_sdio_receive(NetClientState *nc,
                                      const uint8_t *buffer, size_t size)
 {
@@ -1676,6 +1795,11 @@ static ssize_t cyw43455_sdio_receive(NetClientState *nc,
     }
     if (!cyw43455_sdio_rx_ready(s)) {
         return 0;
+    }
+    if (!cyw43455_sdio_accept_packet(s, buffer, size)) {
+        trace_cyw43455_sdio_rx_filtered((uint32_t)size,
+                                        size >= ETH_ALEN && (buffer[0] & 1));
+        return size;
     }
 
     stored_len = QEMU_ALIGN_UP(frame_len, sizeof(uint32_t));
@@ -1762,6 +1886,9 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 {
     CYW43455SDIOState *s = opaque;
 
+    if (s->multicast_count > CYW43455_MULTICAST_MAX) {
+        return -EINVAL;
+    }
     cyw43455_sdio_update_irq(s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
     cyw43455_sdio_advance_rx(s);
@@ -1770,7 +1897,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 8,
+    .version_id = 9,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -1812,6 +1939,12 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT32_V(f2_rx_pending_len, CYW43455SDIOState, 7),
         VMSTATE_BOOL_V(link_event_pending, CYW43455SDIOState, 8),
         VMSTATE_BOOL_V(link_event_sent, CYW43455SDIOState, 8),
+        VMSTATE_UINT8_2DARRAY_V(multicast, CYW43455SDIOState,
+                                CYW43455_MULTICAST_MAX, ETH_ALEN, 9),
+        VMSTATE_UINT32_V(multicast_count, CYW43455SDIOState, 9),
+        VMSTATE_UINT32_V(pm2_sleep_ret, CYW43455SDIOState, 9),
+        VMSTATE_BOOL_V(allmulti, CYW43455SDIOState, 9),
+        VMSTATE_BOOL_V(promiscuous, CYW43455SDIOState, 9),
         VMSTATE_END_OF_LIST()
     },
 };
