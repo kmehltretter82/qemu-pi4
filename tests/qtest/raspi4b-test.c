@@ -3359,7 +3359,7 @@ static void test_cyw43455_sdio_endpoint(void)
     g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 3, 0) & 0xff,
                     ==, 0x02);
     g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 4, 0) & 0xff,
-                    ==, 0xbf);
+                    ==, 0xa6);
     g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 5, 0) & 0xff,
                     ==, 0xa9);
 

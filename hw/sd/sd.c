@@ -227,7 +227,7 @@ struct SDState {
 #define CYW43455_SDIO_OCR               0x00ff8000U
 #define CYW43455_SDIO_RCA               1
 #define CYW43455_SDIO_VENDOR_ID         0x02d0
-#define CYW43455_SDIO_DEVICE_ID         0xa9bf
+#define CYW43455_SDIO_DEVICE_ID         0xa9a6
 #define CYW43455_SDIO_FUNC_MASK         \
     (((1U << (CYW43455_SDIO_NUM_FUNCS + 1)) - 1) & ~1U)
 #define CYW43455_SDIO_INT_MASK          \
