@@ -347,6 +347,10 @@ struct SDState {
 #define CYW43455_BCME_NOTASSOCIATED      (-28)
 #define CYW43455_C_GET_VERSION           1
 #define CYW43455_C_SET_PROMISC           10
+#define CYW43455_C_GET_ROAM_TRIGGER      54
+#define CYW43455_C_SET_ROAM_TRIGGER      55
+#define CYW43455_C_GET_ROAM_DELTA        56
+#define CYW43455_C_SET_ROAM_DELTA        57
 #define CYW43455_C_GET_PM                 85
 #define CYW43455_C_SET_PM                 86
 #define CYW43455_C_GET_REVINFO           98
@@ -356,8 +360,10 @@ struct SDState {
 #define CYW43455_C_GET_VAR               262
 #define CYW43455_C_SET_VAR               263
 #define CYW43455_D11AC_IOTYPE            2
+#define CYW43455_WLC_BAND_AUTO           0
 #define CYW43455_WLC_BAND_5G             1
 #define CYW43455_WLC_BAND_2G             2
+#define CYW43455_WLC_BAND_ALL            3
 #define CYW43455_PM_OFF                   0
 #define CYW43455_PM_MAX                   1
 #define CYW43455_PM_FAST                  2
@@ -651,6 +657,8 @@ struct CYW43455SDIOState {
     bool tdls_enabled;
     bool roam_off;
     uint32_t bcn_timeout;
+    int32_t roam_trigger;
+    int32_t roam_delta;
     uint64_t tx_bytes;
     uint64_t rx_bytes;
     uint64_t tx_multicast_bytes;
@@ -1972,6 +1980,39 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
            0 : CYW43455_BCME_UNSUPPORTED;
 }
 
+static int32_t cyw43455_sdio_roam_parameter(CYW43455SDIOState *s,
+                                             bool set, bool trigger,
+                                             const uint8_t *input,
+                                             uint32_t input_len,
+                                             uint8_t *output,
+                                             uint32_t output_len)
+{
+    int32_t *parameter = trigger ? &s->roam_trigger : &s->roam_delta;
+    int32_t value = 0;
+    uint32_t band = CYW43455_WLC_BAND_AUTO;
+    int32_t status = 0;
+
+    if (input_len != 2 * sizeof(uint32_t) ||
+        (!set && output_len < 2 * sizeof(uint32_t))) {
+        status = CYW43455_BCME_BADLEN;
+    } else {
+        value = ldl_le_p(input);
+        band = ldl_le_p(input + sizeof(uint32_t));
+        if (band != CYW43455_WLC_BAND_2G &&
+            band != CYW43455_WLC_BAND_ALL) {
+            status = CYW43455_BCME_BADARG;
+        } else if (set) {
+            *parameter = value;
+        } else {
+            value = *parameter;
+            stl_le_p(output, value);
+            stl_le_p(output + sizeof(uint32_t), band);
+        }
+    }
+    trace_cyw43455_sdio_roam_parameter(set, trigger, value, band, status);
+    return status;
+}
+
 static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
                                            uint32_t command, bool set,
                                            const uint8_t *input,
@@ -2021,6 +2062,12 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
                                        s->promiscuous);
             return 0;
         }
+        if (command == CYW43455_C_SET_ROAM_TRIGGER ||
+            command == CYW43455_C_SET_ROAM_DELTA) {
+            return cyw43455_sdio_roam_parameter(
+                s, true, command == CYW43455_C_SET_ROAM_TRIGGER,
+                input, input_len, output, output_len);
+        }
         if (command != CYW43455_C_SET_VAR) {
             return 0;
         }
@@ -2029,6 +2076,11 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
     }
 
     switch (command) {
+    case CYW43455_C_GET_ROAM_TRIGGER:
+    case CYW43455_C_GET_ROAM_DELTA:
+        return cyw43455_sdio_roam_parameter(
+            s, false, command == CYW43455_C_GET_ROAM_TRIGGER,
+            input, input_len, output, output_len);
     case CYW43455_C_GET_PM:
         if (output_len < sizeof(s->power_mode)) {
             trace_cyw43455_sdio_power_mode(false, s->power_mode,
@@ -2868,6 +2920,8 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->tdls_enabled = false;
     s->roam_off = false;
     s->bcn_timeout = 0;
+    s->roam_trigger = 0;
+    s->roam_delta = 0;
     s->tx_bytes = 0;
     s->rx_bytes = 0;
     s->tx_multicast_bytes = 0;
@@ -3607,6 +3661,10 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     if (version_id < 26) {
         s->bcn_timeout = 0;
     }
+    if (version_id < 27) {
+        s->roam_trigger = 0;
+        s->roam_delta = 0;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -3666,7 +3724,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 26,
+    .version_id = 27,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -3769,6 +3827,8 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_BOOL_V(tdls_enabled, CYW43455SDIOState, 24),
         VMSTATE_BOOL_V(roam_off, CYW43455SDIOState, 25),
         VMSTATE_UINT32_V(bcn_timeout, CYW43455SDIOState, 26),
+        VMSTATE_INT32_V(roam_trigger, CYW43455SDIOState, 27),
+        VMSTATE_INT32_V(roam_delta, CYW43455SDIOState, 27),
         VMSTATE_END_OF_LIST()
     },
 };

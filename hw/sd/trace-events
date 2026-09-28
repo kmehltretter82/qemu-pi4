@@ -69,6 +69,7 @@ cyw43455_sdio_pno(bool set, bool enabled, uint32_t scan_freq, uint32_t channels,
 cyw43455_sdio_tdls(bool set, bool enabled, int32_t status) "synthetic TDLS set=%u enabled=%u status=%" PRId32
 cyw43455_sdio_roam_off(bool set, bool disabled, int32_t status) "synthetic firmware roaming set=%u disabled=%u status=%" PRId32
 cyw43455_sdio_bcn_timeout(bool set, uint32_t timeout, int32_t status) "synthetic beacon timeout set=%u timeout=%" PRIu32 " status=%" PRId32
+cyw43455_sdio_roam_parameter(bool set, bool trigger, int32_t value, uint32_t band, int32_t status) "synthetic roam parameter set=%u trigger=%u value=%" PRId32 " band=%" PRIu32 " status=%" PRId32
 cyw43455_sdio_control(uint32_t command, bool set, uint32_t request_id, uint32_t length) "synthetic control command=%" PRIu32 " set=%u id=%" PRIu32 " length=%" PRIu32
 cyw43455_sdio_iovar(const char *name, bool set, uint32_t request_id, int32_t status) "synthetic iovar name=%s set=%u id=%" PRIu32 " status=%" PRIi32
 cyw43455_sdio_control_queued(uint32_t length) "synthetic control response queued length=%" PRIu32

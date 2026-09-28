@@ -100,12 +100,19 @@
 #define CYW43455_BCME_BADARG       (-2)
 #define CYW43455_BCME_BADLEN       (-24)
 #define CYW43455_C_SET_PROMISC     10
+#define CYW43455_C_GET_ROAM_TRIGGER 54
+#define CYW43455_C_SET_ROAM_TRIGGER 55
+#define CYW43455_C_GET_ROAM_DELTA   56
+#define CYW43455_C_SET_ROAM_DELTA   57
 #define CYW43455_C_GET_PM           85
 #define CYW43455_C_SET_PM           86
 #define CYW43455_C_GET_PHY_NOISE   135
 #define CYW43455_C_GET_BSS_INFO    136
 #define CYW43455_C_GET_VAR         262
 #define CYW43455_C_SET_VAR         263
+#define CYW43455_WLC_BAND_5G       1
+#define CYW43455_WLC_BAND_2G       2
+#define CYW43455_WLC_BAND_ALL      3
 #define CYW43455_TEST_CREDIT_DELAY_MS 25
 #define CYW43455_TEST_CREDIT_WINDOW 5
 #define CYW43455_DEFAULT_CREDIT_WINDOW 8
@@ -3244,6 +3251,33 @@ static size_t cyw43455_sdio_build_command_request(uint8_t *frame,
     return frame_len;
 }
 
+static size_t cyw43455_sdio_build_roam_command_request(
+    uint8_t *frame, size_t frame_size, uint32_t command, bool set,
+    int32_t value, uint32_t band, uint8_t sequence, uint16_t request_id)
+{
+    const uint32_t payload_len = 2 * sizeof(uint32_t);
+    const uint32_t frame_len = CYW43455_SDPCM_HEADER_LEN +
+                               CYW43455_BCDC_HEADER_LEN + payload_len;
+    uint8_t *payload;
+
+    g_assert_cmpuint(frame_size, >=, frame_len);
+    memset(frame, 0, frame_len);
+    stw_le_p(frame, frame_len);
+    stw_le_p(frame + 2, (uint16_t)~frame_len);
+    frame[4] = sequence;
+    frame[7] = CYW43455_SDPCM_HEADER_LEN;
+    stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN, command);
+    stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 4, payload_len);
+    stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8,
+             ((uint32_t)request_id << 16) |
+             (set ? CYW43455_BCDC_DCMD_SET : 0));
+    payload = frame + CYW43455_SDPCM_HEADER_LEN +
+              CYW43455_BCDC_HEADER_LEN;
+    stl_le_p(payload, value);
+    stl_le_p(payload + sizeof(uint32_t), band);
+    return frame_len;
+}
+
 static size_t cyw43455_sdio_build_query_command_request(
     uint8_t *frame, size_t frame_size, uint32_t command,
     size_t response_payload_len, uint8_t sequence, uint16_t request_id)
@@ -3719,6 +3753,45 @@ static void cyw43455_sdio_assert_query_command_value_response(
     g_assert_cmpint((int32_t)ldl_le_p(frame +
                                      CYW43455_SDPCM_HEADER_LEN + 12), ==, 0);
     g_assert_cmpuint((uint32_t)ldl_le_p(payload), ==, expected);
+}
+
+static void cyw43455_sdio_assert_roam_command_response(
+    const uint8_t *frame, size_t frame_len, uint32_t command, bool set,
+    int32_t expected_value, uint32_t expected_band, uint8_t sequence,
+    uint16_t request_id, int32_t status)
+{
+    const size_t payload_len = 2 * sizeof(uint32_t);
+    const uint8_t *payload = frame + CYW43455_SDPCM_HEADER_LEN +
+                             CYW43455_BCDC_HEADER_LEN;
+    uint32_t flags = (uint32_t)request_id << 16;
+
+    if (set) {
+        flags |= CYW43455_BCDC_DCMD_SET;
+    }
+    if (status < 0) {
+        flags |= CYW43455_BCDC_DCMD_ERROR;
+    }
+    g_assert_cmpuint(frame_len, ==, CYW43455_SDPCM_HEADER_LEN +
+                                  CYW43455_BCDC_HEADER_LEN + payload_len);
+    g_assert_cmpuint(lduw_le_p(frame), ==, frame_len);
+    g_assert_cmphex(lduw_le_p(frame + 2), ==, (uint16_t)~frame_len);
+    g_assert_cmpuint(frame[4], ==, sequence);
+    g_assert_cmpuint(frame[5] & 0xf, ==, 0);
+    g_assert_cmpuint(frame[7], ==, CYW43455_SDPCM_HEADER_LEN);
+    g_assert_cmpuint(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN), ==,
+                     command);
+    g_assert_cmpuint(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 4), ==,
+                     payload_len);
+    g_assert_cmphex(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8), ==,
+                    flags);
+    g_assert_cmpint((int32_t)ldl_le_p(frame +
+                                     CYW43455_SDPCM_HEADER_LEN + 12), ==,
+                    status);
+    if (!set && status == 0) {
+        g_assert_cmpint((int32_t)ldl_le_p(payload), ==, expected_value);
+        g_assert_cmpuint(ldl_le_p(payload + sizeof(uint32_t)), ==,
+                         expected_band);
+    }
 }
 
 static void cyw43455_sdio_assert_link_event(const uint8_t *frame,
@@ -6264,6 +6337,138 @@ static void test_cyw43455_sdio_bcn_timeout_migration(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
+static void cyw43455_sdio_roam_command_qtest(
+    QTestState *qts, uint32_t command, bool set, int32_t request_value,
+    uint32_t band, int32_t expected_value, uint8_t sequence,
+    uint16_t request_id, int32_t status)
+{
+    uint8_t control_frame[64];
+    size_t control_len;
+
+    control_len = cyw43455_sdio_build_roam_command_request(
+        control_frame, sizeof(control_frame), command, set, request_value,
+        band, sequence, request_id);
+    cyw43455_sdio_function2_write_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(qts);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_assert_roam_command_response(
+        control_frame, control_len, command, set, expected_value, band,
+        sequence, request_id, status);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+}
+
+static void test_cyw43455_sdio_roam_parameters_migration(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autoptr(GString) cmd_line =
+        g_string_new("-machine raspi4b,sdio-wifi=on");
+    QTestState *source = global_qtest;
+    QTestState *destination;
+    uint8_t control_frame[64];
+    size_t control_len;
+    int net_sockets[2];
+    int ret;
+
+    cyw43455_sdio_select_qtest(source);
+    cyw43455_sdio_enable_control_irq_qtest(source);
+
+    cyw43455_sdio_roam_command_qtest(
+        source, CYW43455_C_GET_ROAM_TRIGGER, false, 0,
+        CYW43455_WLC_BAND_2G, 0, 0, 1, 0);
+
+    /* A single-word payload is missing the mandatory band selector. */
+    control_len = cyw43455_sdio_build_command_request(
+        control_frame, sizeof(control_frame), CYW43455_C_SET_ROAM_TRIGGER,
+        (uint32_t)-75, 1, 2);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    cyw43455_sdio_assert_command_status_response(
+        control_frame, control_len, CYW43455_C_SET_ROAM_TRIGGER, 1, 2,
+        CYW43455_BCME_BADLEN);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    /* This CYW43455 model exposes only its physical 2.4 GHz radio. */
+    cyw43455_sdio_roam_command_qtest(
+        source, CYW43455_C_SET_ROAM_TRIGGER, true, -75,
+        CYW43455_WLC_BAND_5G, 0, 2, 3, CYW43455_BCME_BADARG);
+    cyw43455_sdio_roam_command_qtest(
+        source, CYW43455_C_GET_ROAM_DELTA, false, 0,
+        CYW43455_WLC_BAND_5G, 0, 3, 4, CYW43455_BCME_BADARG);
+
+    cyw43455_sdio_roam_command_qtest(
+        source, CYW43455_C_SET_ROAM_TRIGGER, true, -75,
+        CYW43455_WLC_BAND_ALL, 0, 4, 5, 0);
+    cyw43455_sdio_roam_command_qtest(
+        source, CYW43455_C_SET_ROAM_DELTA, true, 20,
+        CYW43455_WLC_BAND_ALL, 0, 5, 6, 0);
+    cyw43455_sdio_roam_command_qtest(
+        source, CYW43455_C_GET_ROAM_TRIGGER, false, 0,
+        CYW43455_WLC_BAND_2G, -75, 6, 7, 0);
+    cyw43455_sdio_roam_command_qtest(
+        source, CYW43455_C_GET_ROAM_DELTA, false, 0,
+        CYW43455_WLC_BAND_2G, 20, 7, 8, 0);
+
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("raspi4b-cyw43455-roam-params-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    raspi4b_wait_for_migration(source);
+
+    if (pcie_has_edu) {
+        g_string_append(cmd_line,
+                        " -device edu,id=edu0,bus=pcie.1,addr=1,"
+                        "dma_mask=0xffffffffffffffff");
+    }
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
+    g_assert_cmpint(ret, !=, -1);
+    g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
+                           net_sockets[1]);
+    g_string_append(cmd_line, " -incoming defer");
+    destination = qtest_init(cmd_line->str);
+    close(net_sockets[1]);
+    qtest_qmp_assert_success(destination,
+        "{ 'execute': 'migrate-incoming', 'arguments': { "
+        "'uri': %s, 'exit-on-error': false } }", uri);
+    raspi4b_wait_for_migration(destination);
+
+    cyw43455_sdio_roam_command_qtest(
+        destination, CYW43455_C_GET_ROAM_TRIGGER, false, 0,
+        CYW43455_WLC_BAND_2G, -75, 8, 9, 0);
+    cyw43455_sdio_roam_command_qtest(
+        destination, CYW43455_C_GET_ROAM_DELTA, false, 0,
+        CYW43455_WLC_BAND_2G, 20, 9, 10, 0);
+
+    cyw43455_sdio_roam_command_qtest(
+        destination, CYW43455_C_SET_ROAM_TRIGGER, true, -70,
+        CYW43455_WLC_BAND_2G, 0, 10, 11, 0);
+    cyw43455_sdio_roam_command_qtest(
+        destination, CYW43455_C_SET_ROAM_DELTA, true, 15,
+        CYW43455_WLC_BAND_2G, 0, 11, 12, 0);
+    cyw43455_sdio_roam_command_qtest(
+        destination, CYW43455_C_GET_ROAM_TRIGGER, false, 0,
+        CYW43455_WLC_BAND_2G, -70, 12, 13, 0);
+    cyw43455_sdio_roam_command_qtest(
+        destination, CYW43455_C_GET_ROAM_DELTA, false, 0,
+        CYW43455_WLC_BAND_2G, 15, 13, 14, 0);
+
+    qtest_quit(destination);
+    close(net_sockets[0]);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
 static void cyw43455_sdio_pfn_set_qtest(QTestState *qts,
                                          const char *name,
                                          const void *data, size_t data_len,
@@ -8721,6 +8926,10 @@ int main(int argc, char **argv)
     raspi4b_add_test_with_args(
         "/raspi4b/sd/cyw43455_sdio_bcn_timeout_migration",
         test_cyw43455_sdio_bcn_timeout_migration,
+        " -machine sdio-wifi=on");
+    raspi4b_add_test_with_args(
+        "/raspi4b/sd/cyw43455_sdio_roam_parameters_migration",
+        test_cyw43455_sdio_roam_parameters_migration,
         " -machine sdio-wifi=on");
     raspi4b_add_test_with_args(
         "/raspi4b/sd/cyw43455_sdio_pno_migration",
