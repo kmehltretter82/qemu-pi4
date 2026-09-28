@@ -43,6 +43,7 @@ cyw43455_sdio_glom(uint32_t length, unsigned int frames, uint8_t last_sequence) 
 cyw43455_sdio_credit_scheduled(uint8_t tx_sequence, uint8_t tx_max, uint32_t delay_ms) "synthetic credit scheduled tx-sequence=%u tx-max=%u delay-ms=%" PRIu32
 cyw43455_sdio_credit_emitted(uint8_t tx_sequence, uint8_t tx_max) "synthetic credit emitted tx-sequence=%u tx-max=%u"
 cyw43455_sdio_rx_data(uint32_t length, uint32_t frame_length, uint8_t sequence, uint8_t tx_max) "synthetic data rx length=%" PRIu32 " frame-length=%" PRIu32 " sequence=%u tx-max=%u"
+cyw43455_sdio_link_event(uint8_t sequence, uint8_t tx_max) "synthetic association event sequence=%u tx-max=%u"
 cyw43455_sdio_rx_read(uint32_t length, uint32_t frame_length, uint32_t position, uint32_t first_word) "synthetic rx read length=%" PRIu32 " frame-length=%" PRIu32 " position=%" PRIu32 " first-word=0x%08" PRIx32
 cyw43455_sdio_rx_ack(uint32_t frame_length, uint32_t position) "synthetic rx ack frame-length=%" PRIu32 " position=%" PRIu32
 cyw43455_sdio_rx_promoted(uint32_t length) "synthetic pending rx promoted length=%" PRIu32

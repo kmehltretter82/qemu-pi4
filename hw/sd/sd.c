@@ -218,8 +218,9 @@ struct SDState {
  * two-function transport, it provides a synthetic BCM4345/9 chip-discovery
  * surface so that brcmfmac can reach firmware startup.  A bounded synthetic
  * SDPCM control responder is provided for host-driver experiments.  Ethernet
- * frames can move in both directions through a QEMU network backend, but
- * firmware execution, association and radio behavior remain unimplemented.
+ * frames can move in both directions through a QEMU network backend.  An
+ * optional one-shot association event raises guest carrier after netdev open,
+ * but firmware execution and radio behavior remain unimplemented.
  */
 #define CYW43455_SDIO_NUM_FUNCS         2
 #define CYW43455_SDIO_ADDR_SPACE_SIZE   (1U << 17)
@@ -325,6 +326,7 @@ struct SDState {
 #define CYW43455_SDPCM_HWEXT_LENGTH_MASK 0x00ffffff
 #define CYW43455_SDPCM_HEADER_LEN        12
 #define CYW43455_SDPCM_CONTROL_CHANNEL   0
+#define CYW43455_SDPCM_EVENT_CHANNEL     1
 #define CYW43455_SDPCM_DATA_CHANNEL      2
 #define CYW43455_BCDC_HEADER_LEN         16
 #define CYW43455_BCDC_DATA_HEADER_LEN    4
@@ -333,6 +335,7 @@ struct SDState {
 #define CYW43455_BCDC_DCMD_SET           BIT(1)
 #define CYW43455_BCME_UNSUPPORTED        (-23)
 #define CYW43455_C_GET_VERSION           1
+#define CYW43455_C_SET_PROMISC           10
 #define CYW43455_C_GET_REVINFO           98
 #define CYW43455_C_GET_BANDLIST          140
 #define CYW43455_C_GET_VAR               262
@@ -343,6 +346,17 @@ struct SDState {
 #define CYW43455_F2_FRAME_MAX            (16 * KiB)
 #define CYW43455_TX_CREDIT_WINDOW_DEFAULT 8
 #define CYW43455_TX_CREDIT_WINDOW_MAX    64
+#define CYW43455_BRCM_EVENT_HEADER_LEN   10
+#define CYW43455_EVENT_MSG_LEN           48
+#define CYW43455_EVENT_ETHERTYPE         0x886c
+#define CYW43455_EVENT_VENDOR_LONG       0x8001
+#define CYW43455_EVENT_USER_SUBTYPE      1
+#define CYW43455_EVENT_MSG_VERSION       2
+#define CYW43455_EVENT_MSG_LINK          BIT(0)
+#define CYW43455_EVENT_SET_SSID          0
+#define CYW43455_LINK_EVENT_LEN          \
+    (CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_DATA_HEADER_LEN + \
+     ETH_HLEN + CYW43455_BRCM_EVENT_HEADER_LEN + CYW43455_EVENT_MSG_LEN)
 
 typedef struct CYW43455CoreInfo {
     uint16_t id;
@@ -362,6 +376,10 @@ static const CYW43455CoreInfo cyw43455_sdio_cores[] = {
 
 static const uint8_t cyw43455_sdio_default_mac[ETH_ALEN] = {
     0x02, 0, 0, 0, 0, 1,
+};
+
+static const uint8_t cyw43455_sdio_peer_mac[ETH_ALEN] = {
+    0x52, 0x55, 0x0a, 0x00, 0x02, 0x02,
 };
 
 OBJECT_DECLARE_SIMPLE_TYPE(CYW43455SDIOState, CYW43455_SDIO)
@@ -402,6 +420,9 @@ struct CYW43455SDIOState {
     uint8_t tx_credit_seq;
     bool tx_credit_pending;
     bool rx_data_enabled;
+    bool auto_associate;
+    bool link_event_pending;
+    bool link_event_sent;
 };
 
 static SDBus *cyw43455_sdio_bus(CYW43455SDIOState *s)
@@ -440,6 +461,7 @@ static bool cyw43455_sdio_rx_ready(CYW43455SDIOState *s)
            (s->regs[0][SDIO_CCCR_IO_ENABLE] & BIT(2)) &&
            !s->f2_rx_len &&
            !s->f2_rx_pending_len &&
+           !s->link_event_pending &&
            !(s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND);
 }
 
@@ -448,6 +470,53 @@ static void cyw43455_sdio_flush_queued_packets(CYW43455SDIOState *s)
     if (cyw43455_sdio_rx_ready(s)) {
         qemu_flush_queued_packets(qemu_get_queue(s->nic));
     }
+}
+
+static void cyw43455_sdio_emit_link_event(CYW43455SDIOState *s)
+{
+    uint8_t *frame = s->f2_rx_frame;
+    uint8_t *bcdc = frame + CYW43455_SDPCM_HEADER_LEN;
+    uint8_t *ethernet = bcdc + CYW43455_BCDC_DATA_HEADER_LEN;
+    uint8_t *brcm = ethernet + ETH_HLEN;
+    uint8_t *event = brcm + CYW43455_BRCM_EVENT_HEADER_LEN;
+    size_t stored_len = QEMU_ALIGN_UP(CYW43455_LINK_EVENT_LEN,
+                                      sizeof(uint32_t));
+
+    assert(s->link_event_pending);
+    assert(!s->f2_rx_len);
+    assert(!(s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND));
+
+    memset(frame, 0, stored_len);
+    stw_le_p(frame, CYW43455_LINK_EVENT_LEN);
+    stw_le_p(frame + 2, (uint16_t)~CYW43455_LINK_EVENT_LEN);
+    frame[4] = s->f2_rx_seq++;
+    frame[5] = CYW43455_SDPCM_EVENT_CHANNEL;
+    frame[7] = CYW43455_SDPCM_HEADER_LEN;
+    frame[9] = s->tx_credit_seq + s->tx_credit_window;
+
+    bcdc[0] = CYW43455_BCDC_PROTO_VER << 4;
+    memcpy(ethernet, s->conf.macaddr.a, ETH_ALEN);
+    memcpy(ethernet + ETH_ALEN, cyw43455_sdio_peer_mac, ETH_ALEN);
+    stw_be_p(ethernet + 2 * ETH_ALEN, CYW43455_EVENT_ETHERTYPE);
+
+    stw_be_p(brcm, CYW43455_EVENT_VENDOR_LONG);
+    stw_be_p(brcm + 2, CYW43455_EVENT_MSG_LEN);
+    memcpy(brcm + 5, "\x00\x10\x18", 3);
+    stw_be_p(brcm + 8, CYW43455_EVENT_USER_SUBTYPE);
+
+    stw_be_p(event, CYW43455_EVENT_MSG_VERSION);
+    stw_be_p(event + 2, CYW43455_EVENT_MSG_LINK);
+    stl_be_p(event + 4, CYW43455_EVENT_SET_SSID);
+    memcpy(event + 24, cyw43455_sdio_peer_mac, ETH_ALEN);
+    memcpy(event + 30, "wlan0", sizeof("wlan0"));
+
+    s->f2_rx_len = stored_len;
+    s->f2_rx_pos = 0;
+    s->link_event_pending = false;
+    s->link_event_sent = true;
+    s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
+    trace_cyw43455_sdio_link_event(frame[4], frame[9]);
+    cyw43455_sdio_update_irq(s);
 }
 
 static void cyw43455_sdio_advance_rx(CYW43455SDIOState *s)
@@ -466,6 +535,11 @@ static void cyw43455_sdio_advance_rx(CYW43455SDIOState *s)
         s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
         trace_cyw43455_sdio_rx_promoted(s->f2_rx_len);
         cyw43455_sdio_update_irq(s);
+        return;
+    }
+
+    if (s->link_event_pending) {
+        cyw43455_sdio_emit_link_event(s);
         return;
     }
 
@@ -944,6 +1018,11 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
         /* This is the final probe in the synthetic startup profile. */
         s->rx_data_enabled = true;
     }
+    if (s->auto_associate && set && command == CYW43455_C_SET_PROMISC &&
+        status == 0 && !s->link_event_sent) {
+        /* Netdev open has completed before this asynchronous filter update. */
+        s->link_event_pending = true;
+    }
     if (!response_queued) {
         cyw43455_sdio_update_irq(s);
     }
@@ -1246,6 +1325,8 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->tx_credit_seq = 0;
     s->tx_credit_pending = false;
     s->rx_data_enabled = false;
+    s->link_event_pending = false;
+    s->link_event_sent = false;
     s->transfer_addr = 0;
     s->transfer_remaining = 0;
     s->transfer_func = 0;
@@ -1677,13 +1758,13 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
     cyw43455_sdio_update_irq(s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
-    cyw43455_sdio_flush_queued_packets(s);
+    cyw43455_sdio_advance_rx(s);
     return 0;
 }
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 7,
+    .version_id = 8,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -1723,6 +1804,8 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT8_ARRAY_V(f2_rx_pending_frame, CYW43455SDIOState,
                               CYW43455_F2_FRAME_MAX, 7),
         VMSTATE_UINT32_V(f2_rx_pending_len, CYW43455SDIOState, 7),
+        VMSTATE_BOOL_V(link_event_pending, CYW43455SDIOState, 8),
+        VMSTATE_BOOL_V(link_event_sent, CYW43455SDIOState, 8),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -4782,6 +4865,8 @@ static const Property cyw43455_sdio_properties[] = {
     DEFINE_PROP_UINT8("tx-credit-window", CYW43455SDIOState,
                       tx_credit_window,
                       CYW43455_TX_CREDIT_WINDOW_DEFAULT),
+    DEFINE_PROP_BOOL("auto-associate", CYW43455SDIOState,
+                     auto_associate, true),
 };
 
 static void cyw43455_sdio_class_init(ObjectClass *klass, const void *data)
