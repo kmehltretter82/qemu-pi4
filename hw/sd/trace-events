@@ -45,9 +45,12 @@ cyw43455_sdio_credit_emitted(uint8_t tx_sequence, uint8_t tx_max) "synthetic cre
 cyw43455_sdio_rx_data(uint32_t length, uint32_t frame_length, uint8_t sequence, uint8_t tx_max) "synthetic data rx length=%" PRIu32 " frame-length=%" PRIu32 " sequence=%u tx-max=%u"
 cyw43455_sdio_rx_read(uint32_t length, uint32_t frame_length, uint32_t position, uint32_t first_word) "synthetic rx read length=%" PRIu32 " frame-length=%" PRIu32 " position=%" PRIu32 " first-word=0x%08" PRIx32
 cyw43455_sdio_rx_ack(uint32_t frame_length, uint32_t position) "synthetic rx ack frame-length=%" PRIu32 " position=%" PRIu32
+cyw43455_sdio_rx_promoted(uint32_t length) "synthetic pending rx promoted length=%" PRIu32
 cyw43455_sdio_rx_dropped(uint32_t length) "synthetic inbound frame dropped length=%" PRIu32
 cyw43455_sdio_control(uint32_t command, bool set, uint32_t request_id, uint32_t length) "synthetic control command=%" PRIu32 " set=%u id=%" PRIu32 " length=%" PRIu32
 cyw43455_sdio_iovar(const char *name, bool set, uint32_t request_id, int32_t status) "synthetic iovar name=%s set=%u id=%" PRIu32 " status=%" PRIi32
+cyw43455_sdio_control_queued(uint32_t length) "synthetic control response queued length=%" PRIu32
+cyw43455_sdio_control_dropped(uint32_t command, uint32_t request_id) "synthetic control response dropped command=%" PRIu32 " id=%" PRIu32
 sdcard_normal_command(const char *proto, const char *cmd_desc, uint8_t cmd, uint32_t arg, const char *mode, const char *state) "%s %20s/ CMD%02d arg 0x%08x (mode %s, state %s)"
 sdcard_app_command(const char *proto, const char *acmd_desc, uint8_t acmd, uint32_t arg, const char *mode, const char *state) "%s %23s/ACMD%02d arg 0x%08x (mode %s, state %s)"
 sdcard_response(const char *rspdesc, int rsplen) "%s (sz:%d)"
