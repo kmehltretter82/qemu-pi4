@@ -172,14 +172,14 @@
 #define CYW43455_EVENT_ESCAN_RESULT 69
 #define CYW43455_EVENT_STATUS_SUCCESS 0
 #define CYW43455_EVENT_STATUS_PARTIAL 8
-#define CYW43455_ESCAN_REQ_VERSION 1
+#define CYW43455_ESCAN_REQ_VERSION_V1 1
+#define CYW43455_ESCAN_REQ_VERSION_V2 2
+#define CYW43455_ESCAN_RESULT_VERSION 1
 #define CYW43455_ESCAN_ACTION_START 1
 #define CYW43455_ESCAN_HEADER_LEN  8
-#define CYW43455_SCAN_PARAMS_FIXED_LEN 64
-#define CYW43455_ESCAN_FIXED_LEN   \
-    (CYW43455_ESCAN_HEADER_LEN + CYW43455_SCAN_PARAMS_FIXED_LEN)
+#define CYW43455_SCAN_PARAMS_V1_FIXED_LEN 64
+#define CYW43455_SCAN_PARAMS_V2_FIXED_LEN 72
 #define CYW43455_SCAN_SSID_LEN     36
-#define CYW43455_SCAN_CHANNEL_NUM_OFFSET 60
 #define CYW43455_ESCAN_RESULT_FIXED_LEN 12
 #define CYW43455_BSS_INFO_IE_BYTES 24
 #define CYW43455_ESCAN_BSS_INFO_LEN \
@@ -188,8 +188,12 @@
     (CYW43455_ESCAN_RESULT_FIXED_LEN + CYW43455_ESCAN_BSS_INFO_LEN)
 #define CYW43455_ESCAN_EVENT_FRAME_LEN \
     (CYW43455_EVENT_FRAME_LEN + CYW43455_ESCAN_RESULT_LEN)
-#define CYW43455_ESCAN_REQUEST_LEN \
-    (CYW43455_ESCAN_FIXED_LEN + sizeof(uint32_t) + CYW43455_SCAN_SSID_LEN)
+#define CYW43455_ESCAN_V1_REQUEST_LEN \
+    (CYW43455_ESCAN_HEADER_LEN + CYW43455_SCAN_PARAMS_V1_FIXED_LEN + \
+     sizeof(uint32_t) + CYW43455_SCAN_SSID_LEN)
+#define CYW43455_ESCAN_V2_REQUEST_LEN \
+    (CYW43455_ESCAN_HEADER_LEN + CYW43455_SCAN_PARAMS_V2_FIXED_LEN + \
+     sizeof(uint32_t) + CYW43455_SCAN_SSID_LEN)
 
 #define PROPERTY_RESPONSE_SUCCESS 0x80000000
 #define PROPERTY_RESPONSE_ERROR   0x80000001
@@ -3099,32 +3103,67 @@ static size_t cyw43455_sdio_build_set_iovar_request(
 }
 
 static size_t cyw43455_sdio_build_escan_request(
-    uint8_t *frame, size_t frame_size, uint16_t sync_id, uint16_t channel,
-    uint8_t sequence, uint16_t request_id)
+    uint8_t *frame, size_t frame_size, uint32_t version, uint16_t sync_id,
+    uint16_t channel, uint8_t sequence, uint16_t request_id)
 {
-    uint8_t escan[CYW43455_ESCAN_REQUEST_LEN] = { };
+    uint8_t escan[CYW43455_ESCAN_V2_REQUEST_LEN] = { };
     uint8_t *params = escan + CYW43455_ESCAN_HEADER_LEN;
-    uint8_t *ssid = escan + CYW43455_ESCAN_FIXED_LEN + sizeof(uint32_t);
+    uint8_t *ssid;
     const size_t ssid_len = strlen(CYW43455_BSS_SSID);
+    size_t params_fixed_len;
+    size_t escan_fixed_len;
+    size_t escan_len;
+    size_t bssid_offset;
+    size_t bss_type_offset;
+    size_t nprobes_offset;
+    size_t channel_num_offset;
 
-    stl_le_p(escan, CYW43455_ESCAN_REQ_VERSION);
+    switch (version) {
+    case CYW43455_ESCAN_REQ_VERSION_V1:
+        params_fixed_len = CYW43455_SCAN_PARAMS_V1_FIXED_LEN;
+        bssid_offset = 36;
+        bss_type_offset = 42;
+        params[43] = 0; /* active scan */
+        nprobes_offset = 44;
+        channel_num_offset = 60;
+        break;
+    case CYW43455_ESCAN_REQ_VERSION_V2:
+        params_fixed_len = CYW43455_SCAN_PARAMS_V2_FIXED_LEN;
+        bssid_offset = 40;
+        bss_type_offset = 46;
+        stl_le_p(params + 48, 0); /* active scan */
+        nprobes_offset = 52;
+        channel_num_offset = 68;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    escan_fixed_len = CYW43455_ESCAN_HEADER_LEN + params_fixed_len;
+    escan_len = escan_fixed_len + sizeof(uint32_t) +
+                CYW43455_SCAN_SSID_LEN;
+    ssid = escan + escan_fixed_len + sizeof(uint32_t);
+
+    stl_le_p(escan, version);
     stw_le_p(escan + 4, CYW43455_ESCAN_ACTION_START);
     stw_le_p(escan + 6, sync_id);
-    memset(params + 36, 0xff, CYW43455_MAC_LEN);
-    params[42] = 2; /* any BSS type */
-    params[43] = 0; /* active scan */
-    stl_le_p(params + 44, UINT32_MAX);
-    stl_le_p(params + 48, UINT32_MAX);
-    stl_le_p(params + 52, UINT32_MAX);
-    stl_le_p(params + 56, UINT32_MAX);
-    stl_le_p(params + CYW43455_SCAN_CHANNEL_NUM_OFFSET,
-             (1U << 16) | 1);
-    stw_le_p(escan + CYW43455_ESCAN_FIXED_LEN, channel);
+    if (version == CYW43455_ESCAN_REQ_VERSION_V2) {
+        stw_le_p(params, CYW43455_ESCAN_REQ_VERSION_V2);
+        stw_le_p(params + 2, escan_len - CYW43455_ESCAN_HEADER_LEN);
+    }
+    memset(params + bssid_offset, 0xff, CYW43455_MAC_LEN);
+    params[bss_type_offset] = 2; /* any BSS type */
+    stl_le_p(params + nprobes_offset, UINT32_MAX);
+    stl_le_p(params + nprobes_offset + 4, UINT32_MAX);
+    stl_le_p(params + nprobes_offset + 8, UINT32_MAX);
+    stl_le_p(params + nprobes_offset + 12, UINT32_MAX);
+    stl_le_p(params + channel_num_offset, (1U << 16) | 1);
+    stw_le_p(escan + escan_fixed_len, channel);
     stl_le_p(ssid, ssid_len);
     memcpy(ssid + sizeof(uint32_t), CYW43455_BSS_SSID, ssid_len);
 
     return cyw43455_sdio_build_set_iovar_request(
-        frame, frame_size, "escan", escan, sizeof(escan), sequence,
+        frame, frame_size, "escan", escan, escan_len, sequence,
         request_id);
 }
 
@@ -3663,7 +3702,7 @@ static void cyw43455_sdio_assert_escan_event(
 
     g_assert_cmpuint(ldl_le_p(result), ==, CYW43455_ESCAN_RESULT_LEN);
     g_assert_cmpuint(ldl_le_p(result + 4), ==,
-                     CYW43455_ESCAN_REQ_VERSION);
+                     CYW43455_ESCAN_RESULT_VERSION);
     g_assert_cmphex(lduw_le_p(result + 8), ==, sync_id);
     g_assert_cmpuint(lduw_le_p(result + 10), ==, 1);
     g_assert_cmpuint(ldl_le_p(bss), ==, CYW43455_BSS_INFO_VERSION);
@@ -4878,6 +4917,7 @@ static void test_cyw43455_sdio_scan_migration(void)
     QTestState *destination;
     uint8_t control_frame[160];
     uint8_t event_frame[CYW43455_ESCAN_EVENT_FRAME_LEN];
+    uint8_t scalar[sizeof(uint32_t)];
     size_t control_len;
     int net_sockets[2];
     int ret;
@@ -4885,16 +4925,29 @@ static void test_cyw43455_sdio_scan_migration(void)
     cyw43455_sdio_select_qtest(source);
     cyw43455_sdio_enable_control_irq_qtest(source);
 
+    control_len = cyw43455_sdio_build_iovar_request(
+        control_frame, sizeof(control_frame), "scan_ver", 0, 1);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    stl_le_p(scalar, CYW43455_ESCAN_REQ_VERSION_V2);
+    cyw43455_sdio_assert_iovar_value_response(
+        control_frame, control_len, 0, 1, scalar, sizeof(scalar));
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
     control_len = cyw43455_sdio_build_escan_request(
-        control_frame, sizeof(control_frame), first_sync_id,
-        CYW43455_CHANSPEC_2G_CH1_20MHZ, 0, 1);
+        control_frame, sizeof(control_frame),
+        CYW43455_ESCAN_REQ_VERSION_V2, first_sync_id,
+        CYW43455_CHANSPEC_2G_CH1_20MHZ, 1, 2);
     cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
     cyw43455_sdio_wait_for_frame(source);
     memset(control_frame, 0, sizeof(control_frame));
     cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
     cyw43455_sdio_assert_set_iovar_response(
-        control_frame, control_len, "escan", CYW43455_ESCAN_REQUEST_LEN,
-        0, 1);
+        control_frame, control_len, "escan",
+        CYW43455_ESCAN_V2_REQUEST_LEN, 1, 2);
     cyw43455_sdio_backplane_writel_qtest(
         source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
     cyw43455_sdio_wait_for_frame(source);
@@ -4931,8 +4984,8 @@ static void test_cyw43455_sdio_scan_migration(void)
     cyw43455_sdio_function2_read_qtest(destination, event_frame,
                                        sizeof(event_frame));
     cyw43455_sdio_assert_escan_event(
-        event_frame, sizeof(event_frame), 1,
-        CYW43455_DEFAULT_CREDIT_WINDOW, first_sync_id, true,
+        event_frame, sizeof(event_frame), 2,
+        1 + CYW43455_DEFAULT_CREDIT_WINDOW, first_sync_id, true,
         cyw43455_sdio_default_test_mac);
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
@@ -4941,15 +4994,16 @@ static void test_cyw43455_sdio_scan_migration(void)
     cyw43455_sdio_function2_read_qtest(destination, event_frame,
                                        CYW43455_EVENT_FRAME_LEN);
     cyw43455_sdio_assert_escan_event(
-        event_frame, CYW43455_EVENT_FRAME_LEN, 2,
-        CYW43455_DEFAULT_CREDIT_WINDOW, first_sync_id, false,
+        event_frame, CYW43455_EVENT_FRAME_LEN, 3,
+        1 + CYW43455_DEFAULT_CREDIT_WINDOW, first_sync_id, false,
         cyw43455_sdio_default_test_mac);
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 
-    /* A request excluding channel one completes without a false result. */
+    /* Legacy v1 remains accepted and does not invent an off-channel BSS. */
     control_len = cyw43455_sdio_build_escan_request(
-        control_frame, sizeof(control_frame), filtered_sync_id, 6, 1, 2);
+        control_frame, sizeof(control_frame),
+        CYW43455_ESCAN_REQ_VERSION_V1, filtered_sync_id, 6, 2, 3);
     cyw43455_sdio_function2_write_qtest(destination, control_frame,
                                         control_len);
     cyw43455_sdio_wait_for_frame(destination);
@@ -4957,8 +5011,8 @@ static void test_cyw43455_sdio_scan_migration(void)
     cyw43455_sdio_function2_read_qtest(destination, control_frame,
                                        control_len);
     cyw43455_sdio_assert_set_iovar_response(
-        control_frame, control_len, "escan", CYW43455_ESCAN_REQUEST_LEN,
-        3, 2);
+        control_frame, control_len, "escan",
+        CYW43455_ESCAN_V1_REQUEST_LEN, 4, 3);
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
     cyw43455_sdio_wait_for_frame(destination);
@@ -4966,8 +5020,8 @@ static void test_cyw43455_sdio_scan_migration(void)
     cyw43455_sdio_function2_read_qtest(destination, event_frame,
                                        CYW43455_EVENT_FRAME_LEN);
     cyw43455_sdio_assert_escan_event(
-        event_frame, CYW43455_EVENT_FRAME_LEN, 4,
-        1 + CYW43455_DEFAULT_CREDIT_WINDOW, filtered_sync_id, false,
+        event_frame, CYW43455_EVENT_FRAME_LEN, 5,
+        2 + CYW43455_DEFAULT_CREDIT_WINDOW, filtered_sync_id, false,
         cyw43455_sdio_default_test_mac);
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);

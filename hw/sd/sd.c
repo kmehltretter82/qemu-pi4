@@ -448,19 +448,19 @@ struct SDState {
 #define CYW43455_LINK_EVENT_LEN          \
     (CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_DATA_HEADER_LEN + \
      ETH_HLEN + CYW43455_BRCM_EVENT_HEADER_LEN + CYW43455_EVENT_MSG_LEN)
-#define CYW43455_ESCAN_REQ_VERSION       1
+#define CYW43455_ESCAN_REQ_VERSION_V1    1
+#define CYW43455_ESCAN_REQ_VERSION_V2    2
+#define CYW43455_ESCAN_RESULT_VERSION    1
 #define CYW43455_ESCAN_ACTION_START      1
 #define CYW43455_ESCAN_HEADER_LEN        8
-#define CYW43455_SCAN_PARAMS_FIXED_LEN   64
-#define CYW43455_ESCAN_FIXED_LEN         \
-    (CYW43455_ESCAN_HEADER_LEN + CYW43455_SCAN_PARAMS_FIXED_LEN)
+#define CYW43455_SCAN_PARAMS_V1_FIXED_LEN 64
+#define CYW43455_SCAN_PARAMS_V2_FIXED_LEN 72
+#define CYW43455_SCAN_PARAMS_V2_VERSION_OFFSET 0
+#define CYW43455_SCAN_PARAMS_V2_LENGTH_OFFSET 2
 #define CYW43455_SCAN_SSID_LEN           36
 #define CYW43455_SCAN_SSID_MAX_LEN       32
 #define CYW43455_SCAN_SSID_LEN_OFFSET    0
 #define CYW43455_SCAN_SSID_OFFSET        4
-#define CYW43455_SCAN_BSSID_OFFSET       36
-#define CYW43455_SCAN_BSS_TYPE_OFFSET    42
-#define CYW43455_SCAN_CHANNEL_NUM_OFFSET 60
 #define CYW43455_ESCAN_RESULT_FIXED_LEN  12
 #define CYW43455_BSS_INFO_IE_BYTES       24
 #define CYW43455_ESCAN_BSS_INFO_LEN      \
@@ -480,6 +480,14 @@ typedef struct CYW43455CoreInfo {
     uint32_t base;
     uint32_t wrapper;
 } CYW43455CoreInfo;
+
+typedef struct CYW43455ScanLayout {
+    uint32_t params_fixed_len;
+    uint32_t ssid_offset;
+    uint32_t bssid_offset;
+    uint32_t bss_type_offset;
+    uint32_t channel_num_offset;
+} CYW43455ScanLayout;
 
 /* Common BCM4345 topology; verify revisions and descriptors on a Pi 400. */
 static const CYW43455CoreInfo cyw43455_sdio_cores[] = {
@@ -764,7 +772,7 @@ static void cyw43455_sdio_emit_escan_event(CYW43455SDIOState *s)
         data_len = sizeof(result);
         status = CYW43455_EVENT_STATUS_PARTIAL;
         stl_le_p(result, sizeof(result));
-        stl_le_p(result + 4, CYW43455_ESCAN_REQ_VERSION);
+        stl_le_p(result + 4, CYW43455_ESCAN_RESULT_VERSION);
         stw_le_p(result + 8, s->escan_sync_id);
         stw_le_p(result + 10, 1);
         cyw43455_sdio_fill_bss_info(
@@ -993,12 +1001,16 @@ static int32_t cyw43455_sdio_start_escan(CYW43455SDIOState *s,
     static const uint8_t broadcast[ETH_ALEN] = {
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     };
+    CYW43455ScanLayout layout;
     const uint8_t *params = data + CYW43455_ESCAN_HEADER_LEN;
     const uint8_t *channels;
     const uint8_t *ssids;
+    uint32_t version;
     uint32_t counts;
     uint32_t channel_count;
     uint32_t ssid_count;
+    size_t escan_fixed_len;
+    size_t scan_end;
     size_t channel_bytes;
     size_t ssid_offset;
     bool channel_match;
@@ -1010,30 +1022,75 @@ static int32_t cyw43455_sdio_start_escan(CYW43455SDIOState *s,
     if (s->escan_event_phase) {
         return CYW43455_BCME_BUSY;
     }
-    if (data_len < CYW43455_ESCAN_FIXED_LEN) {
+    if (data_len < CYW43455_ESCAN_HEADER_LEN) {
         return CYW43455_BCME_BADLEN;
     }
-    if (ldl_le_p(data) != CYW43455_ESCAN_REQ_VERSION ||
-        lduw_le_p(data + 4) != CYW43455_ESCAN_ACTION_START) {
+    if (lduw_le_p(data + 4) != CYW43455_ESCAN_ACTION_START) {
         return CYW43455_BCME_BADARG;
     }
 
-    counts = ldl_le_p(params + CYW43455_SCAN_CHANNEL_NUM_OFFSET);
-    channel_count = extract32(counts, 0, 16);
-    ssid_count = extract32(counts, 16, 16);
-    if (channel_count >
-        (data_len - CYW43455_ESCAN_FIXED_LEN) / sizeof(uint16_t)) {
-        return CYW43455_BCME_BADLEN;
+    version = ldl_le_p(data);
+    switch (version) {
+    case CYW43455_ESCAN_REQ_VERSION_V1:
+        layout = (CYW43455ScanLayout) {
+            .params_fixed_len = CYW43455_SCAN_PARAMS_V1_FIXED_LEN,
+            .ssid_offset = 0,
+            .bssid_offset = 36,
+            .bss_type_offset = 42,
+            .channel_num_offset = 60,
+        };
+        scan_end = data_len;
+        break;
+    case CYW43455_ESCAN_REQ_VERSION_V2:
+        layout = (CYW43455ScanLayout) {
+            .params_fixed_len = CYW43455_SCAN_PARAMS_V2_FIXED_LEN,
+            .ssid_offset = 4,
+            .bssid_offset = 40,
+            .bss_type_offset = 46,
+            .channel_num_offset = 68,
+        };
+        if (data_len < CYW43455_ESCAN_HEADER_LEN +
+                       layout.params_fixed_len) {
+            return CYW43455_BCME_BADLEN;
+        }
+        if (lduw_le_p(params + CYW43455_SCAN_PARAMS_V2_VERSION_OFFSET) !=
+            CYW43455_ESCAN_REQ_VERSION_V2) {
+            return CYW43455_BCME_BADARG;
+        }
+        scan_end = lduw_le_p(params +
+                             CYW43455_SCAN_PARAMS_V2_LENGTH_OFFSET);
+        if (scan_end < layout.params_fixed_len ||
+            scan_end > data_len - CYW43455_ESCAN_HEADER_LEN) {
+            return CYW43455_BCME_BADLEN;
+        }
+        scan_end += CYW43455_ESCAN_HEADER_LEN;
+        break;
+    default:
+        return CYW43455_BCME_BADARG;
     }
-    channel_bytes = channel_count * sizeof(uint16_t);
-    ssid_offset = QEMU_ALIGN_UP(CYW43455_ESCAN_FIXED_LEN + channel_bytes,
-                                sizeof(uint32_t));
-    if (ssid_offset > data_len ||
-        ssid_count > (data_len - ssid_offset) / CYW43455_SCAN_SSID_LEN) {
+
+    escan_fixed_len = CYW43455_ESCAN_HEADER_LEN +
+                      layout.params_fixed_len;
+    if (data_len < escan_fixed_len) {
         return CYW43455_BCME_BADLEN;
     }
 
-    channels = data + CYW43455_ESCAN_FIXED_LEN;
+    counts = ldl_le_p(params + layout.channel_num_offset);
+    channel_count = extract32(counts, 0, 16);
+    ssid_count = extract32(counts, 16, 16);
+    if (channel_count >
+        (scan_end - escan_fixed_len) / sizeof(uint16_t)) {
+        return CYW43455_BCME_BADLEN;
+    }
+    channel_bytes = channel_count * sizeof(uint16_t);
+    ssid_offset = QEMU_ALIGN_UP(escan_fixed_len + channel_bytes,
+                                sizeof(uint32_t));
+    if (ssid_offset > scan_end ||
+        ssid_count > (scan_end - ssid_offset) / CYW43455_SCAN_SSID_LEN) {
+        return CYW43455_BCME_BADLEN;
+    }
+
+    channels = data + escan_fixed_len;
     ssids = data + ssid_offset;
     channel_match = channel_count == 0;
     for (i = 0; i < channel_count; i++) {
@@ -1043,13 +1100,14 @@ static int32_t cyw43455_sdio_start_escan(CYW43455SDIOState *s,
     }
 
     if (ssid_count == 0) {
-        uint32_t length = ldl_le_p(params +
+        const uint8_t *ssid = params + layout.ssid_offset;
+        uint32_t length = ldl_le_p(ssid +
                                    CYW43455_SCAN_SSID_LEN_OFFSET);
 
         if (length > CYW43455_SCAN_SSID_MAX_LEN) {
             return CYW43455_BCME_BADARG;
         }
-        ssid_match = cyw43455_sdio_scan_ssid_match(params);
+        ssid_match = cyw43455_sdio_scan_ssid_match(ssid);
     } else {
         for (i = 0; i < ssid_count; i++) {
             const uint8_t *ssid = ssids + i * CYW43455_SCAN_SSID_LEN;
@@ -1063,21 +1121,21 @@ static int32_t cyw43455_sdio_start_escan(CYW43455SDIOState *s,
         }
     }
 
-    bssid_match = !memcmp(params + CYW43455_SCAN_BSSID_OFFSET,
+    bssid_match = !memcmp(params + layout.bssid_offset,
                            broadcast, ETH_ALEN) ||
-                   !memcmp(params + CYW43455_SCAN_BSSID_OFFSET,
+                   !memcmp(params + layout.bssid_offset,
                            cyw43455_sdio_peer_mac, ETH_ALEN);
-    if (params[CYW43455_SCAN_BSS_TYPE_OFFSET] > 2) {
+    if (params[layout.bss_type_offset] > 2) {
         return CYW43455_BCME_BADARG;
     }
-    bss_type_match = params[CYW43455_SCAN_BSS_TYPE_OFFSET] != 1;
+    bss_type_match = params[layout.bss_type_offset] != 1;
 
     s->escan_sync_id = lduw_le_p(data + 6);
     s->escan_event_phase = channel_match && ssid_match && bssid_match &&
                            bss_type_match ? CYW43455_ESCAN_EVENT_PARTIAL :
                                             CYW43455_ESCAN_EVENT_COMPLETE;
-    trace_cyw43455_sdio_escan_request(s->escan_sync_id, channel_count,
-                                      ssid_count,
+    trace_cyw43455_sdio_escan_request(s->escan_sync_id, version,
+                                      channel_count, ssid_count,
                                       s->escan_event_phase ==
                                       CYW43455_ESCAN_EVENT_PARTIAL);
     return 0;
@@ -1328,6 +1386,9 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
                    !strcmp(iovar, "per_chan_info") ||
                    !strcmp(iovar, "toe_ol")) {
             /* The zero-filled response is the intentionally empty value. */
+        } else if (!strcmp(iovar, "scan_ver")) {
+            cyw43455_sdio_store_u32(output, output_len, 0,
+                                    CYW43455_ESCAN_REQ_VERSION_V2);
         } else if (!strcmp(iovar, "nmode") ||
                    !strcmp(iovar, "vhtmode") ||
                    !strcmp(iovar, "mimo_bw_cap")) {
