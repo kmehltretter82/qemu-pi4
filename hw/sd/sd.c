@@ -398,6 +398,7 @@ struct CYW43455SDIOState {
 
     NICConf conf;
     NICState *nic;
+    uint8_t current_mac[ETH_ALEN];
     /* Keep the version 1 migration layout for functions zero through two. */
     uint8_t regs[CYW43455_SDIO_LEGACY_REG_BANKS]
                 [CYW43455_SDIO_ADDR_SPACE_SIZE];
@@ -520,7 +521,7 @@ static void cyw43455_sdio_emit_link_event(CYW43455SDIOState *s)
     frame[9] = s->tx_credit_seq + s->tx_credit_window;
 
     bcdc[0] = CYW43455_BCDC_PROTO_VER << 4;
-    memcpy(ethernet, s->conf.macaddr.a, ETH_ALEN);
+    memcpy(ethernet, s->current_mac, ETH_ALEN);
     memcpy(ethernet + ETH_ALEN, cyw43455_sdio_peer_mac, ETH_ALEN);
     stw_be_p(ethernet + 2 * ETH_ALEN, CYW43455_EVENT_ETHERTYPE);
 
@@ -634,7 +635,6 @@ static bool cyw43455_sdio_supported_set_iovar(const char *name)
         "bus:txglomalign",
         "bus:rxglom",
         "clmload",
-        "cur_etheraddr",
         "mpc",
         "join_pref",
         "event_msgs",
@@ -660,6 +660,22 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
 {
     uint32_t count;
 
+    if (!strcmp(name, "cur_etheraddr")) {
+        static const uint8_t zero_mac[ETH_ALEN];
+
+        if (data_len != ETH_ALEN) {
+            return CYW43455_BCME_BADLEN;
+        }
+        if ((data[0] & 1) || !memcmp(data, zero_mac, ETH_ALEN)) {
+            return CYW43455_BCME_BADARG;
+        }
+        memcpy(s->current_mac, data, ETH_ALEN);
+        qemu_format_nic_info_str(qemu_get_queue(s->nic), s->current_mac);
+        trace_cyw43455_sdio_mac(s->current_mac[0], s->current_mac[1],
+                                s->current_mac[2], s->current_mac[3],
+                                s->current_mac[4], s->current_mac[5]);
+        return 0;
+    }
     if (!strcmp(name, "mcast_list")) {
         if (data_len < sizeof(count)) {
             return CYW43455_BCME_BADLEN;
@@ -757,8 +773,8 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
         return 0;
     case CYW43455_C_GET_VAR:
         if (!strcmp(iovar, "cur_etheraddr")) {
-            memcpy(output, s->conf.macaddr.a,
-                   MIN(sizeof(s->conf.macaddr.a), output_len));
+            memcpy(output, s->current_mac,
+                   MIN(sizeof(s->current_mac), output_len));
         } else if (!strcmp(iovar, "ver")) {
             cyw43455_sdio_store_string(output, output_len,
                                        "QEMU CYW43455 synthetic 1.0\n");
@@ -1455,6 +1471,10 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->link_event_up = true;
     s->firmware_connected = false;
     s->backend_link_events_armed = false;
+    memcpy(s->current_mac, s->conf.macaddr.a, ETH_ALEN);
+    if (s->nic) {
+        qemu_format_nic_info_str(qemu_get_queue(s->nic), s->current_mac);
+    }
     memset(s->multicast, 0, sizeof(s->multicast));
     s->multicast_count = 0;
     s->pm2_sleep_ret = 0;
@@ -1801,7 +1821,7 @@ static bool cyw43455_sdio_accept_packet(CYW43455SDIOState *s,
         return false;
     }
     if (s->promiscuous ||
-        !memcmp(destination, s->conf.macaddr.a, ETH_ALEN) ||
+        !memcmp(destination, s->current_mac, ETH_ALEN) ||
         !memcmp(destination, broadcast, ETH_ALEN)) {
         return true;
     }
@@ -1958,18 +1978,21 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         s->firmware_connected = s->link_event_sent;
         s->backend_link_events_armed = s->link_event_sent;
     }
+    if (version_id < 12) {
+        memcpy(s->current_mac, s->conf.macaddr.a, ETH_ALEN);
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
     cyw43455_sdio_update_irq(s);
-    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
+    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->current_mac);
     cyw43455_sdio_advance_rx(s);
     return 0;
 }
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 11,
+    .version_id = 12,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -2022,6 +2045,7 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_BOOL_V(link_event_up, CYW43455SDIOState, 11),
         VMSTATE_BOOL_V(firmware_connected, CYW43455SDIOState, 11),
         VMSTATE_BOOL_V(backend_link_events_armed, CYW43455SDIOState, 11),
+        VMSTATE_UINT8_ARRAY_V(current_mac, CYW43455SDIOState, ETH_ALEN, 12),
         VMSTATE_END_OF_LIST()
     },
 };
