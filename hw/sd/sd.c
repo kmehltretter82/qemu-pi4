@@ -367,6 +367,9 @@ struct SDState {
 #define CYW43455_QTXPOWER_OVERRIDE        BIT(31)
 #define CYW43455_QTXPOWER_MAX_QDBM        127
 #define CYW43455_QTXPOWER_DEFAULT_QDBM    124
+#define CYW43455_MFP_NONE                   0
+#define CYW43455_MFP_CAPABLE                1
+#define CYW43455_MFP_REQUIRED               2
 #define CYW43455_CHANSPEC_2G_CH1_20MHZ   0x1001
 #define CYW43455_CHANSPEC_2G_CH13_40MHZ  0x190b
 #define CYW43455_CHANSPEC_CHANNEL_MASK   0x00ff
@@ -615,6 +618,7 @@ struct CYW43455SDIOState {
     uint32_t power_mode;
     int32_t obss_coex;
     uint32_t qtxpower;
+    uint32_t mfp_mode;
     uint64_t tx_bytes;
     uint64_t rx_bytes;
     uint64_t tx_multicast_bytes;
@@ -1707,6 +1711,23 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
                                      status);
         return status;
     }
+    if (!strcmp(name, "mfp")) {
+        uint32_t mode = 0;
+        int32_t status = 0;
+
+        if (data_len != sizeof(mode)) {
+            status = CYW43455_BCME_BADLEN;
+        } else {
+            mode = ldl_le_p(data);
+            if (mode > CYW43455_MFP_REQUIRED) {
+                status = CYW43455_BCME_BADARG;
+            } else {
+                s->mfp_mode = mode;
+            }
+        }
+        trace_cyw43455_sdio_mfp(true, mode, status);
+        return status;
+    }
     return cyw43455_sdio_supported_set_iovar(name) ?
            0 : CYW43455_BCME_UNSUPPORTED;
 }
@@ -1876,6 +1897,10 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
             trace_cyw43455_sdio_tx_power(
                 false, s->qtxpower & ~CYW43455_QTXPOWER_OVERRIDE,
                 s->qtxpower & CYW43455_QTXPOWER_OVERRIDE, 0);
+        } else if (!strcmp(iovar, "mfp")) {
+            cyw43455_sdio_store_u32(output, output_len, 0,
+                                    s->mfp_mode);
+            trace_cyw43455_sdio_mfp(false, s->mfp_mode, 0);
         } else if (!strcmp(iovar, "mcast_list")) {
             uint32_t list_len = output_len > sizeof(uint32_t) ?
                 MIN(output_len - sizeof(uint32_t),
@@ -2570,6 +2595,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->power_mode = CYW43455_PM_OFF;
     s->obss_coex = CYW43455_OBSS_COEX_OFF;
     s->qtxpower = CYW43455_QTXPOWER_DEFAULT_QDBM;
+    s->mfp_mode = CYW43455_MFP_NONE;
     s->tx_bytes = 0;
     s->rx_bytes = 0;
     s->tx_multicast_bytes = 0;
@@ -3290,6 +3316,9 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     if (version_id < 21) {
         s->qtxpower = CYW43455_QTXPOWER_DEFAULT_QDBM;
     }
+    if (version_id < 22) {
+        s->mfp_mode = CYW43455_MFP_NONE;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -3311,6 +3340,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         s->obss_coex > CYW43455_OBSS_COEX_ON ||
         (s->qtxpower & ~(CYW43455_QTXPOWER_OVERRIDE |
                          CYW43455_QTXPOWER_MAX_QDBM)) ||
+        s->mfp_mode > CYW43455_MFP_REQUIRED ||
         s->survey_duration_ms > 60000 ||
         (s->survey_active && !s->survey_duration_ms)) {
         return -EINVAL;
@@ -3323,7 +3353,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 21,
+    .version_id = 22,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -3405,6 +3435,7 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT32_V(power_mode, CYW43455SDIOState, 19),
         VMSTATE_INT32_V(obss_coex, CYW43455SDIOState, 20),
         VMSTATE_UINT32_V(qtxpower, CYW43455SDIOState, 21),
+        VMSTATE_UINT32_V(mfp_mode, CYW43455SDIOState, 22),
         VMSTATE_END_OF_LIST()
     },
 };

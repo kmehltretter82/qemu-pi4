@@ -64,6 +64,7 @@ cyw43455_sdio_chanspecs(uint32_t filter, uint32_t count, int32_t status) "synthe
 cyw43455_sdio_power_mode(bool set, uint32_t mode, int32_t status) "synthetic power mode set=%u mode=%" PRIu32 " status=%" PRId32
 cyw43455_sdio_obss_coex(int32_t mode, int32_t status) "synthetic OBSS coexistence mode=%" PRId32 " status=%" PRId32
 cyw43455_sdio_tx_power(bool set, uint32_t qdbm, bool override, int32_t status) "synthetic transmit power set=%u qdbm=%" PRIu32 " override=%u status=%" PRId32
+cyw43455_sdio_mfp(bool set, uint32_t mode, int32_t status) "synthetic MFP mode set=%u mode=%" PRIu32 " status=%" PRId32
 cyw43455_sdio_control(uint32_t command, bool set, uint32_t request_id, uint32_t length) "synthetic control command=%" PRIu32 " set=%u id=%" PRIu32 " length=%" PRIu32
 cyw43455_sdio_iovar(const char *name, bool set, uint32_t request_id, int32_t status) "synthetic iovar name=%s set=%u id=%" PRIu32 " status=%" PRIi32
 cyw43455_sdio_control_queued(uint32_t length) "synthetic control response queued length=%" PRIu32
