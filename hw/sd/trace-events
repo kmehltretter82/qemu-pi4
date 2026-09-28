@@ -55,6 +55,7 @@ cyw43455_sdio_mac(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, ui
 cyw43455_sdio_arp_reply(uint8_t a0, uint8_t a1, uint8_t a2, uint8_t a3) "synthetic ARP offload reply for %u.%u.%u.%u"
 cyw43455_sdio_nd_reply(uint8_t a12, uint8_t a13, uint8_t a14, uint8_t a15) "synthetic ND offload reply target suffix bytes %u:%u:%u:%u"
 cyw43455_sdio_station(uint32_t tx_packets, uint32_t rx_packets, uint64_t tx_bytes, uint64_t rx_bytes, int signal) "synthetic station info tx-packets=%" PRIu32 " rx-packets=%" PRIu32 " tx-bytes=%" PRIu64 " rx-bytes=%" PRIu64 " signal=%d"
+cyw43455_sdio_bss(uint16_t beacon, uint8_t dtim, int signal, int noise) "synthetic BSS info beacon=%u dtim=%u signal=%d noise=%d"
 cyw43455_sdio_control(uint32_t command, bool set, uint32_t request_id, uint32_t length) "synthetic control command=%" PRIu32 " set=%u id=%" PRIu32 " length=%" PRIu32
 cyw43455_sdio_iovar(const char *name, bool set, uint32_t request_id, int32_t status) "synthetic iovar name=%s set=%u id=%" PRIu32 " status=%" PRIi32
 cyw43455_sdio_control_queued(uint32_t length) "synthetic control response queued length=%" PRIu32

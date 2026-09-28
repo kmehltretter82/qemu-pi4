@@ -346,6 +346,7 @@ struct SDState {
 #define CYW43455_C_GET_VERSION           1
 #define CYW43455_C_SET_PROMISC           10
 #define CYW43455_C_GET_REVINFO           98
+#define CYW43455_C_GET_BSS_INFO          136
 #define CYW43455_C_GET_BANDLIST          140
 #define CYW43455_C_GET_VAR               262
 #define CYW43455_C_SET_VAR               263
@@ -398,6 +399,35 @@ struct SDState {
 #define CYW43455_STA_FLAGS               \
     (CYW43455_STA_WME | CYW43455_STA_AUTHE | CYW43455_STA_ASSOC | \
      CYW43455_STA_AUTHO | CYW43455_STA_SCBSTATS)
+#define CYW43455_BSS_INFO_VERSION        109
+#define CYW43455_BSS_INFO_LEN            128
+#define CYW43455_BSS_INFO_PREFIX_LEN     4
+#define CYW43455_BSS_INFO_BSSID_OFFSET   8
+#define CYW43455_BSS_INFO_BEACON_OFFSET  14
+#define CYW43455_BSS_INFO_CAP_OFFSET     16
+#define CYW43455_BSS_INFO_SSID_LEN_OFFSET 18
+#define CYW43455_BSS_INFO_SSID_OFFSET    19
+#define CYW43455_BSS_INFO_RATE_COUNT_OFFSET 52
+#define CYW43455_BSS_INFO_RATES_OFFSET  56
+#define CYW43455_BSS_INFO_CHANSPEC_OFFSET 72
+#define CYW43455_BSS_INFO_DTIM_OFFSET    76
+#define CYW43455_BSS_INFO_RSSI_OFFSET    78
+#define CYW43455_BSS_INFO_NOISE_OFFSET   80
+#define CYW43455_BSS_INFO_N_CAP_OFFSET   81
+#define CYW43455_BSS_INFO_CTL_CH_OFFSET  88
+#define CYW43455_BSS_INFO_IE_OFFSET      116
+#define CYW43455_BSS_INFO_IE_LEN_OFFSET  120
+#define CYW43455_BSS_INFO_SNR_OFFSET     124
+#define CYW43455_BSS_BEACON_PERIOD       100
+#define CYW43455_BSS_DTIM_PERIOD         1
+#define CYW43455_BSS_SSID                "qemu-cyw43455"
+#define CYW43455_WLAN_CAPABILITY_ESS     BIT(0)
+#define CYW43455_WLAN_CAPABILITY_SHORT_PREAMBLE BIT(5)
+#define CYW43455_WLAN_CAPABILITY_SHORT_SLOT_TIME BIT(10)
+#define CYW43455_BSS_CAPABILITIES        \
+    (CYW43455_WLAN_CAPABILITY_ESS | \
+     CYW43455_WLAN_CAPABILITY_SHORT_PREAMBLE | \
+     CYW43455_WLAN_CAPABILITY_SHORT_SLOT_TIME)
 #define CYW43455_LINK_RATE_KBPS          72200
 #define CYW43455_SIGNAL_DBM              (-28)
 #define CYW43455_NOISE_DBM               (-95)
@@ -773,6 +803,66 @@ static int32_t cyw43455_sdio_station_info(CYW43455SDIOState *s,
     return 0;
 }
 
+static int32_t cyw43455_sdio_bss_info(CYW43455SDIOState *s,
+                                      const uint8_t *input,
+                                      uint32_t input_len,
+                                      uint8_t *output,
+                                      uint32_t output_len)
+{
+    uint8_t *bss;
+    uint32_t requested_len;
+    const size_t ssid_len = strlen(CYW43455_BSS_SSID);
+
+    if (!s->firmware_connected) {
+        return CYW43455_BCME_NOTASSOCIATED;
+    }
+    if (input_len < CYW43455_BSS_INFO_PREFIX_LEN) {
+        return CYW43455_BCME_BADLEN;
+    }
+
+    requested_len = ldl_le_p(input);
+    if (requested_len < CYW43455_BSS_INFO_PREFIX_LEN +
+                        CYW43455_BSS_INFO_LEN ||
+        requested_len > output_len) {
+        return CYW43455_BCME_BADLEN;
+    }
+
+    bss = output + CYW43455_BSS_INFO_PREFIX_LEN;
+    stl_le_p(output, requested_len);
+    stl_le_p(bss, CYW43455_BSS_INFO_VERSION);
+    stl_le_p(bss + 4, CYW43455_BSS_INFO_LEN);
+    memcpy(bss + CYW43455_BSS_INFO_BSSID_OFFSET,
+           cyw43455_sdio_peer_mac, ETH_ALEN);
+    stw_le_p(bss + CYW43455_BSS_INFO_BEACON_OFFSET,
+             CYW43455_BSS_BEACON_PERIOD);
+    stw_le_p(bss + CYW43455_BSS_INFO_CAP_OFFSET,
+             CYW43455_BSS_CAPABILITIES);
+    bss[CYW43455_BSS_INFO_SSID_LEN_OFFSET] = ssid_len;
+    memcpy(bss + CYW43455_BSS_INFO_SSID_OFFSET,
+           CYW43455_BSS_SSID, ssid_len);
+    stl_le_p(bss + CYW43455_BSS_INFO_RATE_COUNT_OFFSET, 1);
+    bss[CYW43455_BSS_INFO_RATES_OFFSET] = 144; /* 72 Mbit/s */
+    stw_le_p(bss + CYW43455_BSS_INFO_CHANSPEC_OFFSET,
+             CYW43455_CHANSPEC_2G_CH1_20MHZ);
+    bss[CYW43455_BSS_INFO_DTIM_OFFSET] = CYW43455_BSS_DTIM_PERIOD;
+    stw_le_p(bss + CYW43455_BSS_INFO_RSSI_OFFSET,
+             (uint16_t)CYW43455_SIGNAL_DBM);
+    bss[CYW43455_BSS_INFO_NOISE_OFFSET] = CYW43455_NOISE_DBM;
+    bss[CYW43455_BSS_INFO_N_CAP_OFFSET] = 1;
+    bss[CYW43455_BSS_INFO_CTL_CH_OFFSET] = 1;
+    stw_le_p(bss + CYW43455_BSS_INFO_IE_OFFSET,
+             CYW43455_BSS_INFO_LEN);
+    stl_le_p(bss + CYW43455_BSS_INFO_IE_LEN_OFFSET, 0);
+    stw_le_p(bss + CYW43455_BSS_INFO_SNR_OFFSET,
+             CYW43455_SIGNAL_DBM - CYW43455_NOISE_DBM);
+
+    trace_cyw43455_sdio_bss(CYW43455_BSS_BEACON_PERIOD,
+                            CYW43455_BSS_DTIM_PERIOD,
+                            CYW43455_SIGNAL_DBM,
+                            CYW43455_NOISE_DBM);
+    return 0;
+}
+
 static bool cyw43455_sdio_supported_set_iovar(const char *name)
 {
     static const char *const supported[] = {
@@ -991,6 +1081,9 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
         cyw43455_sdio_store_u32(output, output_len, 12, 9);
         cyw43455_sdio_store_u32(output, output_len, 44, 4345);
         return 0;
+    case CYW43455_C_GET_BSS_INFO:
+        return cyw43455_sdio_bss_info(s, input, input_len,
+                                      output, output_len);
     case CYW43455_C_GET_BANDLIST:
         cyw43455_sdio_store_u32(output, output_len, 0, 1);
         cyw43455_sdio_store_u32(output, output_len, 4,
@@ -1270,6 +1363,7 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
     uint32_t data_len;
     uint32_t flags;
     uint32_t payload_len;
+    uint32_t response_payload_len;
     uint32_t response_len;
     int32_t status;
     bool response_queued;
@@ -1327,8 +1421,9 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
     set = flags & CYW43455_BCDC_DCMD_SET;
     payload_len = MIN(data_len, request_len - data_offset -
                                 CYW43455_BCDC_HEADER_LEN);
+    response_payload_len = set ? payload_len : data_len;
     response_len = CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_HEADER_LEN +
-                   payload_len;
+                   response_payload_len;
     if (response_len > CYW43455_F2_FRAME_MAX) {
         return;
     }
@@ -1365,7 +1460,7 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
         s, command, set,
         request + data_offset + CYW43455_BCDC_HEADER_LEN, payload_len,
         response + CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_HEADER_LEN,
-        payload_len, iovar, sizeof(iovar));
+        response_payload_len, iovar, sizeof(iovar));
     if (status < 0) {
         flags |= CYW43455_BCDC_DCMD_ERROR;
     }

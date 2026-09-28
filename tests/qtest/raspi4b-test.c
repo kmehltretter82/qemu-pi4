@@ -97,6 +97,7 @@
 #define CYW43455_BCDC_DATA_HEADER_LEN 4
 #define CYW43455_BCDC_DCMD_SET     BIT(1)
 #define CYW43455_C_SET_PROMISC     10
+#define CYW43455_C_GET_BSS_INFO    136
 #define CYW43455_C_GET_VAR         262
 #define CYW43455_C_SET_VAR         263
 #define CYW43455_TEST_CREDIT_DELAY_MS 25
@@ -132,6 +133,31 @@
 #define CYW43455_STA_INFO_NF_OFFSET 148
 #define CYW43455_STA_INFO_RX_LAST_RSSI_OFFSET 168
 #define CYW43455_STA_FLAGS         0x0000403a
+#define CYW43455_BSS_INFO_VERSION  109
+#define CYW43455_BSS_INFO_LEN      128
+#define CYW43455_BSS_INFO_PREFIX_LEN 4
+#define CYW43455_BSS_INFO_BSSID_OFFSET 8
+#define CYW43455_BSS_INFO_BEACON_OFFSET 14
+#define CYW43455_BSS_INFO_CAP_OFFSET 16
+#define CYW43455_BSS_INFO_SSID_LEN_OFFSET 18
+#define CYW43455_BSS_INFO_SSID_OFFSET 19
+#define CYW43455_BSS_INFO_RATE_COUNT_OFFSET 52
+#define CYW43455_BSS_INFO_RATES_OFFSET 56
+#define CYW43455_BSS_INFO_CHANSPEC_OFFSET 72
+#define CYW43455_BSS_INFO_DTIM_OFFSET 76
+#define CYW43455_BSS_INFO_RSSI_OFFSET 78
+#define CYW43455_BSS_INFO_NOISE_OFFSET 80
+#define CYW43455_BSS_INFO_N_CAP_OFFSET 81
+#define CYW43455_BSS_INFO_CTL_CH_OFFSET 88
+#define CYW43455_BSS_INFO_IE_OFFSET 116
+#define CYW43455_BSS_INFO_IE_LEN_OFFSET 120
+#define CYW43455_BSS_INFO_SNR_OFFSET 124
+#define CYW43455_BSS_CAPABILITIES  0x0421
+#define CYW43455_BSS_BEACON_PERIOD 100
+#define CYW43455_BSS_DTIM_PERIOD   1
+#define CYW43455_BSS_SSID          "qemu-cyw43455"
+#define CYW43455_BSS_PAYLOAD_LEN   160
+#define CYW43455_CHANSPEC_2G_CH1_20MHZ 0x1001
 #define CYW43455_LINK_RATE_KBPS    72200
 #define CYW43455_SIGNAL_DBM        (-28)
 #define CYW43455_NOISE_DBM         (-95)
@@ -3084,6 +3110,34 @@ static size_t cyw43455_sdio_build_command_request(uint8_t *frame,
     return frame_len;
 }
 
+static size_t cyw43455_sdio_build_query_command_request(
+    uint8_t *frame, size_t frame_size, uint32_t command,
+    size_t response_payload_len, uint8_t sequence, uint16_t request_id)
+{
+    const size_t payload_len = sizeof(uint32_t);
+    size_t frame_len = CYW43455_SDPCM_HEADER_LEN +
+                       CYW43455_BCDC_HEADER_LEN + payload_len;
+    size_t stored_len = QEMU_ALIGN_UP(frame_len, sizeof(uint32_t));
+
+    g_assert_cmpuint(response_payload_len, >=, payload_len);
+    g_assert_cmpuint(response_payload_len, <=, UINT32_MAX);
+    g_assert_cmpuint(frame_len, <=, UINT16_MAX);
+    g_assert_cmpuint(frame_size, >=, stored_len);
+    memset(frame, 0, stored_len);
+    stw_le_p(frame, frame_len);
+    stw_le_p(frame + 2, (uint16_t)~frame_len);
+    frame[4] = sequence;
+    frame[7] = CYW43455_SDPCM_HEADER_LEN;
+    stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN, command);
+    stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 4,
+             response_payload_len);
+    stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8,
+             (uint32_t)request_id << 16);
+    stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN +
+             CYW43455_BCDC_HEADER_LEN, response_payload_len);
+    return stored_len;
+}
+
 static size_t cyw43455_sdio_build_data_request(uint8_t *frame,
                                                size_t frame_size,
                                                const uint8_t *packet,
@@ -3359,6 +3413,71 @@ static void cyw43455_sdio_assert_station_info_response(
                      ldq_le_p(payload +
                              CYW43455_STA_INFO_RX_MCAST_BYTES_OFFSET), ==,
                      rx_bytes);
+}
+
+static void cyw43455_sdio_assert_bss_info_response(
+    const uint8_t *frame, size_t stored_len, uint16_t request_id,
+    const uint8_t *peer_mac)
+{
+    const uint8_t *payload = frame + CYW43455_SDPCM_HEADER_LEN +
+                             CYW43455_BCDC_HEADER_LEN;
+    const uint8_t *bss = payload + CYW43455_BSS_INFO_PREFIX_LEN;
+    size_t frame_len = CYW43455_SDPCM_HEADER_LEN +
+                       CYW43455_BCDC_HEADER_LEN +
+                       CYW43455_BSS_PAYLOAD_LEN;
+    const size_t ssid_len = strlen(CYW43455_BSS_SSID);
+
+    g_assert_cmpuint(stored_len, ==,
+                     QEMU_ALIGN_UP(frame_len, sizeof(uint32_t)));
+    g_assert_cmpuint(lduw_le_p(frame), ==, frame_len);
+    g_assert_cmphex(lduw_le_p(frame + 2), ==, (uint16_t)~frame_len);
+    g_assert_cmpuint(frame[5] & 0xf, ==, 0);
+    g_assert_cmpuint(frame[7], ==, CYW43455_SDPCM_HEADER_LEN);
+    g_assert_cmpuint(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN), ==,
+                     CYW43455_C_GET_BSS_INFO);
+    g_assert_cmpuint(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 4), ==,
+                     CYW43455_BSS_PAYLOAD_LEN);
+    g_assert_cmphex(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8), ==,
+                    (uint32_t)request_id << 16);
+    g_assert_cmpint((int32_t)ldl_le_p(frame +
+                                     CYW43455_SDPCM_HEADER_LEN + 12), ==, 0);
+
+    g_assert_cmpuint(ldl_le_p(payload), ==, CYW43455_BSS_PAYLOAD_LEN);
+    g_assert_cmpuint(ldl_le_p(bss), ==, CYW43455_BSS_INFO_VERSION);
+    g_assert_cmpuint(ldl_le_p(bss + 4), ==, CYW43455_BSS_INFO_LEN);
+    g_assert_cmpmem(bss + CYW43455_BSS_INFO_BSSID_OFFSET,
+                    CYW43455_MAC_LEN, peer_mac, CYW43455_MAC_LEN);
+    g_assert_cmpuint(lduw_le_p(bss + CYW43455_BSS_INFO_BEACON_OFFSET), ==,
+                     CYW43455_BSS_BEACON_PERIOD);
+    g_assert_cmphex(lduw_le_p(bss + CYW43455_BSS_INFO_CAP_OFFSET), ==,
+                    CYW43455_BSS_CAPABILITIES);
+    g_assert_cmpuint(bss[CYW43455_BSS_INFO_SSID_LEN_OFFSET], ==, ssid_len);
+    g_assert_cmpmem(bss + CYW43455_BSS_INFO_SSID_OFFSET, ssid_len,
+                    CYW43455_BSS_SSID, ssid_len);
+    g_assert_cmpuint(ldl_le_p(bss + CYW43455_BSS_INFO_RATE_COUNT_OFFSET), ==,
+                     1);
+    g_assert_cmpuint(bss[CYW43455_BSS_INFO_RATES_OFFSET], ==, 144);
+    g_assert_cmphex(lduw_le_p(bss + CYW43455_BSS_INFO_CHANSPEC_OFFSET), ==,
+                    CYW43455_CHANSPEC_2G_CH1_20MHZ);
+    g_assert_cmpuint(bss[CYW43455_BSS_INFO_DTIM_OFFSET], ==,
+                     CYW43455_BSS_DTIM_PERIOD);
+    g_assert_cmpint((int16_t)lduw_le_p(
+                        bss + CYW43455_BSS_INFO_RSSI_OFFSET), ==,
+                    CYW43455_SIGNAL_DBM);
+    g_assert_cmpint((int8_t)bss[CYW43455_BSS_INFO_NOISE_OFFSET], ==,
+                    CYW43455_NOISE_DBM);
+    g_assert_cmpuint(bss[CYW43455_BSS_INFO_N_CAP_OFFSET], ==, 1);
+    g_assert_cmpuint(bss[CYW43455_BSS_INFO_CTL_CH_OFFSET], ==, 1);
+    g_assert_cmpuint(lduw_le_p(bss + CYW43455_BSS_INFO_IE_OFFSET), ==,
+                     CYW43455_BSS_INFO_LEN);
+    g_assert_cmpuint(ldl_le_p(bss + CYW43455_BSS_INFO_IE_LEN_OFFSET), ==, 0);
+    g_assert_cmpuint(lduw_le_p(bss + CYW43455_BSS_INFO_SNR_OFFSET), ==,
+                     CYW43455_SIGNAL_DBM - CYW43455_NOISE_DBM);
+    for (size_t i = CYW43455_BSS_INFO_PREFIX_LEN +
+                    CYW43455_BSS_INFO_LEN;
+         i < CYW43455_BSS_PAYLOAD_LEN; i++) {
+        g_assert_cmphex(payload[i], ==, 0);
+    }
 }
 
 static void cyw43455_sdio_assert_command_response(const uint8_t *frame,
@@ -4583,6 +4702,22 @@ static void test_cyw43455_sdio_network_backend(void)
     cyw43455_sdio_function2_read_qtest(qts, control_frame, control_len);
     cyw43455_sdio_assert_station_info_response(
         control_frame, control_len, 24, peer_mac, 3, 3 * sizeof(packet));
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    control_len = cyw43455_sdio_build_query_command_request(
+        control_frame, sizeof(control_frame), CYW43455_C_GET_BSS_INFO,
+        CYW43455_BSS_PAYLOAD_LEN, 4, 25);
+    cyw43455_sdio_function2_write_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(qts);
+    control_len = QEMU_ALIGN_UP(CYW43455_SDPCM_HEADER_LEN +
+                                CYW43455_BCDC_HEADER_LEN +
+                                CYW43455_BSS_PAYLOAD_LEN,
+                                sizeof(uint32_t));
+    memset(control_frame, 0xff, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_assert_bss_info_response(
+        control_frame, control_len, 25, peer_mac);
     cyw43455_sdio_backplane_writel_qtest(
         qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 
