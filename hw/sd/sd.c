@@ -680,7 +680,8 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
         } else if (!strcmp(iovar, "cap") ||
                    !strcmp(iovar, "event_msgs") ||
                    !strcmp(iovar, "clmload_status") ||
-                   !strcmp(iovar, "per_chan_info")) {
+                   !strcmp(iovar, "per_chan_info") ||
+                   !strcmp(iovar, "toe_ol")) {
             /* The zero-filled response is the intentionally empty value. */
         } else if (!strcmp(iovar, "nmode") ||
                    !strcmp(iovar, "vhtmode") ||
@@ -1017,6 +1018,11 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
         !strcmp(iovar, "arpoe")) {
         /* This is the final probe in the synthetic startup profile. */
         s->rx_data_enabled = true;
+    }
+    if (!set && command == CYW43455_C_GET_VAR &&
+        !strcmp(iovar, "toe_ol") && s->link_event_sent) {
+        s->link_event_sent = false;
+        trace_cyw43455_sdio_link_rearmed();
     }
     if (s->auto_associate && set && command == CYW43455_C_SET_PROMISC &&
         status == 0 && !s->link_event_sent) {
