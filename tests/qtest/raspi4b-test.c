@@ -55,7 +55,7 @@
 #define SDHC_NORINTSIGEN          0x38
 #define SDHC_NIS_CARDINT          0x0100
 
-#define CYW43455_SDIO_OCR_RESPONSE 0xa0ff8000U
+#define CYW43455_SDIO_OCR_RESPONSE 0xb0ff8000U
 #define CYW43455_SDIO_RCA          1
 #define CYW43455_SDIO_CCCR_REV     0x00
 #define CYW43455_SDIO_CCCR_IOEX    0x02
@@ -64,6 +64,9 @@
 #define CYW43455_SDIO_CCCR_INTPEND 0x05
 #define CYW43455_SDIO_CCCR_CIS     0x09
 #define CYW43455_SDIO_CIS_COMMON   0x1000
+#define CYW43455_SDIO_FBR_SIZE     0x100
+#define CYW43455_SDIO_FBR_CIS      0x09
+#define CYW43455_SDIO_CIS_FUNC3    0x1300
 #define CYW43455_SDIO_CHIPCLKCSR   0x1000e
 #define CYW43455_SDIO_FORCE_ALP    0x01
 #define CYW43455_SDIO_ALP_REQ      0x08
@@ -3363,13 +3366,40 @@ static void test_cyw43455_sdio_endpoint(void)
     g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 5, 0) & 0xff,
                     ==, 0xa9);
 
+    g_assert_cmphex(cyw43455_sdio_cmd52(
+                        false, false, 0, 3 * CYW43455_SDIO_FBR_SIZE, 0) &
+                    0xff, ==, 0x02);
+    cis = cyw43455_sdio_cmd52(
+              false, false, 0,
+              3 * CYW43455_SDIO_FBR_SIZE + CYW43455_SDIO_FBR_CIS, 0) & 0xff;
+    cis |= (cyw43455_sdio_cmd52(
+                 false, false, 0,
+                 3 * CYW43455_SDIO_FBR_SIZE + CYW43455_SDIO_FBR_CIS + 1,
+                 0) & 0xff) << 8;
+    cis |= (cyw43455_sdio_cmd52(
+                 false, false, 0,
+                 3 * CYW43455_SDIO_FBR_SIZE + CYW43455_SDIO_FBR_CIS + 2,
+                 0) & 0xff) << 16;
+    g_assert_cmphex(cis, ==, CYW43455_SDIO_CIS_FUNC3);
+    g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 2, 0) & 0xff,
+                    ==, 0xd0);
+    g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 3, 0) & 0xff,
+                    ==, 0x02);
+    g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 4, 0) & 0xff,
+                    ==, 0xa6);
+    g_assert_cmphex(cyw43455_sdio_cmd52(false, false, 0, cis + 5, 0) & 0xff,
+                    ==, 0xa9);
+
+    response = cyw43455_sdio_cmd52(true, true, 3, 0x400, 0x3c);
+    g_assert_cmphex(response & 0xff, ==, 0x3c);
+
     response = cyw43455_sdio_cmd52(true, true, 0,
                                    CYW43455_SDIO_CCCR_IOEX,
-                                   BIT(1) | BIT(2));
-    g_assert_cmphex(response & 0xff, ==, BIT(1) | BIT(2));
+                                   BIT(1) | BIT(2) | BIT(3));
+    g_assert_cmphex(response & 0xff, ==, BIT(1) | BIT(2) | BIT(3));
     response = cyw43455_sdio_cmd52(false, false, 0,
                                    CYW43455_SDIO_CCCR_IORX, 0);
-    g_assert_cmphex(response & 0xff, ==, BIT(1) | BIT(2));
+    g_assert_cmphex(response & 0xff, ==, BIT(1) | BIT(2) | BIT(3));
 
     response = cyw43455_sdio_cmd52(true, true, 1,
                                    CYW43455_SDIO_CHIPCLKCSR,
@@ -4064,6 +4094,9 @@ static void test_cyw43455_sdio_migration(void)
     g_assert_cmphex(cyw43455_sdio_cmd52_qtest(source, true, true, 1,
                                               0x400, 0x5a) & 0xff,
                     ==, 0x5a);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(source, true, true, 3,
+                                              0x400, 0x3c) & 0xff,
+                    ==, 0x3c);
     cyw43455_sdio_backplane_writel_qtest(
         source, CYW43455_SDIO_CR4_WRAPPER + 0x408, 0x23);
     cyw43455_sdio_enable_control_irq_qtest(source);
@@ -4163,6 +4196,9 @@ static void test_cyw43455_sdio_migration(void)
     g_assert_cmphex(cyw43455_sdio_cmd52_qtest(destination, false, false, 1,
                                               0x400, 0) & 0xff,
                     ==, 0x5a);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(destination, false, false, 3,
+                                              0x400, 0) & 0xff,
+                    ==, 0x3c);
     g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
                         destination,
                         CYW43455_SDIO_CR4_WRAPPER + 0x408),

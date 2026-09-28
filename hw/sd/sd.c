@@ -215,14 +215,17 @@ struct SDState {
  *
  * This is intentionally a local development model, not an assertion that a
  * complete or hardware-faithful CYW43455 is implemented.  In addition to the
- * two-function transport, it provides a synthetic BCM4345/9 chip-discovery
- * surface so that brcmfmac can reach firmware startup.  A bounded synthetic
+ * three-function identity, it provides a synthetic BCM4345/9 chip-discovery
+ * surface on functions one and two so that brcmfmac can reach firmware
+ * startup.  Function three is enumeration-only, matching the unbound WLAN
+ * interface observed on a Pi 400.  A bounded synthetic
  * SDPCM control responder is provided for host-driver experiments.  Ethernet
  * frames can move in both directions through a QEMU network backend.  An
  * optional one-shot association event raises guest carrier after netdev open,
  * but firmware execution and radio behavior remain unimplemented.
  */
-#define CYW43455_SDIO_NUM_FUNCS         2
+#define CYW43455_SDIO_NUM_FUNCS         3
+#define CYW43455_SDIO_LEGACY_REG_BANKS  3
 #define CYW43455_SDIO_ADDR_SPACE_SIZE   (1U << 17)
 #define CYW43455_SDIO_OCR               0x00ff8000U
 #define CYW43455_SDIO_RCA               1
@@ -247,6 +250,7 @@ struct SDState {
 #define SDIO_CCCR_SPEED                 0x13
 
 #define SDIO_FBR_SIZE                   0x100
+#define SDIO_FBR_STD_IF                 0x00
 #define SDIO_FBR_CIS_PTR                0x09
 #define SDIO_FBR_BLOCK_SIZE             0x10
 
@@ -274,6 +278,7 @@ struct SDState {
 #define CYW43455_CIS_COMMON             0x1000
 #define CYW43455_CIS_FUNC1              0x1100
 #define CYW43455_CIS_FUNC2              0x1200
+#define CYW43455_CIS_FUNC3              0x1300
 
 #define CYW43455_CHIPCLKCSR              0x1000e
 #define CYW43455_FORCE_ALP               0x01
@@ -392,8 +397,10 @@ struct CYW43455SDIOState {
 
     NICConf conf;
     NICState *nic;
-    uint8_t regs[CYW43455_SDIO_NUM_FUNCS + 1]
+    /* Keep the version 1 migration layout for functions zero through two. */
+    uint8_t regs[CYW43455_SDIO_LEGACY_REG_BANKS]
                 [CYW43455_SDIO_ADDR_SPACE_SIZE];
+    uint8_t f3_regs[CYW43455_SDIO_ADDR_SPACE_SIZE];
     uint32_t transfer_addr;
     uint32_t transfer_remaining;
     uint8_t transfer_func;
@@ -438,6 +445,12 @@ static SDBus *cyw43455_sdio_bus(CYW43455SDIOState *s)
     BusState *bus = qdev_get_parent_bus(DEVICE(s));
 
     return bus ? SD_BUS(bus) : NULL;
+}
+
+static uint8_t *cyw43455_sdio_func_regs(CYW43455SDIOState *s,
+                                        unsigned int function)
+{
+    return function == 3 ? s->f3_regs : s->regs[function];
 }
 
 static bool cyw43455_sdio_card_irq_level(CYW43455SDIOState *s)
@@ -1350,12 +1363,25 @@ static void cyw43455_sdio_add_function_cis(CYW43455SDIOState *s,
     regs[offset] = SDIO_CISTPL_END;
 }
 
+static void cyw43455_sdio_init_function3(CYW43455SDIOState *s)
+{
+    uint8_t *regs = s->regs[0];
+    uint32_t base = 3 * SDIO_FBR_SIZE;
+
+    regs[base + SDIO_FBR_STD_IF] = 0x02;
+    cyw43455_sdio_set_cis_pointer(s, 3, CYW43455_CIS_FUNC3);
+    regs[base + SDIO_FBR_BLOCK_SIZE] = 0;
+    regs[base + SDIO_FBR_BLOCK_SIZE + 1] = 2;
+    cyw43455_sdio_add_function_cis(s, CYW43455_CIS_FUNC3, 512);
+}
+
 static void cyw43455_sdio_init_registers(CYW43455SDIOState *s)
 {
     uint8_t *regs = s->regs[0];
     uint32_t offset;
 
     memset(s->regs, 0, sizeof(s->regs));
+    memset(s->f3_regs, 0, sizeof(s->f3_regs));
 
     /* CCCR 1.20, SDIO 2.00, SD Physical Layer 2.00. */
     regs[SDIO_CCCR_REV] = 0x32;
@@ -1386,6 +1412,7 @@ static void cyw43455_sdio_init_registers(CYW43455SDIOState *s)
 
     cyw43455_sdio_add_function_cis(s, CYW43455_CIS_FUNC1, 512);
     cyw43455_sdio_add_function_cis(s, CYW43455_CIS_FUNC2, 512);
+    cyw43455_sdio_init_function3(s);
 }
 
 static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
@@ -1444,14 +1471,14 @@ static uint8_t cyw43455_sdio_read_reg(CYW43455SDIOState *s,
         return cyw43455_sdio_backplane_readb(s, backplane_address);
     }
 
-    return s->regs[function][address];
+    return cyw43455_sdio_func_regs(s, function)[address];
 }
 
 static void cyw43455_sdio_write_reg(CYW43455SDIOState *s,
                                     unsigned int function,
                                     uint32_t address, uint8_t value)
 {
-    uint8_t *regs = s->regs[function];
+    uint8_t *regs = cyw43455_sdio_func_regs(s, function);
 
     if (function != 0) {
         if (function == 1 && address >= CYW43455_SB_ACCESS_START &&
@@ -1886,6 +1913,9 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 {
     CYW43455SDIOState *s = opaque;
 
+    if (version_id < 10) {
+        cyw43455_sdio_init_function3(s);
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -1897,12 +1927,12 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 9,
+    .version_id = 10,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_2DARRAY(regs, CYW43455SDIOState,
-                             CYW43455_SDIO_NUM_FUNCS + 1,
+                             CYW43455_SDIO_LEGACY_REG_BANKS,
                              CYW43455_SDIO_ADDR_SPACE_SIZE),
         VMSTATE_UINT32(transfer_addr, CYW43455SDIOState),
         VMSTATE_UINT32(transfer_remaining, CYW43455SDIOState),
@@ -1945,6 +1975,8 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT32_V(pm2_sleep_ret, CYW43455SDIOState, 9),
         VMSTATE_BOOL_V(allmulti, CYW43455SDIOState, 9),
         VMSTATE_BOOL_V(promiscuous, CYW43455SDIOState, 9),
+        VMSTATE_UINT8_ARRAY_V(f3_regs, CYW43455SDIOState,
+                              CYW43455_SDIO_ADDR_SPACE_SIZE, 10),
         VMSTATE_END_OF_LIST()
     },
 };
