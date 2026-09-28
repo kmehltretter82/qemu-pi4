@@ -50,6 +50,7 @@
 #include "qemu/log.h"
 #include "qemu/guest-random.h"
 #include "qemu/module.h"
+#include "net/checksum.h"
 #include "net/eth.h"
 #include "net/net.h"
 #include "sdmmc-internal.h"
@@ -356,6 +357,11 @@ struct SDState {
 #define CYW43455_MULTICAST_MAX           32
 #define CYW43455_ARP_HOSTIP_MAX          8
 #define CYW43455_ARP_OL_AGENT            BIT(0)
+#define CYW43455_ND_HOSTIP_MAX           8
+#define CYW43455_ICMP6_NEXT_HEADER       58
+#define CYW43455_ICMP6_NS                135
+#define CYW43455_ICMP6_NA                136
+#define CYW43455_ND_PAYLOAD_LEN          32
 #define CYW43455_BRCM_EVENT_HEADER_LEN   10
 #define CYW43455_EVENT_MSG_LEN           48
 #define CYW43455_EVENT_ETHERTYPE         0x886c
@@ -445,8 +451,11 @@ struct CYW43455SDIOState {
     uint8_t arp_hostip[CYW43455_ARP_HOSTIP_MAX][sizeof(uint32_t)];
     uint32_t arp_hostip_count;
     uint32_t arp_mode;
+    uint8_t nd_hostip[CYW43455_ND_HOSTIP_MAX][16];
+    uint32_t nd_hostip_count;
     uint32_t pm2_sleep_ret;
     bool arp_offload;
+    bool nd_offload;
     bool allmulti;
     bool promiscuous;
 };
@@ -753,6 +762,43 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
                sizeof(uint32_t));
         return 0;
     }
+    if (!strcmp(name, "ndoe")) {
+        if (data_len != sizeof(uint32_t)) {
+            return CYW43455_BCME_BADLEN;
+        }
+        s->nd_offload = ldl_le_p(data) != 0;
+        return 0;
+    }
+    if (!strcmp(name, "nd_hostip_clear")) {
+        if (data_len) {
+            return CYW43455_BCME_BADLEN;
+        }
+        memset(s->nd_hostip, 0, sizeof(s->nd_hostip));
+        s->nd_hostip_count = 0;
+        return 0;
+    }
+    if (!strcmp(name, "nd_hostip")) {
+        static const uint8_t zero_ip[16];
+        unsigned int i;
+
+        if (data_len != sizeof(s->nd_hostip[0])) {
+            return CYW43455_BCME_BADLEN;
+        }
+        if (!memcmp(data, zero_ip, sizeof(zero_ip))) {
+            return CYW43455_BCME_BADARG;
+        }
+        for (i = 0; i < s->nd_hostip_count; i++) {
+            if (!memcmp(data, s->nd_hostip[i], sizeof(s->nd_hostip[0]))) {
+                return 0;
+            }
+        }
+        if (s->nd_hostip_count == CYW43455_ND_HOSTIP_MAX) {
+            return CYW43455_BCME_BADARG;
+        }
+        memcpy(s->nd_hostip[s->nd_hostip_count++], data,
+               sizeof(s->nd_hostip[0]));
+        return 0;
+    }
     if (!strcmp(name, "pm2_sleep_ret")) {
         if (data_len != sizeof(uint32_t)) {
             return CYW43455_BCME_BADLEN;
@@ -863,6 +909,13 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
             memcpy(output, s->arp_hostip,
                    MIN(output_len, s->arp_hostip_count *
                                    sizeof(s->arp_hostip[0])));
+        } else if (!strcmp(iovar, "ndoe")) {
+            cyw43455_sdio_store_u32(output, output_len, 0,
+                                    s->nd_offload);
+        } else if (!strcmp(iovar, "nd_hostip")) {
+            memcpy(output, s->nd_hostip,
+                   MIN(output_len, s->nd_hostip_count *
+                                   sizeof(s->nd_hostip[0])));
         } else if (!strcmp(iovar, "pm2_sleep_ret")) {
             cyw43455_sdio_store_u32(output, output_len, 0,
                                     s->pm2_sleep_ret);
@@ -1541,8 +1594,11 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     memset(s->arp_hostip, 0, sizeof(s->arp_hostip));
     s->arp_hostip_count = 0;
     s->arp_mode = 0;
+    memset(s->nd_hostip, 0, sizeof(s->nd_hostip));
+    s->nd_hostip_count = 0;
     s->pm2_sleep_ret = 0;
     s->arp_offload = false;
+    s->nd_offload = false;
     s->allmulti = false;
     s->promiscuous = false;
     s->transfer_addr = 0;
@@ -1873,7 +1929,8 @@ static bool cyw43455_sdio_can_receive(NetClientState *nc)
     return cyw43455_sdio_rx_ready(s) ||
            (s->arp_offload &&
             (s->arp_mode & CYW43455_ARP_OL_AGENT) &&
-            s->arp_hostip_count);
+            s->arp_hostip_count) ||
+           (s->nd_offload && s->nd_hostip_count);
 }
 
 static bool cyw43455_sdio_arp_offload(CYW43455SDIOState *s,
@@ -1926,6 +1983,94 @@ static bool cyw43455_sdio_arp_offload(CYW43455SDIOState *s,
     return true;
 }
 
+static uint16_t cyw43455_sdio_icmp6_checksum(const uint8_t *source,
+                                             const uint8_t *destination,
+                                             uint8_t *payload,
+                                             uint32_t payload_len)
+{
+    uint8_t pseudo[40] = { };
+    uint32_t sum;
+
+    memcpy(pseudo, source, 16);
+    memcpy(pseudo + 16, destination, 16);
+    stl_be_p(pseudo + 32, payload_len);
+    pseudo[39] = CYW43455_ICMP6_NEXT_HEADER;
+    sum = net_checksum_add(sizeof(pseudo), pseudo);
+    sum += net_checksum_add(payload_len, payload);
+    return net_checksum_finish(sum);
+}
+
+static bool cyw43455_sdio_nd_offload(CYW43455SDIOState *s,
+                                     const uint8_t *buffer, size_t size)
+{
+    static const uint8_t zero_ip[16];
+    const uint8_t *ip6;
+    const uint8_t *icmp6;
+    const uint8_t *target_ip;
+    uint8_t reply[ETH_HLEN + 40 + CYW43455_ND_PAYLOAD_LEN] = { };
+    uint8_t *reply_ip6 = reply + ETH_HLEN;
+    uint8_t *reply_icmp6 = reply_ip6 + 40;
+    uint16_t payload_len;
+    unsigned int i;
+
+    if (!s->nd_offload ||
+        size < ETH_HLEN + 40 + 24 ||
+        lduw_be_p(buffer + 12) != ETH_P_IPV6) {
+        return false;
+    }
+
+    ip6 = buffer + ETH_HLEN;
+    payload_len = lduw_be_p(ip6 + 4);
+    if ((ip6[0] >> 4) != 6 || !memcmp(ip6 + 8, zero_ip, sizeof(zero_ip)) ||
+        ip6[6] != CYW43455_ICMP6_NEXT_HEADER || ip6[7] != 255 ||
+        payload_len < 24 || size < ETH_HLEN + 40 + payload_len) {
+        return false;
+    }
+
+    icmp6 = ip6 + 40;
+    if (icmp6[0] != CYW43455_ICMP6_NS || icmp6[1] ||
+        cyw43455_sdio_icmp6_checksum(ip6 + 8, ip6 + 24,
+                                     (uint8_t *)icmp6, payload_len)) {
+        return false;
+    }
+
+    target_ip = icmp6 + 8;
+    for (i = 0; i < s->nd_hostip_count; i++) {
+        if (!memcmp(target_ip, s->nd_hostip[i], sizeof(s->nd_hostip[0]))) {
+            break;
+        }
+    }
+    if (i == s->nd_hostip_count) {
+        return false;
+    }
+
+    memcpy(reply, buffer + ETH_ALEN, ETH_ALEN);
+    memcpy(reply + ETH_ALEN, s->current_mac, ETH_ALEN);
+    stw_be_p(reply + 2 * ETH_ALEN, ETH_P_IPV6);
+    stl_be_p(reply_ip6, 6U << 28);
+    stw_be_p(reply_ip6 + 4, CYW43455_ND_PAYLOAD_LEN);
+    reply_ip6[6] = CYW43455_ICMP6_NEXT_HEADER;
+    reply_ip6[7] = 255;
+    memcpy(reply_ip6 + 8, target_ip, 16);
+    memcpy(reply_ip6 + 24, ip6 + 8, 16);
+
+    reply_icmp6[0] = CYW43455_ICMP6_NA;
+    stl_be_p(reply_icmp6 + 4, BIT(30) | BIT(29));
+    memcpy(reply_icmp6 + 8, target_ip, 16);
+    reply_icmp6[24] = 2; /* target link-layer address */
+    reply_icmp6[25] = 1; /* option length in eight-byte units */
+    memcpy(reply_icmp6 + 26, s->current_mac, ETH_ALEN);
+    stw_be_p(reply_icmp6 + 2,
+             cyw43455_sdio_icmp6_checksum(reply_ip6 + 8, reply_ip6 + 24,
+                                          reply_icmp6,
+                                          CYW43455_ND_PAYLOAD_LEN));
+
+    qemu_send_packet(qemu_get_queue(s->nic), reply, sizeof(reply));
+    trace_cyw43455_sdio_nd_reply(target_ip[12], target_ip[13],
+                                 target_ip[14], target_ip[15]);
+    return true;
+}
+
 static bool cyw43455_sdio_accept_packet(CYW43455SDIOState *s,
                                         const uint8_t *buffer, size_t size)
 {
@@ -1967,6 +2112,9 @@ static ssize_t cyw43455_sdio_receive(NetClientState *nc,
     size_t stored_len;
 
     if (cyw43455_sdio_arp_offload(s, buffer, size)) {
+        return size;
+    }
+    if (cyw43455_sdio_nd_offload(s, buffer, size)) {
         return size;
     }
     if (frame_len > sizeof(s->f2_rx_frame)) {
@@ -2108,10 +2256,18 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         s->arp_mode = 0;
         s->arp_offload = false;
     }
+    if (version_id < 14) {
+        memset(s->nd_hostip, 0, sizeof(s->nd_hostip));
+        s->nd_hostip_count = 0;
+        s->nd_offload = false;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
     if (s->arp_hostip_count > CYW43455_ARP_HOSTIP_MAX) {
+        return -EINVAL;
+    }
+    if (s->nd_hostip_count > CYW43455_ND_HOSTIP_MAX) {
         return -EINVAL;
     }
     cyw43455_sdio_update_irq(s);
@@ -2122,7 +2278,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 13,
+    .version_id = 14,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -2182,6 +2338,10 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT32_V(arp_hostip_count, CYW43455SDIOState, 13),
         VMSTATE_UINT32_V(arp_mode, CYW43455SDIOState, 13),
         VMSTATE_BOOL_V(arp_offload, CYW43455SDIOState, 13),
+        VMSTATE_UINT8_2DARRAY_V(nd_hostip, CYW43455SDIOState,
+                                CYW43455_ND_HOSTIP_MAX, 16, 14),
+        VMSTATE_UINT32_V(nd_hostip_count, CYW43455SDIOState, 14),
+        VMSTATE_BOOL_V(nd_offload, CYW43455SDIOState, 14),
         VMSTATE_END_OF_LIST()
     },
 };
