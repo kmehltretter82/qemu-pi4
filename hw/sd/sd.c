@@ -348,6 +348,7 @@ struct SDState {
 #define CYW43455_C_GET_VERSION           1
 #define CYW43455_C_SET_PROMISC           10
 #define CYW43455_C_GET_REVINFO           98
+#define CYW43455_C_GET_PHY_NOISE         135
 #define CYW43455_C_GET_BSS_INFO          136
 #define CYW43455_C_GET_BANDLIST          140
 #define CYW43455_C_GET_VAR               262
@@ -461,6 +462,7 @@ struct SDState {
 #define CYW43455_SCAN_SSID_MAX_LEN       32
 #define CYW43455_SCAN_SSID_LEN_OFFSET    0
 #define CYW43455_SCAN_SSID_OFFSET        4
+#define CYW43455_SURVEY_RESULTS_MAX      512
 #define CYW43455_ESCAN_RESULT_FIXED_LEN  12
 #define CYW43455_BSS_INFO_IE_BYTES       24
 #define CYW43455_ESCAN_BSS_INFO_LEN      \
@@ -555,6 +557,9 @@ struct CYW43455SDIOState {
     bool backend_link_events_armed;
     uint8_t escan_event_phase;
     uint16_t escan_sync_id;
+    uint32_t chanspec;
+    uint32_t survey_duration_ms;
+    bool survey_active;
     uint8_t multicast[CYW43455_MULTICAST_MAX][ETH_ALEN];
     uint32_t multicast_count;
     uint8_t arp_hostip[CYW43455_ARP_HOSTIP_MAX][sizeof(uint32_t)];
@@ -874,6 +879,84 @@ static void cyw43455_sdio_store_string(uint8_t *output, uint32_t output_len,
     memcpy(output, value, length);
 }
 
+static int32_t cyw43455_sdio_dump_obss(CYW43455SDIOState *s,
+                                        const uint8_t *data,
+                                        uint32_t data_len,
+                                        uint8_t *output,
+                                        uint32_t output_len)
+{
+    char results[CYW43455_SURVEY_RESULTS_MAX];
+    uint32_t query;
+    uint32_t duration;
+    uint32_t obss;
+    uint32_t ibss;
+    uint32_t no_ctg;
+    uint32_t no_pckt;
+    uint32_t tx;
+    uint32_t idle;
+    int length;
+
+    /* The four-byte integer query is brcmfmac's feature probe. */
+    if (data_len == sizeof(uint32_t)) {
+        cyw43455_sdio_store_u32(output, output_len, 0, 0);
+        return 0;
+    }
+    if (data_len < 2 * sizeof(uint32_t) ||
+        output_len < 2 * sizeof(uint32_t)) {
+        return CYW43455_BCME_BADLEN;
+    }
+
+    query = ldl_le_p(data);
+    duration = ldl_le_p(data + sizeof(uint32_t));
+    if (query == 0) {
+        if (!duration || duration > 60000) {
+            return CYW43455_BCME_BADARG;
+        }
+        if (s->survey_active) {
+            return CYW43455_BCME_BUSY;
+        }
+        s->survey_duration_ms = duration;
+        s->survey_active = true;
+        stl_le_p(output, duration);
+        stl_le_p(output + sizeof(uint32_t), 0);
+        trace_cyw43455_sdio_survey(query, s->chanspec, duration,
+                                   s->survey_active);
+        return 0;
+    }
+    if (query != 1 || !s->survey_active ||
+        duration != s->survey_duration_ms) {
+        return CYW43455_BCME_BADARG;
+    }
+
+    obss = duration * 3 / 20;
+    ibss = duration * 3 / 80;
+    no_ctg = duration / 20;
+    no_pckt = duration / 40;
+    tx = duration / 16;
+    idle = duration * 5 / 8;
+    length = g_snprintf(
+        results, sizeof(results),
+        "OBSS 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %u\n"
+        "IBSS 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %u\n"
+        "TXDur 0 0 0 0 0 0 0 0 0 0 0 0 0 %u\n"
+        "Category 0 0 0 0 0 0 0 0 0 0 0 0 %u\n"
+        "Packet 0 0 0 0 0 0 0 0 0 0 0 0 0 0 %u\n"
+        "Opp(time): 0 0 0 0 0 0 0 0 0 0 0 %u\n",
+        obss, ibss, tx, no_ctg, no_pckt, idle);
+    if (length < 0 || length >= sizeof(results) ||
+        (uint32_t)length + 2 * sizeof(uint32_t) + 1 > output_len) {
+        return CYW43455_BCME_BADLEN;
+    }
+
+    stl_le_p(output, duration);
+    stl_le_p(output + sizeof(uint32_t), 1);
+    memcpy(output + 2 * sizeof(uint32_t), results, length + 1);
+    s->survey_active = false;
+    trace_cyw43455_sdio_survey(query, s->chanspec, duration,
+                               s->survey_active);
+    return 0;
+}
+
 static int32_t cyw43455_sdio_station_info(CYW43455SDIOState *s,
                                           const uint8_t *data,
                                           uint32_t data_len,
@@ -1191,6 +1274,19 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
     if (!strcmp(name, "escan")) {
         return cyw43455_sdio_start_escan(s, data, data_len);
     }
+    if (!strcmp(name, "chanspec")) {
+        uint32_t chanspec;
+
+        if (data_len != sizeof(chanspec)) {
+            return CYW43455_BCME_BADLEN;
+        }
+        chanspec = ldl_le_p(data);
+        if (chanspec != CYW43455_CHANSPEC_2G_CH1_20MHZ) {
+            return CYW43455_BCME_BADARG;
+        }
+        s->chanspec = chanspec;
+        return 0;
+    }
     if (!strcmp(name, "mcast_list")) {
         if (data_len < sizeof(count)) {
             return CYW43455_BCME_BADLEN;
@@ -1362,6 +1458,10 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
         cyw43455_sdio_store_u32(output, output_len, 12, 9);
         cyw43455_sdio_store_u32(output, output_len, 44, 4345);
         return 0;
+    case CYW43455_C_GET_PHY_NOISE:
+        cyw43455_sdio_store_u32(output, output_len, 0,
+                                (uint32_t)(int32_t)CYW43455_NOISE_DBM);
+        return 0;
     case CYW43455_C_GET_BSS_INFO:
         return cyw43455_sdio_bss_info(s, input, input_len,
                                       output, output_len);
@@ -1386,6 +1486,10 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
                    !strcmp(iovar, "per_chan_info") ||
                    !strcmp(iovar, "toe_ol")) {
             /* The zero-filled response is the intentionally empty value. */
+        } else if (!strcmp(iovar, "dump_obss")) {
+            return cyw43455_sdio_dump_obss(s, iovar_data,
+                                           iovar_data_len, output,
+                                           output_len);
         } else if (!strcmp(iovar, "scan_ver")) {
             cyw43455_sdio_store_u32(output, output_len, 0,
                                     CYW43455_ESCAN_REQ_VERSION_V2);
@@ -1396,8 +1500,7 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
         } else if (!strcmp(iovar, "rxchain")) {
             cyw43455_sdio_store_u32(output, output_len, 0, 1);
         } else if (!strcmp(iovar, "chanspec")) {
-            cyw43455_sdio_store_u32(output, output_len, 0,
-                                    CYW43455_CHANSPEC_2G_CH1_20MHZ);
+            cyw43455_sdio_store_u32(output, output_len, 0, s->chanspec);
         } else if (!strcmp(iovar, "chanspecs")) {
             cyw43455_sdio_store_u32(output, output_len, 0, 1);
             cyw43455_sdio_store_u32(output, output_len, 4,
@@ -2105,6 +2208,9 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->backend_link_events_armed = false;
     s->escan_event_phase = CYW43455_ESCAN_EVENT_NONE;
     s->escan_sync_id = 0;
+    s->chanspec = CYW43455_CHANSPEC_2G_CH1_20MHZ;
+    s->survey_duration_ms = 0;
+    s->survey_active = false;
     memcpy(s->current_mac, s->conf.macaddr.a, ETH_ALEN);
     if (s->nic) {
         qemu_format_nic_info_str(qemu_get_queue(s->nic), s->current_mac);
@@ -2813,6 +2919,11 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         s->escan_event_phase = CYW43455_ESCAN_EVENT_NONE;
         s->escan_sync_id = 0;
     }
+    if (version_id < 17) {
+        s->chanspec = CYW43455_CHANSPEC_2G_CH1_20MHZ;
+        s->survey_duration_ms = 0;
+        s->survey_active = false;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -2825,6 +2936,11 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     if (s->escan_event_phase > CYW43455_ESCAN_EVENT_COMPLETE) {
         return -EINVAL;
     }
+    if (s->chanspec != CYW43455_CHANSPEC_2G_CH1_20MHZ ||
+        s->survey_duration_ms > 60000 ||
+        (s->survey_active && !s->survey_duration_ms)) {
+        return -EINVAL;
+    }
     cyw43455_sdio_update_irq(s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->current_mac);
     cyw43455_sdio_advance_rx(s);
@@ -2833,7 +2949,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 16,
+    .version_id = 17,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -2908,6 +3024,9 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_INT64_V(association_time_ms, CYW43455SDIOState, 15),
         VMSTATE_UINT8_V(escan_event_phase, CYW43455SDIOState, 16),
         VMSTATE_UINT16_V(escan_sync_id, CYW43455SDIOState, 16),
+        VMSTATE_UINT32_V(chanspec, CYW43455SDIOState, 17),
+        VMSTATE_UINT32_V(survey_duration_ms, CYW43455SDIOState, 17),
+        VMSTATE_BOOL_V(survey_active, CYW43455SDIOState, 17),
         VMSTATE_END_OF_LIST()
     },
 };

@@ -95,8 +95,11 @@
 #define CYW43455_SDPCM_DATA_CHANNEL 2
 #define CYW43455_BCDC_HEADER_LEN   16
 #define CYW43455_BCDC_DATA_HEADER_LEN 4
+#define CYW43455_BCDC_DCMD_ERROR   BIT(0)
 #define CYW43455_BCDC_DCMD_SET     BIT(1)
+#define CYW43455_BCME_BADARG       (-2)
 #define CYW43455_C_SET_PROMISC     10
+#define CYW43455_C_GET_PHY_NOISE   135
 #define CYW43455_C_GET_BSS_INFO    136
 #define CYW43455_C_GET_VAR         262
 #define CYW43455_C_SET_VAR         263
@@ -194,6 +197,8 @@
 #define CYW43455_ESCAN_V2_REQUEST_LEN \
     (CYW43455_ESCAN_HEADER_LEN + CYW43455_SCAN_PARAMS_V2_FIXED_LEN + \
      sizeof(uint32_t) + CYW43455_SCAN_SSID_LEN)
+#define CYW43455_SURVEY_DURATION_MS 80
+#define CYW43455_SURVEY_PAYLOAD_LEN 256
 
 #define PROPERTY_RESPONSE_SUCCESS 0x80000000
 #define PROPERTY_RESPONSE_ERROR   0x80000001
@@ -3425,6 +3430,38 @@ static void cyw43455_sdio_assert_iovar_value_response(
     }
 }
 
+static const uint8_t *cyw43455_sdio_assert_iovar_data_response(
+    const uint8_t *frame, size_t stored_len, size_t payload_len,
+    uint8_t sequence, uint16_t request_id, int32_t status)
+{
+    const uint8_t *payload = frame + CYW43455_SDPCM_HEADER_LEN +
+                             CYW43455_BCDC_HEADER_LEN;
+    size_t frame_len = CYW43455_SDPCM_HEADER_LEN +
+                       CYW43455_BCDC_HEADER_LEN + payload_len;
+    uint32_t flags = (uint32_t)request_id << 16;
+
+    if (status < 0) {
+        flags |= CYW43455_BCDC_DCMD_ERROR;
+    }
+    g_assert_cmpuint(stored_len, ==,
+                     QEMU_ALIGN_UP(frame_len, sizeof(uint32_t)));
+    g_assert_cmpuint(lduw_le_p(frame), ==, frame_len);
+    g_assert_cmphex(lduw_le_p(frame + 2), ==, (uint16_t)~frame_len);
+    g_assert_cmpuint(frame[4], ==, sequence);
+    g_assert_cmpuint(frame[5] & 0xf, ==, 0);
+    g_assert_cmpuint(frame[7], ==, CYW43455_SDPCM_HEADER_LEN);
+    g_assert_cmpuint(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN), ==,
+                     CYW43455_C_GET_VAR);
+    g_assert_cmpuint(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 4), ==,
+                     payload_len);
+    g_assert_cmphex(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8), ==,
+                    flags);
+    g_assert_cmpint((int32_t)ldl_le_p(frame +
+                                     CYW43455_SDPCM_HEADER_LEN + 12), ==,
+                    status);
+    return payload;
+}
+
 static void cyw43455_sdio_assert_station_info_response(
     const uint8_t *frame, size_t stored_len, uint16_t request_id,
     const uint8_t *peer_mac, uint32_t tx_packets, uint64_t tx_bytes)
@@ -3588,6 +3625,32 @@ static void cyw43455_sdio_assert_command_response(const uint8_t *frame,
                     CYW43455_BCDC_DCMD_SET);
     g_assert_cmpint((int32_t)ldl_le_p(frame +
                                      CYW43455_SDPCM_HEADER_LEN + 12), ==, 0);
+}
+
+static void cyw43455_sdio_assert_query_command_value_response(
+    const uint8_t *frame, size_t frame_len, uint32_t command,
+    uint32_t expected, uint8_t sequence, uint16_t request_id)
+{
+    const uint8_t *payload = frame + CYW43455_SDPCM_HEADER_LEN +
+                             CYW43455_BCDC_HEADER_LEN;
+
+    g_assert_cmpuint(frame_len, ==, CYW43455_SDPCM_HEADER_LEN +
+                                  CYW43455_BCDC_HEADER_LEN +
+                                  sizeof(uint32_t));
+    g_assert_cmpuint(lduw_le_p(frame), ==, frame_len);
+    g_assert_cmphex(lduw_le_p(frame + 2), ==, (uint16_t)~frame_len);
+    g_assert_cmpuint(frame[4], ==, sequence);
+    g_assert_cmpuint(frame[5] & 0xf, ==, 0);
+    g_assert_cmpuint(frame[7], ==, CYW43455_SDPCM_HEADER_LEN);
+    g_assert_cmpuint(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN), ==,
+                     command);
+    g_assert_cmpuint(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 4), ==,
+                     sizeof(uint32_t));
+    g_assert_cmphex(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8), ==,
+                    (uint32_t)request_id << 16);
+    g_assert_cmpint((int32_t)ldl_le_p(frame +
+                                     CYW43455_SDPCM_HEADER_LEN + 12), ==, 0);
+    g_assert_cmpuint((uint32_t)ldl_le_p(payload), ==, expected);
 }
 
 static void cyw43455_sdio_assert_link_event(const uint8_t *frame,
@@ -5023,6 +5086,181 @@ static void test_cyw43455_sdio_scan_migration(void)
         event_frame, CYW43455_EVENT_FRAME_LEN, 5,
         2 + CYW43455_DEFAULT_CREDIT_WINDOW, filtered_sync_id, false,
         cyw43455_sdio_default_test_mac);
+    cyw43455_sdio_backplane_writel_qtest(
+        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        destination, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+
+    qtest_quit(destination);
+    close(net_sockets[0]);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+static void test_cyw43455_sdio_survey_migration(void)
+{
+    static const char expected_results[] =
+        "OBSS 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12\n"
+        "IBSS 0 0 0 0 0 0 0 0 0 0 0 0 0 0 3\n"
+        "TXDur 0 0 0 0 0 0 0 0 0 0 0 0 0 5\n"
+        "Category 0 0 0 0 0 0 0 0 0 0 0 0 4\n"
+        "Packet 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2\n"
+        "Opp(time): 0 0 0 0 0 0 0 0 0 0 0 50\n";
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autoptr(GString) cmd_line =
+        g_string_new("-machine raspi4b,sdio-wifi=on");
+    QTestState *source = global_qtest;
+    QTestState *destination;
+    const uint8_t *payload;
+    uint8_t control_frame[320];
+    uint8_t query[2 * sizeof(uint32_t)];
+    uint8_t scalar[sizeof(uint32_t)];
+    size_t control_len;
+    int net_sockets[2];
+    int ret;
+
+    cyw43455_sdio_select_qtest(source);
+    cyw43455_sdio_enable_control_irq_qtest(source);
+
+    memset(scalar, 0, sizeof(scalar));
+    control_len = cyw43455_sdio_build_iovar_data_request(
+        control_frame, sizeof(control_frame), "dump_obss", scalar,
+        sizeof(scalar), sizeof("dump_obss") + sizeof(scalar), 0, 1);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    payload = cyw43455_sdio_assert_iovar_data_response(
+        control_frame, control_len, sizeof("dump_obss") + sizeof(scalar),
+        0, 1, 0);
+    g_assert_cmphex(ldl_le_p(payload), ==, 0);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    stl_le_p(scalar, CYW43455_CHANSPEC_2G_CH1_20MHZ);
+    control_len = cyw43455_sdio_build_set_iovar_request(
+        control_frame, sizeof(control_frame), "chanspec", scalar,
+        sizeof(scalar), 1, 2);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    cyw43455_sdio_assert_set_iovar_response(
+        control_frame, control_len, "chanspec", sizeof(scalar), 1, 2);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    control_len = cyw43455_sdio_build_query_command_request(
+        control_frame, sizeof(control_frame), CYW43455_C_GET_PHY_NOISE,
+        sizeof(uint32_t), 2, 3);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    cyw43455_sdio_assert_query_command_value_response(
+        control_frame, control_len, CYW43455_C_GET_PHY_NOISE,
+        (uint32_t)(int32_t)CYW43455_NOISE_DBM, 2, 3);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    stl_le_p(query, 0);
+    stl_le_p(query + sizeof(uint32_t), CYW43455_SURVEY_DURATION_MS);
+    control_len = cyw43455_sdio_build_iovar_data_request(
+        control_frame, sizeof(control_frame), "dump_obss", query,
+        sizeof(query), CYW43455_SURVEY_PAYLOAD_LEN, 3, 4);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    payload = cyw43455_sdio_assert_iovar_data_response(
+        control_frame, control_len, CYW43455_SURVEY_PAYLOAD_LEN, 3, 4, 0);
+    g_assert_cmpuint(ldl_le_p(payload), ==, CYW43455_SURVEY_DURATION_MS);
+    g_assert_cmpuint(ldl_le_p(payload + sizeof(uint32_t)), ==, 0);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    /* Migrate after starting the measurement but before collecting it. */
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("raspi4b-cyw43455-survey-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    raspi4b_wait_for_migration(source);
+
+    if (pcie_has_edu) {
+        g_string_append(cmd_line,
+                        " -device edu,id=edu0,bus=pcie.1,addr=1,"
+                        "dma_mask=0xffffffffffffffff");
+    }
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
+    g_assert_cmpint(ret, !=, -1);
+    g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
+                           net_sockets[1]);
+    g_string_append(cmd_line, " -incoming defer");
+    destination = qtest_init(cmd_line->str);
+    close(net_sockets[1]);
+    qtest_qmp_assert_success(destination,
+        "{ 'execute': 'migrate-incoming', 'arguments': { "
+        "'uri': %s, 'exit-on-error': false } }", uri);
+    raspi4b_wait_for_migration(destination);
+
+    stl_le_p(query, 1);
+    control_len = cyw43455_sdio_build_iovar_data_request(
+        control_frame, sizeof(control_frame), "dump_obss", query,
+        sizeof(query), CYW43455_SURVEY_PAYLOAD_LEN, 4, 5);
+    cyw43455_sdio_function2_write_qtest(destination, control_frame,
+                                        control_len);
+    cyw43455_sdio_wait_for_frame(destination);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(destination, control_frame,
+                                       control_len);
+    payload = cyw43455_sdio_assert_iovar_data_response(
+        control_frame, control_len, CYW43455_SURVEY_PAYLOAD_LEN, 4, 5, 0);
+    g_assert_cmpuint(ldl_le_p(payload), ==, CYW43455_SURVEY_DURATION_MS);
+    g_assert_cmpuint(ldl_le_p(payload + sizeof(uint32_t)), ==, 1);
+    g_assert_cmpstr((const char *)payload + 2 * sizeof(uint32_t), ==,
+                    expected_results);
+    for (size_t i = 2 * sizeof(uint32_t) + sizeof(expected_results);
+         i < CYW43455_SURVEY_PAYLOAD_LEN; i++) {
+        g_assert_cmphex(payload[i], ==, 0);
+    }
+    cyw43455_sdio_backplane_writel_qtest(
+        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    control_len = cyw43455_sdio_build_iovar_request(
+        control_frame, sizeof(control_frame), "chanspec", 5, 6);
+    cyw43455_sdio_function2_write_qtest(destination, control_frame,
+                                        control_len);
+    cyw43455_sdio_wait_for_frame(destination);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(destination, control_frame,
+                                       control_len);
+    stl_le_p(scalar, CYW43455_CHANSPEC_2G_CH1_20MHZ);
+    cyw43455_sdio_assert_iovar_value_response(
+        control_frame, control_len, 5, 6, scalar, sizeof(scalar));
+    cyw43455_sdio_backplane_writel_qtest(
+        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    /* Results are consumable once; a second collection is rejected. */
+    control_len = cyw43455_sdio_build_iovar_data_request(
+        control_frame, sizeof(control_frame), "dump_obss", query,
+        sizeof(query), CYW43455_SURVEY_PAYLOAD_LEN, 6, 7);
+    cyw43455_sdio_function2_write_qtest(destination, control_frame,
+                                        control_len);
+    cyw43455_sdio_wait_for_frame(destination);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(destination, control_frame,
+                                       control_len);
+    cyw43455_sdio_assert_iovar_data_response(
+        control_frame, control_len, CYW43455_SURVEY_PAYLOAD_LEN, 6, 7,
+        CYW43455_BCME_BADARG);
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
     g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
@@ -6949,6 +7187,9 @@ int main(int argc, char **argv)
                                " -machine sdio-wifi=on");
     raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio_scan_migration",
                                test_cyw43455_sdio_scan_migration,
+                               " -machine sdio-wifi=on");
+    raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio_survey_migration",
+                               test_cyw43455_sdio_survey_migration,
                                " -machine sdio-wifi=on");
 #endif
     raspi4b_add_test("/raspi4b/firmware_gpio", test_firmware_gpio);
