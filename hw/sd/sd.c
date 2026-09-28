@@ -649,6 +649,7 @@ struct CYW43455SDIOState {
     uint8_t pfn_bucket_count;
     bool pfn_enabled;
     bool tdls_enabled;
+    bool roam_off;
     uint64_t tx_bytes;
     uint64_t rx_bytes;
     uint64_t tx_multicast_bytes;
@@ -1530,7 +1531,6 @@ static bool cyw43455_sdio_supported_set_iovar(const char *name)
         "event_msgs",
         "event_msgs_ext",
         "bcn_timeout",
-        "roam_off",
     };
     unsigned int i;
 
@@ -1938,6 +1938,23 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
         trace_cyw43455_sdio_tdls(true, s->tdls_enabled, status);
         return status;
     }
+    if (!strcmp(name, "roam_off")) {
+        uint32_t disabled = 0;
+        int32_t status = 0;
+
+        if (data_len != sizeof(disabled)) {
+            status = CYW43455_BCME_BADLEN;
+        } else {
+            disabled = ldl_le_p(data);
+            if (disabled > 1) {
+                status = CYW43455_BCME_BADARG;
+            } else {
+                s->roam_off = disabled;
+            }
+        }
+        trace_cyw43455_sdio_roam_off(true, s->roam_off, status);
+        return status;
+    }
     return cyw43455_sdio_supported_set_iovar(name) ?
            0 : CYW43455_BCME_UNSUPPORTED;
 }
@@ -2129,6 +2146,9 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
             cyw43455_sdio_store_u32(output, output_len, 0,
                                     s->tdls_enabled);
             trace_cyw43455_sdio_tdls(false, s->tdls_enabled, 0);
+        } else if (!strcmp(iovar, "roam_off")) {
+            cyw43455_sdio_store_u32(output, output_len, 0, s->roam_off);
+            trace_cyw43455_sdio_roam_off(false, s->roam_off, 0);
         } else if (!strcmp(iovar, "mcast_list")) {
             uint32_t list_len = output_len > sizeof(uint32_t) ?
                 MIN(output_len - sizeof(uint32_t),
@@ -2829,6 +2849,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->pfn_scan_mac_flags = 0;
     s->pfn_enabled = false;
     s->tdls_enabled = false;
+    s->roam_off = false;
     s->tx_bytes = 0;
     s->rx_bytes = 0;
     s->tx_multicast_bytes = 0;
@@ -3562,6 +3583,9 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     if (version_id < 24) {
         s->tdls_enabled = false;
     }
+    if (version_id < 25) {
+        s->roam_off = false;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -3621,7 +3645,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 24,
+    .version_id = 25,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -3722,6 +3746,7 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT8_V(pfn_bucket_count, CYW43455SDIOState, 23),
         VMSTATE_BOOL_V(pfn_enabled, CYW43455SDIOState, 23),
         VMSTATE_BOOL_V(tdls_enabled, CYW43455SDIOState, 24),
+        VMSTATE_BOOL_V(roam_off, CYW43455SDIOState, 25),
         VMSTATE_END_OF_LIST()
     },
 };
