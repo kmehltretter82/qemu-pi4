@@ -217,9 +217,9 @@ struct SDState {
  * complete or hardware-faithful CYW43455 is implemented.  In addition to the
  * two-function transport, it provides a synthetic BCM4345/9 chip-discovery
  * surface so that brcmfmac can reach firmware startup.  A bounded synthetic
- * SDPCM control responder is provided for host-driver experiments.  Outbound
- * data frames are consumed and traced, but firmware execution, receive data,
- * a network backend and radio behavior remain unimplemented.
+ * SDPCM control responder is provided for host-driver experiments.  Ethernet
+ * frames can move in both directions through a QEMU network backend, but
+ * firmware execution, association and radio behavior remain unimplemented.
  */
 #define CYW43455_SDIO_NUM_FUNCS         2
 #define CYW43455_SDIO_ADDR_SPACE_SIZE   (1U << 17)
@@ -328,6 +328,7 @@ struct SDState {
 #define CYW43455_SDPCM_DATA_CHANNEL      2
 #define CYW43455_BCDC_HEADER_LEN         16
 #define CYW43455_BCDC_DATA_HEADER_LEN    4
+#define CYW43455_BCDC_PROTO_VER          2
 #define CYW43455_BCDC_DCMD_ERROR         BIT(0)
 #define CYW43455_BCDC_DCMD_SET           BIT(1)
 #define CYW43455_BCME_UNSUPPORTED        (-23)
@@ -398,6 +399,7 @@ struct CYW43455SDIOState {
     uint8_t tx_credit_window;
     uint8_t tx_credit_seq;
     bool tx_credit_pending;
+    bool rx_data_enabled;
 };
 
 static SDBus *cyw43455_sdio_bus(CYW43455SDIOState *s)
@@ -426,6 +428,38 @@ static void cyw43455_sdio_update_irq(CYW43455SDIOState *s)
     bus = cyw43455_sdio_bus(s);
     if (bus) {
         sdbus_set_card_irq(bus, cyw43455_sdio_card_irq_level(s));
+    }
+}
+
+static bool cyw43455_sdio_rx_ready(CYW43455SDIOState *s)
+{
+    return s->nic &&
+           s->rx_data_enabled &&
+           (s->regs[0][SDIO_CCCR_IO_ENABLE] & BIT(2)) &&
+           !s->f2_rx_len &&
+           !(s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND);
+}
+
+static void cyw43455_sdio_flush_queued_packets(CYW43455SDIOState *s)
+{
+    if (cyw43455_sdio_rx_ready(s)) {
+        qemu_flush_queued_packets(qemu_get_queue(s->nic));
+    }
+}
+
+static void cyw43455_sdio_clear_intstatus(CYW43455SDIOState *s,
+                                           uint32_t value)
+{
+    bool frame_cleared = value & s->sdio_intstatus &
+                         CYW43455_I_HMB_FRAME_IND;
+
+    if (frame_cleared) {
+        trace_cyw43455_sdio_rx_ack(s->f2_rx_len, s->f2_rx_pos);
+    }
+    s->sdio_intstatus &= ~value;
+    cyw43455_sdio_update_irq(s);
+    if (frame_cleared && !s->f2_rx_len) {
+        cyw43455_sdio_flush_queued_packets(s);
     }
 }
 
@@ -714,7 +748,8 @@ static void cyw43455_sdio_emit_tx_credit(void *opaque)
     }
 
     /* Do not overwrite a control response or an earlier credit update. */
-    if (s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND) {
+    if (s->f2_rx_len ||
+        (s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND)) {
         timer_mod(s->tx_credit_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
         return;
@@ -834,6 +869,7 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
     /* A control response also acknowledges outstanding host transmit data. */
     response[9] = cyw43455_sdio_tx_max(s, request[software_offset]);
 
+    s->tx_credit_seq = request[software_offset];
     s->tx_credit_pending = false;
     timer_del(s->tx_credit_timer);
 
@@ -858,6 +894,11 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
     if (iovar[0]) {
         trace_cyw43455_sdio_iovar(iovar, set,
                                   extract32(flags, 16, 16), status);
+    }
+    if (!set && command == CYW43455_C_GET_VAR &&
+        !strcmp(iovar, "arpoe")) {
+        /* This is the final probe in the synthetic startup profile. */
+        s->rx_data_enabled = true;
     }
     cyw43455_sdio_update_irq(s);
 }
@@ -996,8 +1037,7 @@ static void cyw43455_sdio_backplane_writel(CYW43455SDIOState *s,
                   cyw43455_sdio_cores[CYW43455_SDIO_CORE_INDEX].base;
     switch (sdio_offset) {
     case CYW43455_SDIO_INTSTATUS:
-        s->sdio_intstatus &= ~value;
-        cyw43455_sdio_update_irq(s);
+        cyw43455_sdio_clear_intstatus(s, value);
         break;
     case CYW43455_SDIO_HOSTINTMASK:
         s->sdio_hostintmask = value;
@@ -1037,8 +1077,7 @@ static void cyw43455_sdio_backplane_writeb(CYW43455SDIOState *s,
     if (word_address ==
         cyw43455_sdio_cores[CYW43455_SDIO_CORE_INDEX].base +
         CYW43455_SDIO_INTSTATUS) {
-        s->sdio_intstatus &= ~((uint32_t)value << shift);
-        cyw43455_sdio_update_irq(s);
+        cyw43455_sdio_clear_intstatus(s, (uint32_t)value << shift);
         return;
     }
 
@@ -1158,6 +1197,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->f2_rx_seq = 0;
     s->tx_credit_seq = 0;
     s->tx_credit_pending = false;
+    s->rx_data_enabled = false;
     s->transfer_addr = 0;
     s->transfer_remaining = 0;
     s->transfer_func = 0;
@@ -1224,6 +1264,7 @@ static void cyw43455_sdio_write_reg(CYW43455SDIOState *s,
         regs[SDIO_CCCR_IO_ENABLE] = value;
         /* The model has no power-up latency, so functions are ready now. */
         regs[SDIO_CCCR_IO_READY] = value;
+        cyw43455_sdio_flush_queued_packets(s);
         break;
     case SDIO_CCCR_INT_ENABLE:
         regs[address] = value & CYW43455_SDIO_INT_MASK;
@@ -1343,6 +1384,16 @@ static size_t cyw43455_sdio_do_command(SDState *sd, SDRequest *request,
             s->transfer_remaining = count;
             s->transfer_write = argument & SDIO_CMD53_WRITE;
             s->transfer_increment = argument & SDIO_CMD53_INCREMENT;
+            if (function == 2 && !s->transfer_write) {
+                uint32_t first_word = UINT32_MAX;
+
+                if (s->f2_rx_pos <= s->f2_rx_len &&
+                    s->f2_rx_len - s->f2_rx_pos >= sizeof(first_word)) {
+                    first_word = ldl_le_p(s->f2_rx_frame + s->f2_rx_pos);
+                }
+                trace_cyw43455_sdio_rx_read(count, s->f2_rx_len,
+                                            s->f2_rx_pos, first_word);
+            }
             if (function == 2 && s->transfer_write) {
                 s->f2_tx_len = 0;
             }
@@ -1362,10 +1413,15 @@ static size_t cyw43455_sdio_read_data(SDState *sd, void *buffer, size_t length)
 
     for (i = 0; i < length; i++) {
         if (!s->transfer_write && s->transfer_remaining) {
-            if (s->transfer_func == 2 && s->f2_rx_len) {
-                data[i] = s->f2_rx_pos < s->f2_rx_len ?
-                          s->f2_rx_frame[s->f2_rx_pos] : 0;
-                s->f2_rx_pos++;
+            if (s->transfer_func == 2) {
+                if (s->f2_rx_len) {
+                    data[i] = s->f2_rx_pos < s->f2_rx_len ?
+                              s->f2_rx_frame[s->f2_rx_pos] : 0;
+                    s->f2_rx_pos++;
+                } else {
+                    /* An empty SDPCM FIFO is the all-zero end marker. */
+                    data[i] = 0;
+                }
             } else {
                 data[i] = cyw43455_sdio_read_reg(s, s->transfer_func,
                                                  s->transfer_addr);
@@ -1377,6 +1433,15 @@ static size_t cyw43455_sdio_read_data(SDState *sd, void *buffer, size_t length)
             }
         } else {
             data[i] = 0xff;
+        }
+    }
+    if (!s->transfer_write && s->transfer_func == 2 &&
+        !s->transfer_remaining && s->f2_rx_len &&
+        s->f2_rx_pos >= s->f2_rx_len) {
+        s->f2_rx_len = 0;
+        s->f2_rx_pos = 0;
+        if (!(s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND)) {
+            cyw43455_sdio_flush_queued_packets(s);
         }
     }
     return length;
@@ -1456,16 +1521,57 @@ static void cyw43455_sdio_reset(DeviceState *device)
     cyw43455_sdio_reset_state(CYW43455_SDIO(device));
 }
 
+static bool cyw43455_sdio_can_receive(NetClientState *nc)
+{
+    CYW43455SDIOState *s = qemu_get_nic_opaque(nc);
+
+    return cyw43455_sdio_rx_ready(s);
+}
+
 static ssize_t cyw43455_sdio_receive(NetClientState *nc,
                                      const uint8_t *buffer, size_t size)
 {
-    trace_cyw43455_sdio_rx_dropped((uint32_t)size);
+    CYW43455SDIOState *s = qemu_get_nic_opaque(nc);
+    uint8_t *frame = s->f2_rx_frame;
+    size_t frame_len = CYW43455_SDPCM_HEADER_LEN +
+                       CYW43455_BCDC_DATA_HEADER_LEN + size;
+    size_t stored_len;
+
+    if (frame_len > sizeof(s->f2_rx_frame)) {
+        trace_cyw43455_sdio_rx_dropped((uint32_t)size);
+        return size;
+    }
+    if (!cyw43455_sdio_rx_ready(s)) {
+        return 0;
+    }
+
+    stored_len = QEMU_ALIGN_UP(frame_len, sizeof(uint32_t));
+    memset(frame, 0, stored_len);
+    stw_le_p(frame, frame_len);
+    stw_le_p(frame + 2, (uint16_t)~frame_len);
+    frame[4] = s->f2_rx_seq++;
+    frame[5] = CYW43455_SDPCM_DATA_CHANNEL;
+    frame[7] = CYW43455_SDPCM_HEADER_LEN;
+    frame[9] = cyw43455_sdio_tx_max(s, s->tx_credit_seq);
+    frame[CYW43455_SDPCM_HEADER_LEN] =
+        CYW43455_BCDC_PROTO_VER << 4;
+    memcpy(frame + CYW43455_SDPCM_HEADER_LEN +
+                   CYW43455_BCDC_DATA_HEADER_LEN,
+           buffer, size);
+
+    s->f2_rx_len = stored_len;
+    s->f2_rx_pos = 0;
+    s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
+    trace_cyw43455_sdio_rx_data((uint32_t)size, (uint32_t)frame_len,
+                                frame[4], frame[9]);
+    cyw43455_sdio_update_irq(s);
     return size;
 }
 
 static NetClientInfo cyw43455_sdio_net_info = {
     .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
+    .can_receive = cyw43455_sdio_can_receive,
     .receive = cyw43455_sdio_receive,
 };
 
@@ -1525,12 +1631,13 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
     cyw43455_sdio_update_irq(s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
+    cyw43455_sdio_flush_queued_packets(s);
     return 0;
 }
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 5,
+    .version_id = 6,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -1566,6 +1673,7 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT8_V(tx_credit_seq, CYW43455SDIOState, 5),
         VMSTATE_BOOL_V(tx_credit_pending, CYW43455SDIOState, 5),
         VMSTATE_TIMER_PTR_V(tx_credit_timer, CYW43455SDIOState, 5),
+        VMSTATE_BOOL_V(rx_data_enabled, CYW43455SDIOState, 6),
         VMSTATE_END_OF_LIST()
     },
 };

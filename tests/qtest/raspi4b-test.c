@@ -94,6 +94,7 @@
 #define CYW43455_C_GET_VAR         262
 #define CYW43455_TEST_CREDIT_DELAY_MS 25
 #define CYW43455_TEST_CREDIT_WINDOW 5
+#define CYW43455_DEFAULT_CREDIT_WINDOW 8
 
 #define PROPERTY_RESPONSE_SUCCESS 0x80000000
 #define PROPERTY_RESPONSE_ERROR   0x80000001
@@ -2918,10 +2919,12 @@ static void cyw43455_sdio_function2_read_qtest(QTestState *qts,
     }
 }
 
-static size_t cyw43455_sdio_build_cur_etheraddr_request(uint8_t *frame,
-                                                        size_t frame_size)
+static size_t cyw43455_sdio_build_iovar_request(uint8_t *frame,
+                                                size_t frame_size,
+                                                const char *iovar,
+                                                uint8_t sequence,
+                                                uint16_t request_id)
 {
-    static const char iovar[] = "cur_etheraddr";
     const uint32_t payload_len = 20;
     const uint32_t frame_len = CYW43455_SDPCM_HEADER_LEN +
                                CYW43455_BCDC_HEADER_LEN + payload_len;
@@ -2930,14 +2933,23 @@ static size_t cyw43455_sdio_build_cur_etheraddr_request(uint8_t *frame,
     memset(frame, 0, frame_len);
     stw_le_p(frame, frame_len);
     stw_le_p(frame + 2, (uint16_t)~frame_len);
-    frame[4] = 1;
+    frame[4] = sequence;
     frame[7] = CYW43455_SDPCM_HEADER_LEN;
     stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN, CYW43455_C_GET_VAR);
     stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 4, payload_len);
-    stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8, 1U << 16);
+    stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8,
+             (uint32_t)request_id << 16);
+    g_assert_cmpuint(strlen(iovar) + 1, <=, payload_len);
     memcpy(frame + CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_HEADER_LEN,
-           iovar, sizeof(iovar));
+           iovar, strlen(iovar) + 1);
     return frame_len;
+}
+
+static size_t cyw43455_sdio_build_cur_etheraddr_request(uint8_t *frame,
+                                                        size_t frame_size)
+{
+    return cyw43455_sdio_build_iovar_request(frame, frame_size,
+                                              "cur_etheraddr", 1, 1);
 }
 
 static size_t cyw43455_sdio_build_data_request(uint8_t *frame,
@@ -3196,10 +3208,10 @@ static void test_cyw43455_sdio_endpoint(void)
     g_assert_cmphex(readl(RASPI4_EMMC1_BASE + SDHC_BDATA), ==,
                     0x44332211);
 
-    /* Exercise a full 512-byte block-mode transfer on function two. */
-    argument = SDIO_CMD53_WRITE | (2U << SDIO_CMD_FUNC_SHIFT) |
+    /* Exercise eight 64-byte blocks in one register transfer. */
+    argument = SDIO_CMD53_WRITE | (1U << SDIO_CMD_FUNC_SHIFT) |
                SDIO_CMD53_BLOCK_MODE | SDIO_CMD53_INCREMENT |
-               (0x800U << SDIO_CMD_ADDR_SHIFT) | 1;
+               (0x800U << SDIO_CMD_ADDR_SHIFT) | 8;
     sdhci_cmd_regs(global_qtest, RASPI4_EMMC1_BASE, 512, 1, argument,
                    SDHC_TRNS_BLK_CNT_EN,
                    (SDIO_CMD_IO_RW_EXTENDED << 8) |
@@ -3271,6 +3283,23 @@ static void test_cyw43455_sdio_endpoint(void)
 }
 
 #ifndef _WIN32
+static void cyw43455_sdio_send_all(int socket_fd, const void *buffer,
+                                   size_t size)
+{
+    const uint8_t *p = buffer;
+
+    while (size) {
+        ssize_t ret = send(socket_fd, p, size, 0);
+
+        if (ret < 0 && errno == EINTR) {
+            continue;
+        }
+        g_assert_cmpint(ret, >, 0);
+        p += ret;
+        size -= ret;
+    }
+}
+
 static void cyw43455_sdio_recv_all(int socket_fd, void *buffer, size_t size)
 {
     uint8_t *p = buffer;
@@ -3287,6 +3316,62 @@ static void cyw43455_sdio_recv_all(int socket_fd, void *buffer, size_t size)
         g_assert_cmpint(ret, >, 0);
         p += ret;
         size -= ret;
+    }
+}
+
+static void cyw43455_sdio_send_packet(int socket_fd, const uint8_t *packet,
+                                      size_t packet_len)
+{
+    uint32_t framed_len;
+
+    g_assert_cmpuint(packet_len, <=, UINT32_MAX);
+    framed_len = htonl(packet_len);
+    cyw43455_sdio_send_all(socket_fd, &framed_len, sizeof(framed_len));
+    cyw43455_sdio_send_all(socket_fd, packet, packet_len);
+}
+
+static void cyw43455_sdio_wait_for_frame(QTestState *qts)
+{
+    int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+
+    do {
+        if (cyw43455_sdio_backplane_readl_qtest(
+                qts, CYW43455_SDIO_INTSTATUS) & CYW43455_SDIO_FRAME_IND) {
+            return;
+        }
+        g_usleep(1000);
+    } while (g_get_monotonic_time() < deadline);
+
+    g_error("timed out waiting for a CYW43455 receive frame");
+}
+
+static void cyw43455_sdio_assert_data_response(const uint8_t *frame,
+                                                size_t stored_len,
+                                                const uint8_t *packet,
+                                                size_t packet_len,
+                                                uint8_t sequence,
+                                                uint8_t tx_max)
+{
+    size_t frame_len = CYW43455_SDPCM_HEADER_LEN +
+                       CYW43455_BCDC_DATA_HEADER_LEN + packet_len;
+    size_t payload_offset = CYW43455_SDPCM_HEADER_LEN +
+                            CYW43455_BCDC_DATA_HEADER_LEN;
+
+    g_assert_cmpuint(stored_len, ==,
+                     QEMU_ALIGN_UP(frame_len, sizeof(uint32_t)));
+    g_assert_cmpuint(lduw_le_p(frame), ==, frame_len);
+    g_assert_cmphex(lduw_le_p(frame + 2), ==, (uint16_t)~frame_len);
+    g_assert_cmpuint(frame[4], ==, sequence);
+    g_assert_cmpuint(frame[5] & 0xf, ==, CYW43455_SDPCM_DATA_CHANNEL);
+    g_assert_cmpuint(frame[7], ==, CYW43455_SDPCM_HEADER_LEN);
+    g_assert_cmpuint(frame[9], ==, tx_max);
+    g_assert_cmphex(frame[CYW43455_SDPCM_HEADER_LEN], ==, 2 << 4);
+    g_assert_cmphex(frame[CYW43455_SDPCM_HEADER_LEN + 1], ==, 0);
+    g_assert_cmphex(frame[CYW43455_SDPCM_HEADER_LEN + 2], ==, 0);
+    g_assert_cmphex(frame[CYW43455_SDPCM_HEADER_LEN + 3], ==, 0);
+    g_assert_cmpmem(frame + payload_offset, packet_len, packet, packet_len);
+    for (size_t i = frame_len; i < stored_len; i++) {
+        g_assert_cmphex(frame[i], ==, 0);
     }
 }
 
@@ -3311,7 +3396,13 @@ static void test_cyw43455_sdio_network_backend(void)
                             CYW43455_SDPCM_HWEXT_LEN + 8 +
                             CYW43455_BCDC_DATA_HEADER_LEN + sizeof(packet))];
     uint8_t received[sizeof(packet)];
+    uint8_t second_packet[sizeof(packet) - 1];
+    uint8_t control_frame[48];
+    uint8_t inbound_frame[CYW43455_SDPCM_HEADER_LEN +
+                          CYW43455_BCDC_DATA_HEADER_LEN + sizeof(packet)];
     uint32_t received_len;
+    size_t inbound_len;
+    size_t control_len;
     size_t sdpcm_len;
     int net_sockets[2];
     int ret;
@@ -3325,6 +3416,85 @@ static void test_cyw43455_sdio_network_backend(void)
     close(net_sockets[1]);
 
     cyw43455_sdio_select_qtest(qts);
+    cyw43455_sdio_enable_control_irq_qtest(qts);
+
+    /* Backend input waits for function two and synthetic firmware startup. */
+    cyw43455_sdio_send_packet(net_sockets[0], packet, sizeof(packet));
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
+                        qts, true, true, 0, CYW43455_SDIO_CCCR_IOEX,
+                        BIT(1) | BIT(2)) & 0xff,
+                    ==, BIT(1) | BIT(2));
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
+                        qts, false, false, 0, CYW43455_SDIO_CCCR_IORX, 0) &
+                    0xff,
+                    ==, BIT(1) | BIT(2));
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+
+    control_len = cyw43455_sdio_build_iovar_request(
+        control_frame, sizeof(control_frame), "arpoe", 1, 2);
+    cyw43455_sdio_function2_write_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(qts);
+
+    /* Linux acknowledges an interrupt before consuming its SDPCM frame. */
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+    memset(control_frame, 0xff, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(qts);
+
+    /* A second packet cannot replace the acknowledged-but-unread first one. */
+    memcpy(second_packet, packet, sizeof(second_packet));
+    second_packet[0] ^= 1;
+    cyw43455_sdio_send_packet(net_sockets[0], second_packet,
+                              sizeof(second_packet));
+
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+
+    inbound_len = QEMU_ALIGN_UP(CYW43455_SDPCM_HEADER_LEN +
+                                CYW43455_BCDC_DATA_HEADER_LEN +
+                                sizeof(packet), sizeof(uint32_t));
+    memset(inbound_frame, 0xff, sizeof(inbound_frame));
+    cyw43455_sdio_function2_read_qtest(qts, inbound_frame, inbound_len);
+    cyw43455_sdio_assert_data_response(inbound_frame, inbound_len,
+                                       packet, sizeof(packet), 1,
+                                       1 + CYW43455_DEFAULT_CREDIT_WINDOW);
+
+    cyw43455_sdio_wait_for_frame(qts);
+    inbound_len = QEMU_ALIGN_UP(CYW43455_SDPCM_HEADER_LEN +
+                                CYW43455_BCDC_DATA_HEADER_LEN +
+                                sizeof(second_packet), sizeof(uint32_t));
+    memset(inbound_frame, 0xff, sizeof(inbound_frame));
+    cyw43455_sdio_function2_read_qtest(qts, inbound_frame, inbound_len);
+    cyw43455_sdio_assert_data_response(inbound_frame, inbound_len,
+                                       second_packet, sizeof(second_packet),
+                                       2,
+                                       1 + CYW43455_DEFAULT_CREDIT_WINDOW);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, CYW43455_SDIO_FRAME_IND);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+    memset(inbound_frame, 0xff, sizeof(inbound_frame));
+    cyw43455_sdio_function2_read_qtest(qts, inbound_frame, 64);
+    for (unsigned int i = 0; i < 64; i++) {
+        g_assert_cmphex(inbound_frame[i], ==, 0);
+    }
+
     sdpcm_len = cyw43455_sdio_build_data_request(
         sdpcm_frame, sizeof(sdpcm_frame), packet, sizeof(packet));
     cyw43455_sdio_function2_write_qtest(qts, sdpcm_frame, sdpcm_len);
