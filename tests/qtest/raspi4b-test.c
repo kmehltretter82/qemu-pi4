@@ -95,9 +95,7 @@
 #define CYW43455_SDPCM_DATA_CHANNEL 2
 #define CYW43455_BCDC_HEADER_LEN   16
 #define CYW43455_BCDC_DATA_HEADER_LEN 4
-#define CYW43455_BCDC_DCMD_ERROR   BIT(0)
 #define CYW43455_BCDC_DCMD_SET     BIT(1)
-#define CYW43455_BCME_UNSUPPORTED  (-23)
 #define CYW43455_C_SET_PROMISC     10
 #define CYW43455_C_GET_VAR         262
 #define CYW43455_C_SET_VAR         263
@@ -105,6 +103,8 @@
 #define CYW43455_TEST_CREDIT_WINDOW 5
 #define CYW43455_DEFAULT_CREDIT_WINDOW 8
 #define CYW43455_MAC_LEN           6
+#define CYW43455_ARP_OL_AGENT      BIT(0)
+#define CYW43455_ARP_OL_PEER_AUTO_REPLY BIT(3)
 #define CYW43455_ETH_HEADER_LEN    14
 #define CYW43455_BRCM_EVENT_HEADER_LEN 10
 #define CYW43455_EVENT_MSG_LEN     48
@@ -3143,25 +3143,6 @@ static void cyw43455_sdio_assert_cur_etheraddr_response(
                     expected_mac, CYW43455_MAC_LEN);
 }
 
-static void cyw43455_sdio_assert_iovar_error_response(
-    const uint8_t *frame, size_t frame_len, uint8_t sequence,
-    uint16_t request_id)
-{
-    g_assert_cmpuint(lduw_le_p(frame), ==, frame_len);
-    g_assert_cmphex(lduw_le_p(frame + 2), ==, (uint16_t)~frame_len);
-    g_assert_cmpuint(frame[4], ==, sequence);
-    g_assert_cmpuint(frame[5] & 0xf, ==, 0);
-    g_assert_cmpuint(frame[7], ==, CYW43455_SDPCM_HEADER_LEN);
-    g_assert_cmpuint(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN), ==,
-                     CYW43455_C_GET_VAR);
-    g_assert_cmphex(ldl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8), ==,
-                    ((uint32_t)request_id << 16) |
-                    CYW43455_BCDC_DCMD_ERROR);
-    g_assert_cmpint((int32_t)ldl_le_p(frame +
-                                     CYW43455_SDPCM_HEADER_LEN + 12), ==,
-                    CYW43455_BCME_UNSUPPORTED);
-}
-
 static void cyw43455_sdio_assert_set_iovar_response(
     const uint8_t *frame, size_t stored_len, const char *iovar,
     size_t data_len, uint8_t sequence, uint16_t request_id)
@@ -3653,6 +3634,8 @@ static void test_cyw43455_sdio_network_backend(void)
     static const uint8_t guest_mac[6] = { 0x02, 0, 0, 0, 0, 1 };
     static const uint8_t runtime_mac[6] = { 0x02, 0, 0, 0, 0, 0x33 };
     static const uint8_t peer_mac[6] = { 0x52, 0x55, 0x0a, 0, 2, 2 };
+    static const uint8_t guest_ip[4] = { 10, 0, 2, 15 };
+    static const uint8_t peer_ip[4] = { 10, 0, 2, 2 };
     static const uint8_t joined_multicast[6] = {
         0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb,
     };
@@ -3684,6 +3667,9 @@ static void test_cyw43455_sdio_network_backend(void)
     uint8_t inbound_packet[sizeof(packet)];
     uint8_t second_packet[sizeof(packet) - 1];
     uint8_t filtered_packet[sizeof(packet)];
+    uint8_t arp_request[60] = { };
+    uint8_t arp_reply[60] = { };
+    uint8_t expected_arp_reply[60] = { };
     uint8_t multicast_data[sizeof(uint32_t) + 2 * 6];
     uint8_t scalar[sizeof(uint32_t)];
     uint8_t control_frame[128];
@@ -3700,6 +3686,32 @@ static void test_cyw43455_sdio_network_backend(void)
     memcpy(inbound_packet, packet, sizeof(inbound_packet));
     memcpy(inbound_packet, guest_mac, sizeof(guest_mac));
     memcpy(inbound_packet + sizeof(guest_mac), peer_mac, sizeof(peer_mac));
+
+    memset(arp_request, 0xff, sizeof(guest_mac));
+    memcpy(arp_request + sizeof(guest_mac), peer_mac, sizeof(peer_mac));
+    stw_be_p(arp_request + 12, 0x0806);
+    stw_be_p(arp_request + 14, 1);
+    stw_be_p(arp_request + 16, 0x0800);
+    arp_request[18] = sizeof(peer_mac);
+    arp_request[19] = sizeof(peer_ip);
+    stw_be_p(arp_request + 20, 1);
+    memcpy(arp_request + 22, peer_mac, sizeof(peer_mac));
+    memcpy(arp_request + 28, peer_ip, sizeof(peer_ip));
+    memcpy(arp_request + 38, guest_ip, sizeof(guest_ip));
+
+    memcpy(expected_arp_reply, peer_mac, sizeof(peer_mac));
+    memcpy(expected_arp_reply + sizeof(peer_mac), runtime_mac,
+           sizeof(runtime_mac));
+    stw_be_p(expected_arp_reply + 12, 0x0806);
+    stw_be_p(expected_arp_reply + 14, 1);
+    stw_be_p(expected_arp_reply + 16, 0x0800);
+    expected_arp_reply[18] = sizeof(peer_mac);
+    expected_arp_reply[19] = sizeof(peer_ip);
+    stw_be_p(expected_arp_reply + 20, 2);
+    memcpy(expected_arp_reply + 22, runtime_mac, sizeof(runtime_mac));
+    memcpy(expected_arp_reply + 28, guest_ip, sizeof(guest_ip));
+    memcpy(expected_arp_reply + 32, peer_mac, sizeof(peer_mac));
+    memcpy(expected_arp_reply + 38, peer_ip, sizeof(peer_ip));
 
     ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
     g_assert_cmpint(ret, !=, -1);
@@ -4128,6 +4140,84 @@ static void test_cyw43455_sdio_network_backend(void)
     cyw43455_sdio_backplane_writel_qtest(
         qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 
+    /* Firmware answers for a registered host address without waking Linux. */
+    stl_le_p(scalar, CYW43455_ARP_OL_AGENT);
+    control_len = cyw43455_sdio_build_set_iovar_request(
+        control_frame, sizeof(control_frame), "arp_ol", scalar,
+        sizeof(scalar), 16, 15);
+    cyw43455_sdio_function2_write_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(qts);
+    memset(control_frame, 0xff, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_assert_set_iovar_response(
+        control_frame, control_len, "arp_ol", sizeof(scalar), 25, 15);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    stl_le_p(scalar, 1);
+    control_len = cyw43455_sdio_build_set_iovar_request(
+        control_frame, sizeof(control_frame), "arpoe", scalar,
+        sizeof(scalar), 17, 16);
+    cyw43455_sdio_function2_write_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(qts);
+    memset(control_frame, 0xff, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_assert_set_iovar_response(
+        control_frame, control_len, "arpoe", sizeof(scalar), 26, 16);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    control_len = cyw43455_sdio_build_set_iovar_request(
+        control_frame, sizeof(control_frame), "arp_hostip", guest_ip,
+        sizeof(guest_ip), 18, 17);
+    cyw43455_sdio_function2_write_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(qts);
+    memset(control_frame, 0xff, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_assert_set_iovar_response(
+        control_frame, control_len, "arp_hostip", sizeof(guest_ip), 27, 17);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    cyw43455_sdio_send_packet(net_sockets[0], arp_request,
+                              sizeof(arp_request));
+    cyw43455_sdio_recv_all(net_sockets[0], &received_len,
+                           sizeof(received_len));
+    g_assert_cmpuint(ntohl(received_len), ==, sizeof(arp_reply));
+    cyw43455_sdio_recv_all(net_sockets[0], arp_reply, sizeof(arp_reply));
+    g_assert_cmpmem(arp_reply, sizeof(arp_reply),
+                    expected_arp_reply, sizeof(expected_arp_reply));
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+
+    stl_le_p(scalar, 0);
+    control_len = cyw43455_sdio_build_set_iovar_request(
+        control_frame, sizeof(control_frame), "arpoe", scalar,
+        sizeof(scalar), 19, 18);
+    cyw43455_sdio_function2_write_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(qts);
+    memset(control_frame, 0xff, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(qts, control_frame, control_len);
+    cyw43455_sdio_assert_set_iovar_response(
+        control_frame, control_len, "arpoe", sizeof(scalar), 28, 18);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    cyw43455_sdio_send_packet(net_sockets[0], arp_request,
+                              sizeof(arp_request));
+    cyw43455_sdio_wait_for_frame(qts);
+    inbound_len = QEMU_ALIGN_UP(CYW43455_SDPCM_HEADER_LEN +
+                                CYW43455_BCDC_DATA_HEADER_LEN +
+                                sizeof(arp_request), sizeof(uint32_t));
+    memset(inbound_frame, 0xff, sizeof(inbound_frame));
+    cyw43455_sdio_function2_read_qtest(qts, inbound_frame, inbound_len);
+    cyw43455_sdio_assert_data_response(
+        inbound_frame, inbound_len, arp_request, sizeof(arp_request), 29,
+        19 + CYW43455_DEFAULT_CREDIT_WINDOW);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
     sdpcm_len = cyw43455_sdio_build_data_request(
         sdpcm_frame, sizeof(sdpcm_frame), packet, sizeof(packet));
     cyw43455_sdio_function2_write_qtest(qts, sdpcm_frame, sdpcm_len);
@@ -4162,6 +4252,7 @@ static void test_cyw43455_sdio_migration(void)
     static const uint8_t migrated_mac[6] = {
         0x02, 0, 0, 0, 0, 0x44,
     };
+    static const uint8_t guest_ip[4] = { 10, 0, 2, 15 };
     g_autoptr(GError) error = NULL;
     g_autofree char *tmpdir = NULL;
     g_autofree char *state_path = NULL;
@@ -4177,6 +4268,7 @@ static void test_cyw43455_sdio_migration(void)
     size_t arpoe_len;
     size_t filter_len;
     size_t current_len;
+    size_t offload_len;
     size_t promisc_len;
     int net_sockets[2];
     int ret;
@@ -4199,8 +4291,8 @@ static void test_cyw43455_sdio_migration(void)
     cyw43455_sdio_wait_for_frame(source);
     memset(control_frame, 0, sizeof(control_frame));
     cyw43455_sdio_function2_read_qtest(source, control_frame, arpoe_len);
-    cyw43455_sdio_assert_iovar_error_response(control_frame, arpoe_len,
-                                               0, 9);
+    cyw43455_sdio_assert_zero_iovar_response(control_frame, arpoe_len,
+                                              0, 9);
     cyw43455_sdio_backplane_writel_qtest(
         source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 
@@ -4258,12 +4350,51 @@ static void test_cyw43455_sdio_migration(void)
     cyw43455_sdio_backplane_writel_qtest(
         source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 
+    stl_le_p(scalar, CYW43455_ARP_OL_AGENT |
+                     CYW43455_ARP_OL_PEER_AUTO_REPLY);
+    offload_len = cyw43455_sdio_build_set_iovar_request(
+        control_frame, sizeof(control_frame), "arp_ol", scalar,
+        sizeof(scalar), 5, 17);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, offload_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, offload_len);
+    cyw43455_sdio_assert_set_iovar_response(
+        control_frame, offload_len, "arp_ol", sizeof(scalar), 5, 17);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    stl_le_p(scalar, 1);
+    offload_len = cyw43455_sdio_build_set_iovar_request(
+        control_frame, sizeof(control_frame), "arpoe", scalar,
+        sizeof(scalar), 6, 18);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, offload_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, offload_len);
+    cyw43455_sdio_assert_set_iovar_response(
+        control_frame, offload_len, "arpoe", sizeof(scalar), 6, 18);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    offload_len = cyw43455_sdio_build_set_iovar_request(
+        control_frame, sizeof(control_frame), "arp_hostip", guest_ip,
+        sizeof(guest_ip), 7, 19);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, offload_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, offload_len);
+    cyw43455_sdio_assert_set_iovar_response(
+        control_frame, offload_len, "arp_hostip", sizeof(guest_ip), 7, 19);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
     current_len = cyw43455_sdio_build_iovar_request(
-        control_frame, sizeof(control_frame), "cur_etheraddr", 5, 1);
+        control_frame, sizeof(control_frame), "cur_etheraddr", 8, 1);
     cyw43455_sdio_function2_write_qtest(source, control_frame, current_len);
     promisc_len = cyw43455_sdio_build_command_request(
         control_frame, sizeof(control_frame), CYW43455_C_SET_PROMISC,
-        0, 6, 2);
+        0, 9, 2);
     cyw43455_sdio_function2_write_qtest(source, control_frame, promisc_len);
     g_assert_cmphex(qtest_readw(source, RASPI4_EMMC1_BASE +
                                        SDHC_NORINTSTS) & SDHC_NIS_CARDINT,
@@ -4326,7 +4457,7 @@ static void test_cyw43455_sdio_migration(void)
     cyw43455_sdio_function2_read_qtest(destination, control_frame,
                                        promisc_len);
     cyw43455_sdio_assert_command_response(
-        control_frame, promisc_len, CYW43455_C_SET_PROMISC, 6, 2);
+        control_frame, promisc_len, CYW43455_C_SET_PROMISC, 9, 2);
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 
@@ -4335,8 +4466,8 @@ static void test_cyw43455_sdio_migration(void)
     cyw43455_sdio_function2_read_qtest(destination, event_frame,
                                        sizeof(event_frame));
     cyw43455_sdio_assert_link_event(
-        event_frame, sizeof(event_frame), 7,
-        6 + CYW43455_DEFAULT_CREDIT_WINDOW, true, migrated_mac);
+        event_frame, sizeof(event_frame), 10,
+        9 + CYW43455_DEFAULT_CREDIT_WINDOW, true, migrated_mac);
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
     g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
@@ -4344,7 +4475,7 @@ static void test_cyw43455_sdio_migration(void)
                     ==, 0);
 
     current_len = cyw43455_sdio_build_iovar_request(
-        control_frame, sizeof(control_frame), "mcast_list", 7, 13);
+        control_frame, sizeof(control_frame), "mcast_list", 10, 13);
     cyw43455_sdio_function2_write_qtest(destination, control_frame,
                                         current_len);
     cyw43455_sdio_wait_for_frame(destination);
@@ -4352,13 +4483,13 @@ static void test_cyw43455_sdio_migration(void)
     cyw43455_sdio_function2_read_qtest(destination, control_frame,
                                        current_len);
     cyw43455_sdio_assert_iovar_value_response(
-        control_frame, current_len, 8, 13, multicast_data,
+        control_frame, current_len, 11, 13, multicast_data,
         sizeof(multicast_data));
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 
     current_len = cyw43455_sdio_build_iovar_request(
-        control_frame, sizeof(control_frame), "allmulti", 8, 14);
+        control_frame, sizeof(control_frame), "allmulti", 11, 14);
     cyw43455_sdio_function2_write_qtest(destination, control_frame,
                                         current_len);
     cyw43455_sdio_wait_for_frame(destination);
@@ -4367,12 +4498,12 @@ static void test_cyw43455_sdio_migration(void)
                                        current_len);
     memset(scalar, 0, sizeof(scalar));
     cyw43455_sdio_assert_iovar_value_response(
-        control_frame, current_len, 9, 14, scalar, sizeof(scalar));
+        control_frame, current_len, 12, 14, scalar, sizeof(scalar));
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 
     current_len = cyw43455_sdio_build_iovar_request(
-        control_frame, sizeof(control_frame), "pm2_sleep_ret", 9, 15);
+        control_frame, sizeof(control_frame), "pm2_sleep_ret", 12, 15);
     cyw43455_sdio_function2_write_qtest(destination, control_frame,
                                         current_len);
     cyw43455_sdio_wait_for_frame(destination);
@@ -4381,7 +4512,49 @@ static void test_cyw43455_sdio_migration(void)
                                        current_len);
     stl_le_p(scalar, 2000);
     cyw43455_sdio_assert_iovar_value_response(
-        control_frame, current_len, 10, 15, scalar, sizeof(scalar));
+        control_frame, current_len, 13, 15, scalar, sizeof(scalar));
+    cyw43455_sdio_backplane_writel_qtest(
+        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    current_len = cyw43455_sdio_build_iovar_request(
+        control_frame, sizeof(control_frame), "arp_ol", 13, 20);
+    cyw43455_sdio_function2_write_qtest(destination, control_frame,
+                                        current_len);
+    cyw43455_sdio_wait_for_frame(destination);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(destination, control_frame,
+                                       current_len);
+    stl_le_p(scalar, CYW43455_ARP_OL_AGENT |
+                     CYW43455_ARP_OL_PEER_AUTO_REPLY);
+    cyw43455_sdio_assert_iovar_value_response(
+        control_frame, current_len, 14, 20, scalar, sizeof(scalar));
+    cyw43455_sdio_backplane_writel_qtest(
+        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    current_len = cyw43455_sdio_build_iovar_request(
+        control_frame, sizeof(control_frame), "arpoe", 14, 21);
+    cyw43455_sdio_function2_write_qtest(destination, control_frame,
+                                        current_len);
+    cyw43455_sdio_wait_for_frame(destination);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(destination, control_frame,
+                                       current_len);
+    stl_le_p(scalar, 1);
+    cyw43455_sdio_assert_iovar_value_response(
+        control_frame, current_len, 15, 21, scalar, sizeof(scalar));
+    cyw43455_sdio_backplane_writel_qtest(
+        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    current_len = cyw43455_sdio_build_iovar_request(
+        control_frame, sizeof(control_frame), "arp_hostip", 15, 22);
+    cyw43455_sdio_function2_write_qtest(destination, control_frame,
+                                        current_len);
+    cyw43455_sdio_wait_for_frame(destination);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(destination, control_frame,
+                                       current_len);
+    cyw43455_sdio_assert_iovar_value_response(
+        control_frame, current_len, 16, 22, guest_ip, sizeof(guest_ip));
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 

@@ -354,6 +354,8 @@ struct SDState {
 #define CYW43455_TX_CREDIT_WINDOW_DEFAULT 8
 #define CYW43455_TX_CREDIT_WINDOW_MAX    64
 #define CYW43455_MULTICAST_MAX           32
+#define CYW43455_ARP_HOSTIP_MAX          8
+#define CYW43455_ARP_OL_AGENT            BIT(0)
 #define CYW43455_BRCM_EVENT_HEADER_LEN   10
 #define CYW43455_EVENT_MSG_LEN           48
 #define CYW43455_EVENT_ETHERTYPE         0x886c
@@ -440,7 +442,11 @@ struct CYW43455SDIOState {
     bool backend_link_events_armed;
     uint8_t multicast[CYW43455_MULTICAST_MAX][ETH_ALEN];
     uint32_t multicast_count;
+    uint8_t arp_hostip[CYW43455_ARP_HOSTIP_MAX][sizeof(uint32_t)];
+    uint32_t arp_hostip_count;
+    uint32_t arp_mode;
     uint32_t pm2_sleep_ret;
+    bool arp_offload;
     bool allmulti;
     bool promiscuous;
 };
@@ -703,6 +709,50 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
                                    s->promiscuous);
         return 0;
     }
+    if (!strcmp(name, "arp_ol")) {
+        if (data_len != sizeof(uint32_t)) {
+            return CYW43455_BCME_BADLEN;
+        }
+        s->arp_mode = ldl_le_p(data);
+        return 0;
+    }
+    if (!strcmp(name, "arpoe")) {
+        if (data_len != sizeof(uint32_t)) {
+            return CYW43455_BCME_BADLEN;
+        }
+        s->arp_offload = ldl_le_p(data) != 0;
+        return 0;
+    }
+    if (!strcmp(name, "arp_hostip_clear")) {
+        if (data_len) {
+            return CYW43455_BCME_BADLEN;
+        }
+        memset(s->arp_hostip, 0, sizeof(s->arp_hostip));
+        s->arp_hostip_count = 0;
+        return 0;
+    }
+    if (!strcmp(name, "arp_hostip")) {
+        static const uint8_t zero_ip[sizeof(uint32_t)];
+        unsigned int i;
+
+        if (data_len != sizeof(uint32_t)) {
+            return CYW43455_BCME_BADLEN;
+        }
+        if (!memcmp(data, zero_ip, sizeof(zero_ip))) {
+            return CYW43455_BCME_BADARG;
+        }
+        for (i = 0; i < s->arp_hostip_count; i++) {
+            if (!memcmp(data, s->arp_hostip[i], sizeof(uint32_t))) {
+                return 0;
+            }
+        }
+        if (s->arp_hostip_count == CYW43455_ARP_HOSTIP_MAX) {
+            return CYW43455_BCME_BADARG;
+        }
+        memcpy(s->arp_hostip[s->arp_hostip_count++], data,
+               sizeof(uint32_t));
+        return 0;
+    }
     if (!strcmp(name, "pm2_sleep_ret")) {
         if (data_len != sizeof(uint32_t)) {
             return CYW43455_BCME_BADLEN;
@@ -802,6 +852,17 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
                                     CYW43455_CHANSPEC_2G_CH1_20MHZ);
         } else if (!strcmp(iovar, "allmulti")) {
             cyw43455_sdio_store_u32(output, output_len, 0, s->allmulti);
+        } else if (!strcmp(iovar, "arp_ol")) {
+            cyw43455_sdio_store_u32(output, output_len, 0, s->arp_mode);
+        } else if (!strcmp(iovar, "arpoe")) {
+            cyw43455_sdio_store_u32(output, output_len, 0,
+                                    s->arp_offload);
+        } else if (!strcmp(iovar, "arp_version")) {
+            cyw43455_sdio_store_u32(output, output_len, 0, 1);
+        } else if (!strcmp(iovar, "arp_hostip")) {
+            memcpy(output, s->arp_hostip,
+                   MIN(output_len, s->arp_hostip_count *
+                                   sizeof(s->arp_hostip[0])));
         } else if (!strcmp(iovar, "pm2_sleep_ret")) {
             cyw43455_sdio_store_u32(output, output_len, 0,
                                     s->pm2_sleep_ret);
@@ -1477,7 +1538,11 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     }
     memset(s->multicast, 0, sizeof(s->multicast));
     s->multicast_count = 0;
+    memset(s->arp_hostip, 0, sizeof(s->arp_hostip));
+    s->arp_hostip_count = 0;
+    s->arp_mode = 0;
     s->pm2_sleep_ret = 0;
+    s->arp_offload = false;
     s->allmulti = false;
     s->promiscuous = false;
     s->transfer_addr = 0;
@@ -1805,7 +1870,60 @@ static bool cyw43455_sdio_can_receive(NetClientState *nc)
 {
     CYW43455SDIOState *s = qemu_get_nic_opaque(nc);
 
-    return cyw43455_sdio_rx_ready(s);
+    return cyw43455_sdio_rx_ready(s) ||
+           (s->arp_offload &&
+            (s->arp_mode & CYW43455_ARP_OL_AGENT) &&
+            s->arp_hostip_count);
+}
+
+static bool cyw43455_sdio_arp_offload(CYW43455SDIOState *s,
+                                      const uint8_t *buffer, size_t size)
+{
+    const uint8_t *arp;
+    const uint8_t *target_ip;
+    uint8_t reply[60] = { };
+    uint8_t *reply_arp = reply + ETH_HLEN;
+    unsigned int i;
+
+    if (!s->arp_offload || !(s->arp_mode & CYW43455_ARP_OL_AGENT) ||
+        size < ETH_HLEN + 28 || lduw_be_p(buffer + 12) != ETH_P_ARP) {
+        return false;
+    }
+
+    arp = buffer + ETH_HLEN;
+    if (lduw_be_p(arp) != 1 || lduw_be_p(arp + 2) != ETH_P_IP ||
+        arp[4] != ETH_ALEN || arp[5] != sizeof(uint32_t) ||
+        lduw_be_p(arp + 6) != 1) {
+        return false;
+    }
+
+    target_ip = arp + 24;
+    for (i = 0; i < s->arp_hostip_count; i++) {
+        if (!memcmp(target_ip, s->arp_hostip[i], sizeof(uint32_t))) {
+            break;
+        }
+    }
+    if (i == s->arp_hostip_count) {
+        return false;
+    }
+
+    memcpy(reply, arp + 8, ETH_ALEN);
+    memcpy(reply + ETH_ALEN, s->current_mac, ETH_ALEN);
+    stw_be_p(reply + 2 * ETH_ALEN, ETH_P_ARP);
+    stw_be_p(reply_arp, 1);
+    stw_be_p(reply_arp + 2, ETH_P_IP);
+    reply_arp[4] = ETH_ALEN;
+    reply_arp[5] = sizeof(uint32_t);
+    stw_be_p(reply_arp + 6, 2);
+    memcpy(reply_arp + 8, s->current_mac, ETH_ALEN);
+    memcpy(reply_arp + 14, target_ip, sizeof(uint32_t));
+    memcpy(reply_arp + 18, arp + 8, ETH_ALEN);
+    memcpy(reply_arp + 24, arp + 14, sizeof(uint32_t));
+
+    qemu_send_packet(qemu_get_queue(s->nic), reply, sizeof(reply));
+    trace_cyw43455_sdio_arp_reply(target_ip[0], target_ip[1],
+                                  target_ip[2], target_ip[3]);
+    return true;
 }
 
 static bool cyw43455_sdio_accept_packet(CYW43455SDIOState *s,
@@ -1848,6 +1966,9 @@ static ssize_t cyw43455_sdio_receive(NetClientState *nc,
                        CYW43455_BCDC_DATA_HEADER_LEN + size;
     size_t stored_len;
 
+    if (cyw43455_sdio_arp_offload(s, buffer, size)) {
+        return size;
+    }
     if (frame_len > sizeof(s->f2_rx_frame)) {
         trace_cyw43455_sdio_rx_dropped((uint32_t)size);
         return size;
@@ -1981,7 +2102,16 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     if (version_id < 12) {
         memcpy(s->current_mac, s->conf.macaddr.a, ETH_ALEN);
     }
+    if (version_id < 13) {
+        memset(s->arp_hostip, 0, sizeof(s->arp_hostip));
+        s->arp_hostip_count = 0;
+        s->arp_mode = 0;
+        s->arp_offload = false;
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
+        return -EINVAL;
+    }
+    if (s->arp_hostip_count > CYW43455_ARP_HOSTIP_MAX) {
         return -EINVAL;
     }
     cyw43455_sdio_update_irq(s);
@@ -1992,7 +2122,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 12,
+    .version_id = 13,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -2046,6 +2176,12 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_BOOL_V(firmware_connected, CYW43455SDIOState, 11),
         VMSTATE_BOOL_V(backend_link_events_armed, CYW43455SDIOState, 11),
         VMSTATE_UINT8_ARRAY_V(current_mac, CYW43455SDIOState, ETH_ALEN, 12),
+        VMSTATE_UINT8_2DARRAY_V(arp_hostip, CYW43455SDIOState,
+                                CYW43455_ARP_HOSTIP_MAX, sizeof(uint32_t),
+                                13),
+        VMSTATE_UINT32_V(arp_hostip_count, CYW43455SDIOState, 13),
+        VMSTATE_UINT32_V(arp_mode, CYW43455SDIOState, 13),
+        VMSTATE_BOOL_V(arp_offload, CYW43455SDIOState, 13),
         VMSTATE_END_OF_LIST()
     },
 };
