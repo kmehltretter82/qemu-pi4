@@ -89,6 +89,8 @@ class HardwareBootTests(unittest.TestCase):
         self.assertEqual(len(cmdline.splitlines()), 1)
         self.assertIn("rdinit=/init", cmdline)
         self.assertIn("panic=10", cmdline)
+        # The PL011 early console hung a Pi 400 that had no serial adapter.
+        self.assertNotIn("earlycon", cmdline)
 
 
 class CaptureTests(unittest.TestCase):

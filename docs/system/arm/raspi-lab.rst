@@ -210,8 +210,16 @@ quoted argument::
 The firmware clears the one-shot flag before launching the test.  A subsequent
 reset therefore returns to the normal ``config.txt`` boot.  The test kernel
 uses ``panic=10`` for the same reason, while a hard kernel hang still requires
-a physical reset or power cycle.  A 3.3 V serial console at 115200 baud is the
-definitive diagnostic channel for failures before ``/init``.
+a physical reset or power cycle.
+
+The hardware command line uses ``console=tty1`` and no early console.  With
+the earlier ``earlycon=pl011,mmio32,0xfe201000 console=serial0,115200`` the
+pinned v7.2 image hung on the project's Pi 400 on 2026-10-03, with no serial
+adapter attached, before ``/init`` could write its report, and needed a power
+cycle.  With both arguments removed the same image completed and returned by
+itself.  Which of the two arguments stalls was not isolated.  A 3.3 V serial
+console at 115200 baud remains the definitive diagnostic channel for failures
+before ``/init``; add the serial arguments back only with an adapter attached.
 
 The physical-test initramfs writes its report to
 ``qemu-pi4-hardware-result.txt`` on the FAT boot partition, syncs and unmounts

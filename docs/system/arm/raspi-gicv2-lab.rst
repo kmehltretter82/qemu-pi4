@@ -23,11 +23,43 @@ The QEMU-only differential runner and trace gate followed at
 ``2f0bea750192c96b2196f3a3e1e739f9cb2874d3`` the same day, with seven unit
 tests, one strict H4i UART oracle, twenty fresh TCG captures whose normalized
 traces all matched run 1, and a manifest-pinned replay; its artifacts are kept
-in the lab's ``results/2026-08-22-h5-qemu-pi4/``.  No physical Pi 400 or Linux
-KVM run has been performed, so H6 is the next milestone.  Its exit condition
-is a captured serial trace, and the monitor has no network stack: SSH can
-stage the image and trigger the boot, but a 3.3 V serial console is still
-required to read the result.
+in the lab's ``results/2026-08-22-h5-qemu-pi4/``.
+
+The lab has since run on the project's Pi 400.  H6 passed its gate of 100
+consecutive bare-metal boots on 2026-09-05, each serial trace comparing equal
+to a frozen qemu-pi4 baseline of the identical image.  H7's one-vCPU EL1
+payload passed twenty KVM captures on the board the same day.  The three H8
+contracts ran under KVM on 2026-10-03 and fail for level-sensitive SPIs pended
+through ``GICD_ISPENDR``; a probe of the board's physical GIC-400 agrees with
+the contracts and with QEMU.  That is a recorded observation about Linux KVM,
+not a qualified defect report.
+
+The same probe was replayed against the ``raspi400`` model through qtest.  The
+acknowledge, priority-drop, deactivate and re-pend sequences matched the
+hardware from the start.  The model was then brought in line with the captured
+identity, widths and implementation choices:
+
+* 256 interrupt IDs and the captured ``GICD_TYPER``, ``GICD_IIDR`` and
+  ``GICC_IIDR`` values;
+* the Security Extensions, with every interrupt reset to Group 1 as the
+  firmware leaves it, so that a guest sees the Non-secure view Linux has on
+  the board;
+* five priority bits, four of them in the Non-secure view, a minimum binary
+  point of three there, and an active-priority register layout that follows
+  the priority width;
+* PPIs 25 to 31 only, with fixed level-sensitive configuration, and bit 0 of
+  every SPI configuration field reading as one;
+* ``GICD_ITARGETSR`` fields limited to the four CPU interfaces;
+* the bypass-disable bits of ``GICC_CTLR`` holding their value, without any
+  bypass behaviour; and
+* ``GICC_HPPIR`` reporting an interrupt that only ``GICC_PMR`` is masking.
+
+The implementation-specific items are selected by the GIC's ``gic400``
+property, which only the BCM2711 model sets.  With these changes all 170
+probed values match except two that only record which CPU ran the probe, and
+the lab monitor's GIC register lines equal the board's.  Two qtests in
+``raspi4b-test`` pin the captured values.  The evidence is in the lab's
+``results/2026-10-03-h8-pi400-kvm/``.
 
 The milestone list below is the original, intentionally broad research plan.
 The separate repository's ``ROADMAP.md`` and result manifests are
