@@ -60,6 +60,8 @@
 #define GICC_CTLR_ACK_CTL    (1U << 2)
 #define GICC_CTLR_FIQ_EN     (1U << 3)
 #define GICC_CTLR_CBPR       (1U << 4) /* GICv1: SBPR */
+#define GICC_CTLR_BYP_DIS_GRP0 (3U << 5) /* Secure view, with Security Ext. */
+#define GICC_CTLR_BYP_DIS_GRP1 (3U << 7) /* Secure view, with Security Ext. */
 #define GICC_CTLR_EOIMODE    (1U << 9)
 #define GICC_CTLR_EOIMODE_NS (1U << 10)
 
@@ -162,6 +164,20 @@ REG32(GICH_LR63, 0x1fc)
 uint32_t gic_acknowledge_irq(GICState *s, int cpu, MemTxAttrs attrs);
 void gic_dist_set_priority(GICState *s, int cpu, int irq, uint8_t val,
                            MemTxAttrs attrs);
+
+/*
+ * The minimum binary point follows the number of implemented priority
+ * bits: with fewer than eight, the low group-priority bits do not exist.
+ */
+static inline int gic_min_bpr(GICState *s)
+{
+    return MAX(GIC_MIN_BPR, 7 - (int)s->n_prio_bits);
+}
+
+static inline int gic_min_abpr(GICState *s)
+{
+    return gic_min_bpr(s) + 1;
+}
 
 static inline bool gic_test_pending(GICState *s, int irq, int cm)
 {

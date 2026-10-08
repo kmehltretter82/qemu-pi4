@@ -91,6 +91,8 @@
 #define RASPI4_AON_GIC_IRQ         96
 #define AON_VALID_MASK             0x00000fffU
 #define RASPI4_GIC_ISPENDR4        0xff841210
+#define RASPI4_GICD_BASE           0xff841000
+#define RASPI4_GICC_BASE           0xff842000
 #define GIC_PENDING_GPIO_IRQ1      (1U << 18)
 #define GIC_PENDING_GPIO_ALL       (1U << 20)
 
@@ -2234,6 +2236,94 @@ static void test_powermgt_watchdog(void)
     g_assert_cmphex(readl(RASPI4_PM_WDOG), ==, 0);
 }
 
+/*
+ * Identity, field widths and fixed configuration of the GIC-400, in the
+ * Non-secure view, as captured from a Pi 400 on 2026-10-03.
+ */
+static void test_gic400_identity(void)
+{
+    const uint64_t d = RASPI4_GICD_BASE, c = RASPI4_GICC_BASE;
+    uint32_t cfg;
+
+    g_assert_cmphex(readl(d + 0x004), ==, 0x0000fc67);  /* GICD_TYPER */
+    g_assert_cmphex(readl(d + 0x008), ==, 0x0200143b);  /* GICD_IIDR */
+    g_assert_cmphex(readl(c + 0x0fc), ==, 0x0202143b);  /* GICC_IIDR */
+    g_assert_cmphex(readl(d + 0x080), ==, 0);           /* IGROUPR0: RAZ */
+
+    /* SGI and PPI configuration is fixed; only PPIs 25-31 exist */
+    g_assert_cmphex(readl(d + 0xc00), ==, 0xaaaaaaaa);
+    g_assert_cmphex(readl(d + 0xc04), ==, 0x55540000);
+    writel(d + 0xc04, 0xaaabffff);
+    g_assert_cmphex(readl(d + 0xc04), ==, 0x55540000);
+
+    /* INTID 255 exists; bit 0 of an SPI configuration field reads as one */
+    cfg = readl(d + 0xc3c);
+    writel(d + 0xc3c, cfg | (3U << 30));
+    g_assert_cmphex(readl(d + 0xc3c) >> 30, ==, 3);
+    writel(d + 0xc3c, cfg & ~(3U << 30));
+    g_assert_cmphex(readl(d + 0xc3c) >> 30, ==, 1);
+
+    /* Four Non-secure priority bits and four CPU interfaces */
+    writeb(d + 0x4ff, 0xff);
+    g_assert_cmphex(readb(d + 0x4ff), ==, 0xf0);
+    writeb(d + 0x4ff, 0);
+    writeb(d + 0x8ff, 0xff);
+    g_assert_cmphex(readb(d + 0x8ff), ==, 0x0f);
+    writeb(d + 0x8ff, 0);
+
+    writel(c + 0x004, 0xff);
+    g_assert_cmphex(readl(c + 0x004), ==, 0xf0);
+    writel(c + 0x004, 0x01);
+    g_assert_cmphex(readl(c + 0x004), ==, 0);
+    g_assert_cmphex(readl(c + 0x008), ==, 3);           /* GICC_BPR */
+    writel(c + 0x008, 0);
+    g_assert_cmphex(readl(c + 0x008), ==, 3);
+    g_assert_cmphex(readl(c + 0x01c), ==, 0);           /* GICC_ABPR: RAZ */
+
+    /* The value Linux leaves in GICC_CTLR reads back whole */
+    writel(c + 0x000, 0x261);
+    g_assert_cmphex(readl(c + 0x000), ==, 0x261);
+    writel(c + 0x000, 0);
+}
+
+/*
+ * A GIC-400 reports a pending interrupt in GICC_HPPIR while GICC_PMR alone
+ * masks it, and records an active priority of 0x40 as bit 4 of GICC_APR0.
+ */
+static void test_gic400_masked_hppir_and_apr(void)
+{
+    const uint64_t d = RASPI4_GICD_BASE, c = RASPI4_GICC_BASE;
+    const uint32_t bit = 1U << 31;                      /* INTID 255 */
+    uint32_t iar;
+
+    writel(d + 0x000, 1);
+    writel(c + 0x000, 0x261);
+    writeb(d + 0x4ff, 0x40);
+    writeb(d + 0x8ff, 0x01);
+    writel(d + 0x11c, bit);                             /* ISENABLER7 */
+
+    writel(c + 0x004, 0x40);
+    writel(d + 0x21c, bit);                             /* ISPENDR7 */
+    g_assert_cmpuint(readl(c + 0x018), ==, 255);
+    g_assert_cmpuint(readl(c + 0x00c), ==, 1023);
+    g_assert_true(readl(d + 0x21c) & bit);
+
+    writel(c + 0x004, 0xf0);
+    iar = readl(c + 0x00c);
+    g_assert_cmpuint(iar, ==, 255);
+    g_assert_cmphex(readl(c + 0x014), ==, 0x40);        /* GICC_RPR */
+    g_assert_cmphex(readl(c + 0x0d0), ==, 0x10);        /* GICC_APR0 */
+    g_assert_false(readl(d + 0x21c) & bit);
+    writel(c + 0x010, iar);
+    g_assert_cmphex(readl(c + 0x0d0), ==, 0);
+    writel(c + 0x1000, iar);
+    g_assert_false(readl(d + 0x31c) & bit);
+
+    writel(d + 0x19c, bit);                             /* ICENABLER7 */
+    writel(c + 0x000, 0);
+    writel(d + 0x000, 0);
+}
+
 static void test_asb_bridge_ids(void)
 {
     g_assert_cmphex(readl(RASPI4_ASB_BASE), ==, 0);
@@ -4057,6 +4147,9 @@ int main(int argc, char **argv)
     pcie_has_edu = qtest_has_device("edu");
 
     raspi4b_add_test("/raspi4b/asb/bridge_ids", test_asb_bridge_ids);
+    raspi4b_add_test("/raspi4b/gic400/identity", test_gic400_identity);
+    raspi4b_add_test("/raspi4b/gic400/masked_hppir_and_apr",
+                     test_gic400_masked_hppir_and_apr);
     raspi4b_add_test("/raspi4b/cpu/configuration", test_cpu_configuration);
     raspi4b_add_test("/raspi4b/powermgt/watchdog", test_powermgt_watchdog);
     raspi4b_add_test("/raspi4b/interrupts/system_timer",

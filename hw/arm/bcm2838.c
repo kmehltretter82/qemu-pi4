@@ -28,8 +28,15 @@
 #define GIC400_TIMER_NS_EL1_IRQ     14
 #define GIC400_LEGACY_IRQ           15
 
-/* Number of external interrupt lines to configure the GIC with */
-#define GIC_NUM_IRQS                192
+/*
+ * Number of external interrupt lines to configure the GIC with.  The Pi 400's
+ * GIC-400 reports GICD_TYPER 0x0000fc67: 256 interrupt IDs in total.
+ */
+#define GIC_NUM_IRQS                224
+
+/* Identification registers captured from a Pi 400's GIC-400 */
+#define GIC400_DIST_IIDR            0x0200143b
+#define GIC400_CPU_IIDR             0x0202143b
 
 #define PPI(cpu, irq) (GIC_NUM_IRQS + (cpu) * GIC_INTERNAL + GIC_NR_SGIS + irq)
 
@@ -155,6 +162,37 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
     if (!object_property_set_bool(OBJECT(&s->gic),
                                   "has-virtualization-extensions", true,
                                   errp)) {
+        return;
+    }
+
+    /*
+     * The GIC-400 implements the Security Extensions with five priority
+     * bits, four of them visible to the Non-secure world.  The board has no
+     * EL3 software after the firmware hands over, and the firmware leaves
+     * every interrupt in Group 1, so reset to that state.
+     */
+    if (!object_property_set_bool(OBJECT(&s->gic),
+                                  "has-security-extensions", true, errp)) {
+        return;
+    }
+    if (!object_property_set_uint(OBJECT(&s->gic), "num-priority-bits", 5,
+                                  errp)) {
+        return;
+    }
+    s->gic.irq_reset_nonsecure = true;
+
+    if (!object_property_set_uint(OBJECT(&s->gic), "dist-iidr",
+                                  GIC400_DIST_IIDR, errp)) {
+        return;
+    }
+    if (!object_property_set_uint(OBJECT(&s->gic), "cpu-iidr",
+                                  GIC400_CPU_IIDR, errp)) {
+        return;
+    }
+    if (!object_property_set_uint(OBJECT(&s->gic), "num-lspi", 31, errp)) {
+        return;
+    }
+    if (!object_property_set_bool(OBJECT(&s->gic), "gic400", true, errp)) {
         return;
     }
 

@@ -419,11 +419,9 @@ static void gic_set_irq(void *opaque, int irq, int level)
     gic_update(s);
 }
 
-static uint16_t gic_get_current_pending_irq(GICState *s, int cpu,
-                                            MemTxAttrs attrs)
+static uint16_t gic_pending_irq_view(GICState *s, int cpu, MemTxAttrs attrs,
+                                     uint16_t pending_irq)
 {
-    uint16_t pending_irq = s->current_pending[cpu];
-
     if (pending_irq < GIC_MAXIRQ && gic_has_groups(s)) {
         int group = gic_test_group(s, pending_irq, cpu);
 
@@ -446,10 +444,29 @@ static uint16_t gic_get_current_pending_irq(GICState *s, int cpu,
     return pending_irq;
 }
 
+static uint16_t gic_get_current_pending_irq(GICState *s, int cpu,
+                                            MemTxAttrs attrs)
+{
+    return gic_pending_irq_view(s, cpu, attrs, s->current_pending[cpu]);
+}
+
 static uint16_t gic_get_current_pending_hppir(GICState *s, int cpu,
                                               MemTxAttrs attrs)
 {
     uint16_t pending_irq = gic_get_current_pending_irq(s, cpu, attrs);
+
+    if (s->gic400 && !gic_is_vcpu(cpu) && s->current_pending[cpu] == 1023 &&
+        gic_irq_signaling_enabled(s, cpu, false,
+                                  GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1)) {
+        /*
+         * A GIC-400 reports the highest priority pending interrupt here
+         * even while GICC_PMR prevents it from being signalled.
+         */
+        int best_irq, best_prio, group;
+
+        gic_get_best_irq(s, cpu, &best_irq, &best_prio, &group);
+        pending_irq = gic_pending_irq_view(s, cpu, attrs, best_irq);
+    }
 
     if (gic_is_vcpu(cpu) && pending_irq < GIC_NR_SGIS) {
         uint32_t *lr_entry = gic_get_lr_entry(s, pending_irq, cpu);
@@ -495,7 +512,7 @@ static void gic_activate_irq(GICState *s, int cpu, int irq)
      * and update the running priority.
      */
     int prio = gic_get_group_priority(s, cpu, irq);
-    int min_bpr = gic_is_vcpu(cpu) ? GIC_VIRT_MIN_BPR : GIC_MIN_BPR;
+    int min_bpr = gic_is_vcpu(cpu) ? GIC_VIRT_MIN_BPR : gic_min_bpr(s);
     int preemption_level = prio >> (min_bpr + 1);
     int regno = preemption_level / 32;
     int bitno = preemption_level % 32;
@@ -537,7 +554,7 @@ static int gic_get_prio_from_apr_bits(GICState *s, int cpu)
         if (!apr) {
             continue;
         }
-        return (i * 32 + ctz32(apr)) << (GIC_MIN_BPR + 1);
+        return (i * 32 + ctz32(apr)) << (gic_min_bpr(s) + 1);
     }
     return 0x100;
 }
@@ -752,6 +769,10 @@ static uint32_t gic_get_cpu_control(GICState *s, int cpu, MemTxAttrs attrs)
          * of the GIC architecture.
          */
         ret = (ret & (GICC_CTLR_EN_GRP1 | GICC_CTLR_EOIMODE_NS)) >> 1;
+        if (s->gic400) {
+            /* FIQBypDisGrp1 and IRQBypDisGrp1: state only, no bypass */
+            ret |= (s->cpu_ctlr[cpu] & GICC_CTLR_BYP_DIS_GRP1) >> 2;
+        }
     }
     return ret;
 }
@@ -771,11 +792,18 @@ static void gic_set_cpu_control(GICState *s, int cpu, uint32_t value,
         }
         s->cpu_ctlr[cpu] &= ~mask;
         s->cpu_ctlr[cpu] |= (value << 1) & mask;
+        if (s->gic400) {
+            s->cpu_ctlr[cpu] &= ~GICC_CTLR_BYP_DIS_GRP1;
+            s->cpu_ctlr[cpu] |= (value << 2) & GICC_CTLR_BYP_DIS_GRP1;
+        }
     } else {
         if (s->revision == 2) {
             mask = s->security_extn ? GICC_CTLR_V2_S_MASK : GICC_CTLR_V2_MASK;
         } else {
             mask = s->security_extn ? GICC_CTLR_V1_S_MASK : GICC_CTLR_V1_MASK;
+        }
+        if (s->gic400 && s->security_extn && !gic_is_vcpu(cpu)) {
+            mask |= GICC_CTLR_BYP_DIS_GRP0 | GICC_CTLR_BYP_DIS_GRP1;
         }
         s->cpu_ctlr[cpu] = value & mask;
     }
@@ -987,7 +1015,12 @@ static uint8_t gic_dist_readb(void *opaque, hwaddr offset, MemTxAttrs attrs)
         }
         if (offset == 5) {
             /* GICD_TYPER byte 1 */
-            return (s->security_extn << 2);
+            return (s->security_extn << 2) |
+                   (s->security_extn ? (s->num_lspi & 0x1f) << 3 : 0);
+        }
+        if (s->dist_iidr && offset >= 8 && offset < 0x0c) {
+            /* GICD_IIDR, as captured from a specific implementation */
+            return extract32(s->dist_iidr, (offset - 8) * 8, 8);
         }
         if (offset == 8) {
             /* GICD_IIDR byte 0 */
@@ -1126,6 +1159,14 @@ static uint8_t gic_dist_readb(void *opaque, hwaddr offset, MemTxAttrs attrs)
             }
             if (GIC_DIST_TEST_EDGE_TRIGGER(irq + i)) {
                 res |= (2 << (i * 2));
+            }
+            if (s->gic400 && irq + i >= GIC_NR_SGIS) {
+                if (irq + i >= GIC_INTERNAL) {
+                    res |= (1 << (i * 2));
+                } else {
+                    /* PPIs 25-31 exist and are level-sensitive */
+                    res = deposit32(res, i * 2, 2, irq + i >= 25 ? 1 : 0);
+                }
             }
         }
     } else if (offset < 0xf10) {
@@ -1430,6 +1471,8 @@ static void gic_dist_writeb(void *opaque, hwaddr offset,
             } else if (irq < GIC_INTERNAL) {
                 value = ALL_CPU_MASK;
             }
+            /* Bits for CPU interfaces that do not exist are RAZ/WI */
+            value &= MAKE_64BIT_MASK(0, s->num_cpu);
             s->irq_target[irq] = value & ALL_CPU_MASK;
             if (irq >= GIC_INTERNAL && s->irq_state[irq].pending) {
                 /*
@@ -1450,6 +1493,11 @@ static void gic_dist_writeb(void *opaque, hwaddr offset,
             if (s->security_extn && !attrs.secure &&
                 !GIC_DIST_TEST_GROUP(irq + i, 1 << cpu)) {
                 continue; /* Ignore Non-secure access of Group0 IRQ */
+            }
+
+            if (s->gic400 && irq + i >= GIC_NR_SGIS &&
+                irq + i < GIC_INTERNAL) {
+                continue; /* PPI configuration is fixed */
             }
 
             if (s->revision == REV_11MPCORE) {
@@ -1577,7 +1625,7 @@ static inline uint32_t gic_apr_ns_view(GICState *s, int cpu, int regno)
     /* Return the Nonsecure view of GICC_APR<regno>. This is the
      * second half of GICC_NSAPR.
      */
-    switch (GIC_MIN_BPR) {
+    switch (gic_min_bpr(s)) {
     case 0:
         if (regno < 2) {
             return s->nsapr[regno + 2][cpu];
@@ -1608,7 +1656,7 @@ static inline void gic_apr_write_ns_view(GICState *s, int cpu, int regno,
                                          uint32_t value)
 {
     /* Write the Nonsecure view of GICC_APR<regno>. */
-    switch (GIC_MIN_BPR) {
+    switch (gic_min_bpr(s)) {
     case 0:
         if (regno < 2) {
             s->nsapr[regno + 2][cpu] = value;
@@ -1711,6 +1759,8 @@ static MemTxResult gic_cpu_read(GICState *s, int cpu, int offset,
         if (s->revision == REV_11MPCORE) {
             /* Reserved on 11MPCore */
             *data = 0;
+        } else if (s->cpu_iidr && !gic_is_vcpu(cpu)) {
+            *data = s->cpu_iidr;
         } else {
             /* GICv1 or v2; Arm implementation */
             *data = (s->revision << 16) | 0x43b;
@@ -1747,10 +1797,10 @@ static MemTxResult gic_cpu_write(GICState *s, int cpu, int offset,
                 /* WI when CBPR is 1 */
                 return MEMTX_OK;
             } else {
-                s->abpr[cpu] = MAX(value & 0x7, GIC_MIN_ABPR);
+                s->abpr[cpu] = MAX(value & 0x7, gic_min_abpr(s));
             }
         } else {
-            int min_bpr = gic_is_vcpu(cpu) ? GIC_VIRT_MIN_BPR : GIC_MIN_BPR;
+            int min_bpr = gic_is_vcpu(cpu) ? GIC_VIRT_MIN_BPR : gic_min_bpr(s);
             s->bpr[cpu] = MAX(value & 0x7, min_bpr);
         }
         break;
@@ -1762,7 +1812,7 @@ static MemTxResult gic_cpu_write(GICState *s, int cpu, int offset,
             /* unimplemented, or NS access: RAZ/WI */
             return MEMTX_OK;
         } else {
-            s->abpr[cpu] = MAX(value & 0x7, GIC_MIN_ABPR);
+            s->abpr[cpu] = MAX(value & 0x7, gic_min_abpr(s));
         }
         break;
     case 0xd0: case 0xd4: case 0xd8: case 0xdc:

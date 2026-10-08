@@ -249,8 +249,8 @@ static inline void arm_gic_common_reset_irq_state(GICState *s, int cidx,
         s->current_pending[i] = 1023;
         s->running_priority[i] = 0x100;
         s->cpu_ctlr[i] = 0;
-        s->bpr[i] = gic_is_vcpu(i) ? GIC_VIRT_MIN_BPR : GIC_MIN_BPR;
-        s->abpr[i] = gic_is_vcpu(i) ? GIC_VIRT_MIN_ABPR : GIC_MIN_ABPR;
+        s->bpr[i] = gic_is_vcpu(i) ? GIC_VIRT_MIN_BPR : gic_min_bpr(s);
+        s->abpr[i] = gic_is_vcpu(i) ? GIC_VIRT_MIN_ABPR : gic_min_abpr(s);
 
         if (!gic_is_vcpu(i)) {
             for (j = 0; j < GIC_INTERNAL; j++) {
@@ -361,6 +361,19 @@ static const Property arm_gic_common_properties[] = {
     /* True if the GIC should implement the virtualization extensions */
     DEFINE_PROP_BOOL("has-virtualization-extensions", GICState, virt_extn, 0),
     DEFINE_PROP_UINT32("num-priority-bits", GICState, n_prio_bits, 8),
+    /* Board-specific identification register values; 0 keeps the default */
+    DEFINE_PROP_UINT32("dist-iidr", GICState, dist_iidr, 0),
+    DEFINE_PROP_UINT32("cpu-iidr", GICState, cpu_iidr, 0),
+    /* GICD_TYPER.LSPI; the lock itself is not modelled */
+    DEFINE_PROP_UINT32("num-lspi", GICState, num_lspi, 0),
+    /*
+     * Arm GIC-400 implementation choices, as captured from a BCM2711:
+     * PPIs 25-31 only, with read-only level-sensitive configuration; bit 0
+     * of each SPI configuration field reads as one; the interrupt bypass
+     * disable bits of GICC_CTLR hold their value; and GICC_HPPIR reports an
+     * interrupt that only GICC_PMR is masking.
+     */
+    DEFINE_PROP_BOOL("gic400", GICState, gic400, false),
 };
 
 static void arm_gic_common_class_init(ObjectClass *klass, const void *data)

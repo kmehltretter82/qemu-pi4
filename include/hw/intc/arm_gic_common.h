@@ -146,6 +146,10 @@ struct GICState {
     bool security_extn;
     bool virt_extn;
     bool irq_reset_nonsecure; /* configure IRQs as group 1 (NS) on reset? */
+    uint32_t dist_iidr; /* GICD_IIDR override; 0 selects the generic value */
+    uint32_t cpu_iidr; /* GICC_IIDR override; 0 selects the generic value */
+    uint32_t num_lspi; /* GICD_TYPER.LSPI: lockable SPIs, identification only */
+    bool gic400; /* implementation-defined behaviour captured from a GIC-400 */
     int dev_fd; /* kvm device fd if backed by kvm vgic support */
     Error *migration_blocker;
 };
