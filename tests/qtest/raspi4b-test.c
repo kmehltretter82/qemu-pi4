@@ -115,7 +115,7 @@
 #define CYW43455_WLC_BAND_ALL      3
 #define CYW43455_TEST_CREDIT_DELAY_MS 25
 #define CYW43455_TEST_CREDIT_WINDOW 5
-#define CYW43455_DEFAULT_CREDIT_WINDOW 8
+#define CYW43455_DEFAULT_CREDIT_WINDOW 41
 #define CYW43455_MAC_LEN           6
 #define CYW43455_ARP_OL_AGENT      BIT(0)
 #define CYW43455_ARP_OL_PEER_AUTO_REPLY BIT(3)
@@ -3032,9 +3032,10 @@ static void cyw43455_sdio_function2_write_qtest(QTestState *qts,
     size_t i;
 
     g_assert_cmpuint(length, >, 0);
-    g_assert_cmpuint(length, <=, 511);
+    g_assert_cmpuint(length, <=, 512);
     g_assert_cmpuint(length % sizeof(uint32_t), ==, 0);
-    argument = SDIO_CMD53_WRITE | (2U << SDIO_CMD_FUNC_SHIFT) | length;
+    argument = SDIO_CMD53_WRITE | (2U << SDIO_CMD_FUNC_SHIFT) |
+               (length & 0x1ff);
     sdhci_cmd_regs(qts, RASPI4_EMMC1_BASE, length, 1, argument,
                    SDHC_TRNS_BLK_CNT_EN,
                    (SDIO_CMD_IO_RW_EXTENDED << 8) |
@@ -3052,9 +3053,10 @@ static void cyw43455_sdio_function2_read_qtest(QTestState *qts,
     size_t i;
 
     g_assert_cmpuint(length, >, 0);
-    g_assert_cmpuint(length, <=, 511);
+    g_assert_cmpuint(length, <=, 512);
     g_assert_cmpuint(length % sizeof(uint32_t), ==, 0);
-    argument = (2U << SDIO_CMD_FUNC_SHIFT) | length;
+    /* Byte-mode CMD53 encodes the 512-byte count as zero. */
+    argument = (2U << SDIO_CMD_FUNC_SHIFT) | (length & 0x1ff);
     sdhci_cmd_regs(qts, RASPI4_EMMC1_BASE, length, 1, argument,
                    SDHC_TRNS_BLK_CNT_EN | SDHC_TRNS_READ,
                    (SDIO_CMD_IO_RW_EXTENDED << 8) |
@@ -3225,14 +3227,14 @@ static size_t cyw43455_sdio_build_cur_etheraddr_request(uint8_t *frame,
                                               "cur_etheraddr", 1, 1);
 }
 
-static size_t cyw43455_sdio_build_command_request(uint8_t *frame,
+static size_t cyw43455_sdio_build_payload_command_request(uint8_t *frame,
                                                    size_t frame_size,
                                                    uint32_t command,
-                                                   uint32_t value,
+                                                   const void *payload,
+                                                   uint32_t payload_len,
                                                    uint8_t sequence,
                                                    uint16_t request_id)
 {
-    const uint32_t payload_len = sizeof(value);
     const uint32_t frame_len = CYW43455_SDPCM_HEADER_LEN +
                                CYW43455_BCDC_HEADER_LEN + payload_len;
 
@@ -3246,9 +3248,23 @@ static size_t cyw43455_sdio_build_command_request(uint8_t *frame,
     stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 4, payload_len);
     stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 8,
              ((uint32_t)request_id << 16) | CYW43455_BCDC_DCMD_SET);
-    stl_le_p(frame + CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_HEADER_LEN,
-             value);
+    memcpy(frame + CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_HEADER_LEN,
+           payload, payload_len);
     return frame_len;
+}
+
+static size_t cyw43455_sdio_build_command_request(uint8_t *frame,
+                                                   size_t frame_size,
+                                                   uint32_t command,
+                                                   uint32_t value,
+                                                   uint8_t sequence,
+                                                   uint16_t request_id)
+{
+    uint32_t payload = cpu_to_le32(value);
+
+    return cyw43455_sdio_build_payload_command_request(
+        frame, frame_size, command, &payload, sizeof(payload), sequence,
+        request_id);
 }
 
 static size_t cyw43455_sdio_build_roam_command_request(
@@ -3794,11 +3810,12 @@ static void cyw43455_sdio_assert_roam_command_response(
     }
 }
 
-static void cyw43455_sdio_assert_link_event(const uint8_t *frame,
+static void cyw43455_sdio_assert_link_event_type(const uint8_t *frame,
                                              size_t stored_len,
                                              uint8_t sequence,
                                              uint8_t tx_max, bool link_up,
-                                             const uint8_t *guest_mac)
+                                             const uint8_t *guest_mac,
+                                             uint32_t event_type)
 {
     static const uint8_t peer_mac[CYW43455_MAC_LEN] = {
         0x52, 0x55, 0x0a, 0x00, 0x02, 0x02,
@@ -3834,7 +3851,7 @@ static void cyw43455_sdio_assert_link_event(const uint8_t *frame,
     g_assert_cmpuint(lduw_be_p(brcm + 8), ==, 1);
     g_assert_cmpuint(lduw_be_p(event), ==, 2);
     g_assert_cmphex(lduw_be_p(event + 2), ==, link_up ? 1 : 0);
-    g_assert_cmpuint(ldl_be_p(event + 4), ==, link_up ? 0 : 16);
+    g_assert_cmpuint(ldl_be_p(event + 4), ==, event_type);
     g_assert_cmpuint(ldl_be_p(event + 8), ==, 0);
     g_assert_cmpuint(ldl_be_p(event + 12), ==, 0);
     g_assert_cmpuint(ldl_be_p(event + 16), ==, 0);
@@ -3844,6 +3861,17 @@ static void cyw43455_sdio_assert_link_event(const uint8_t *frame,
     g_assert_cmpmem(event + 30, sizeof(ifname), ifname, sizeof(ifname));
     g_assert_cmphex(event[46], ==, 0);
     g_assert_cmphex(event[47], ==, 0);
+}
+
+static void cyw43455_sdio_assert_link_event(const uint8_t *frame,
+                                             size_t stored_len,
+                                             uint8_t sequence,
+                                             uint8_t tx_max, bool link_up,
+                                             const uint8_t *guest_mac)
+{
+    cyw43455_sdio_assert_link_event_type(
+        frame, stored_len, sequence, tx_max, link_up, guest_mac,
+        link_up ? 0 : 16);
 }
 
 static void cyw43455_sdio_assert_escan_event(
@@ -3946,7 +3974,7 @@ static void cyw43455_sdio_assert_credit_update(const uint8_t *frame,
     g_assert_cmpuint(frame_len, ==, CYW43455_SDPCM_HEADER_LEN);
     g_assert_cmpuint(lduw_le_p(frame), ==, frame_len);
     g_assert_cmphex(lduw_le_p(frame + 2), ==, (uint16_t)~frame_len);
-    g_assert_cmpuint(frame[5] & 0xf, ==, CYW43455_SDPCM_DATA_CHANNEL);
+    g_assert_cmpuint(frame[5] & 0xf, ==, CYW43455_SDPCM_EVENT_CHANNEL);
     g_assert_cmpuint(frame[7], ==, CYW43455_SDPCM_HEADER_LEN);
     g_assert_cmpuint(frame[9], ==, (uint8_t)(tx_sequence + tx_window));
 }
@@ -4167,6 +4195,9 @@ static void test_cyw43455_sdio_endpoint(void)
     g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
                         global_qtest, CYW43455_SDIO_INTSTATUS),
                     ==, 0);
+    /* A later packet joins the batch without postponing its first deadline. */
+    data_frame[4]++;
+    cyw43455_sdio_function2_write_qtest(global_qtest, data_frame, data_len);
     qtest_clock_step(global_qtest, SCALE_MS);
     g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
                         global_qtest, CYW43455_SDIO_INTSTATUS),
@@ -4299,6 +4330,389 @@ static void cyw43455_sdio_assert_data_response(const uint8_t *frame,
     for (size_t i = frame_len; i < stored_len; i++) {
         g_assert_cmphex(frame[i], ==, 0);
     }
+}
+
+static void cyw43455_sdio_exchange_control(QTestState *qts,
+                                           uint8_t *frame, size_t len)
+{
+    cyw43455_sdio_function2_write_qtest(qts, frame, len);
+    cyw43455_sdio_wait_for_frame(qts);
+    cyw43455_sdio_function2_read_qtest(qts, frame, len);
+    g_assert_cmpuint(frame[5] & 0xf, ==, 0);
+    g_assert_cmpint((int32_t)ldl_le_p(
+        frame + CYW43455_SDPCM_HEADER_LEN + 12), ==, 0);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+}
+
+static QTestState *cyw43455_sdio_reference_setup(int *peer,
+                                                const char *options)
+{
+    int sockets[2];
+    QTestState *qts;
+    g_autofree char *command = NULL;
+
+    g_assert_cmpint(socketpair(PF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    command = g_strdup_printf(
+        "-machine raspi400,sdio-wifi=on "
+        "-nic socket,id=wifi-reference,fd=%d,model=cyw43455-sdio,"
+        "mac=02:00:00:00:00:01 %s", sockets[1], options);
+    qts = qtest_init(command);
+    close(sockets[1]);
+    *peer = sockets[0];
+    cyw43455_sdio_select_qtest(qts);
+    cyw43455_sdio_enable_control_irq_qtest(qts);
+    cyw43455_sdio_cmd52_qtest(qts, true, true, 0,
+                             CYW43455_SDIO_CCCR_IOEX, BIT(1) | BIT(2));
+    return qts;
+}
+
+static QTestState *cyw43455_sdio_reference_migrate(QTestState *source,
+                                                  int *peer,
+                                                  const char *options)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *directory = g_dir_make_tmp("pi400-wifi-XXXXXX", &error);
+    g_autofree char *path = NULL;
+    g_autofree char *uri = NULL;
+    g_autofree char *incoming = g_strdup_printf("%s -incoming defer", options);
+    QTestState *destination;
+    int new_peer;
+
+    g_assert_no_error(error);
+    path = g_build_filename(directory, "state", NULL);
+    uri = g_strdup_printf("file:%s", path);
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    raspi4b_wait_for_migration(source);
+    destination = cyw43455_sdio_reference_setup(&new_peer, incoming);
+    qtest_qmp_assert_success(destination,
+        "{ 'execute': 'migrate-incoming', 'arguments': { "
+        "'uri': %s, 'exit-on-error': false } }", uri);
+    raspi4b_wait_for_migration(destination);
+    qtest_qmp_assert_success(destination, "{ 'execute': 'cont' }");
+    qtest_quit(source);
+    close(*peer);
+    *peer = new_peer;
+    g_unlink(path);
+    g_rmdir(directory);
+    return destination;
+}
+
+static void cyw43455_sdio_fragmented_tx(bool migrate)
+{
+    uint8_t packet[1100] = { 0x02, 0, 0, 0, 0, 1 };
+    uint8_t frame[1116], received[1100], credit[12];
+    uint32_t wire_len;
+    int peer;
+    QTestState *qts = cyw43455_sdio_reference_setup(
+        &peer, "-global cyw43455-sdio.tx-credit-delay-ms=5");
+
+    memset(packet + 6, 0x5a, sizeof(packet) - 6);
+    cyw43455_sdio_build_data_request(frame, sizeof(frame), packet,
+                                      sizeof(packet));
+    cyw43455_sdio_function2_write_qtest(qts, frame, 512);
+    cyw43455_sdio_function2_write_qtest(qts, frame + 512, 512);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==, 0);
+    if (migrate) {
+        qts = cyw43455_sdio_reference_migrate(
+            qts, &peer, "-global cyw43455-sdio.tx-credit-delay-ms=5");
+    }
+    cyw43455_sdio_function2_write_qtest(qts, frame + 1024, 92);
+    qtest_clock_step(qts, 5 * SCALE_MS);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, CYW43455_SDIO_FRAME_IND);
+    cyw43455_sdio_recv_all(peer, &wire_len, sizeof(wire_len));
+    while (migrate && ntohl(wire_len) == 60) {
+        uint8_t announcement[60];
+
+        /* QEMU announces the migrated NIC with a RARP request. */
+        cyw43455_sdio_recv_all(peer, announcement, sizeof(announcement));
+        g_assert_cmphex(lduw_be_p(announcement + 12), ==, 0x8035);
+        cyw43455_sdio_recv_all(peer, &wire_len, sizeof(wire_len));
+    }
+    g_assert_cmpuint(ntohl(wire_len), ==, sizeof(packet));
+    cyw43455_sdio_recv_all(peer, received, sizeof(received));
+    g_assert_cmpmem(received, sizeof(received), packet, sizeof(packet));
+    cyw43455_sdio_function2_read_qtest(qts, credit, sizeof(credit));
+    cyw43455_sdio_assert_credit_update(credit, sizeof(credit), 1,
+                                       CYW43455_DEFAULT_CREDIT_WINDOW);
+    qtest_quit(qts);
+    close(peer);
+}
+
+static void test_cyw43455_sdio_fragmented_tx(void)
+{
+    cyw43455_sdio_fragmented_tx(false);
+}
+
+static void test_cyw43455_sdio_fragmented_tx_migration(void)
+{
+    cyw43455_sdio_fragmented_tx(true);
+}
+
+static void cyw43455_sdio_credit_pressure(bool migrate)
+{
+    static const uint8_t packet[64] = { 0x02, 0, 0, 0, 0, 1 };
+    uint8_t control[128], data[80], received[80], credit[12];
+    size_t len;
+    int peer;
+    QTestState *qts = cyw43455_sdio_reference_setup(
+        &peer, "-global cyw43455-sdio.tx-credit-delay-ms=25 "
+               "-global cyw43455-sdio.tx-credit-window=5");
+
+    /* Seed a real modulo-256 wrap and enable inbound data. */
+    len = cyw43455_sdio_build_iovar_request(
+        control, sizeof(control), "arpoe", 250, 1);
+    cyw43455_sdio_exchange_control(qts, control, len);
+    g_assert_cmpuint(control[9], ==, 255);
+
+    len = cyw43455_sdio_build_data_request(
+        data, sizeof(data), packet, sizeof(packet));
+    data[4] = 251;
+    cyw43455_sdio_function2_write_qtest(qts, data, len);
+    qtest_clock_step(qts, 10 * SCALE_MS);
+    cyw43455_sdio_send_packet(peer, packet, sizeof(packet));
+    cyw43455_sdio_wait_for_frame(qts);
+    qtest_clock_step(qts, 10 * SCALE_MS);
+    data[4] = 252;
+    cyw43455_sdio_function2_write_qtest(qts, data, len);
+    if (migrate) {
+        qts = cyw43455_sdio_reference_migrate(
+            qts, &peer, "-global cyw43455-sdio.tx-credit-delay-ms=25 "
+                        "-global cyw43455-sdio.tx-credit-window=5");
+    }
+    if (migrate) {
+        /* The destination's qtest clock starts independently of the source. */
+        qtest_clock_step_next(qts);
+    } else {
+        qtest_clock_step(qts, 5 * SCALE_MS);
+    }
+
+    /* Held RX data must neither release early credits nor be overwritten. */
+    cyw43455_sdio_function2_read_qtest(qts, received, sizeof(received));
+    cyw43455_sdio_assert_data_response(
+        received, sizeof(received), packet, sizeof(packet), 1, 255);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    cyw43455_sdio_wait_for_frame(qts);
+    cyw43455_sdio_function2_read_qtest(qts, credit, sizeof(credit));
+    cyw43455_sdio_assert_credit_update(credit, sizeof(credit), 252, 5);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==, 0);
+    qtest_quit(qts);
+    close(peer);
+}
+
+static void test_cyw43455_sdio_credit_pressure(void)
+{
+    cyw43455_sdio_credit_pressure(false);
+}
+
+static void test_cyw43455_sdio_credit_pressure_migration(void)
+{
+    cyw43455_sdio_credit_pressure(true);
+}
+
+static void cyw43455_sdio_reference_event(QTestState *qts, uint32_t type,
+                                          bool up)
+{
+    uint8_t frame[CYW43455_EVENT_FRAME_LEN];
+
+    cyw43455_sdio_wait_for_frame(qts);
+    cyw43455_sdio_function2_read_qtest(qts, frame, sizeof(frame));
+    cyw43455_sdio_assert_link_event_type(
+        frame, sizeof(frame), frame[4], frame[9], up,
+        cyw43455_sdio_default_test_mac, type);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+}
+
+static void cyw43455_sdio_rx_glom(bool migrate)
+{
+    uint8_t packet[64] = { 0x02, 0, 0, 0, 0, 1 };
+    uint8_t control[128], descriptor[64], super[512], single[80];
+    size_t len;
+    uint32_t head_len = migrate ? 16 : 12;
+    uint32_t base_sequence = migrate ? 1 : 0;
+    int peer;
+    QTestState *qts = cyw43455_sdio_reference_setup(
+        &peer, "-global cyw43455-sdio.rx-glom-max-frames=3 "
+               "-global cyw43455-sdio.rx-glom-delay-ms=25");
+
+    if (migrate) {
+        uint32_t alignment = cpu_to_le32(8);
+
+        len = cyw43455_sdio_build_set_iovar_request(
+            control, sizeof(control), "bus:txglomalign", &alignment,
+            sizeof(alignment), 0, 1);
+        cyw43455_sdio_exchange_control(qts, control, len);
+    }
+    len = cyw43455_sdio_build_iovar_request(
+        control, sizeof(control), "arpoe", base_sequence, 2);
+    cyw43455_sdio_exchange_control(qts, control, len);
+    for (unsigned int i = 0; i < 3; i++) {
+        packet[63] = i;
+        cyw43455_sdio_send_packet(peer, packet, sizeof(packet));
+    }
+    cyw43455_sdio_wait_for_frame(qts);
+    if (migrate) {
+        cyw43455_sdio_function2_read_qtest(qts, descriptor, 4);
+        qts = cyw43455_sdio_reference_migrate(
+            qts, &peer, "-global cyw43455-sdio.rx-glom-max-frames=3 "
+                        "-global cyw43455-sdio.rx-glom-delay-ms=25");
+    }
+    /* A descriptor arriving mid-DPC may be read before its IRQ is acked. */
+    cyw43455_sdio_function2_read_qtest(qts, descriptor + (migrate ? 4 : 0),
+                                      sizeof(descriptor) - (migrate ? 4 : 0));
+    g_assert_cmpuint(lduw_le_p(descriptor), ==, 18);
+    g_assert_cmphex(lduw_le_p(descriptor + 2), ==, (uint16_t)~18);
+    g_assert_cmphex(descriptor[5], ==, 0x83);
+    g_assert_cmpuint(descriptor[4], ==, 1 + base_sequence);
+    g_assert_cmpuint(descriptor[7], ==, 12);
+    g_assert_cmpuint(lduw_le_p(descriptor + 12), ==, 80 + head_len);
+    g_assert_cmpuint(lduw_le_p(descriptor + 14), ==, 80);
+    g_assert_cmpuint(lduw_le_p(descriptor + 16), ==, 80);
+    for (unsigned int i = 18; i < sizeof(descriptor); i++) {
+        g_assert_cmpuint(descriptor[i], ==, 0);
+    }
+
+    /* A control reply cannot interpose between descriptor and superframe. */
+    len = cyw43455_sdio_build_cur_etheraddr_request(control, sizeof(control));
+    cyw43455_sdio_function2_write_qtest(qts, control, len);
+    cyw43455_sdio_function2_read_qtest(qts, super, sizeof(super));
+    g_assert_cmpuint(lduw_le_p(super), ==, 240 + head_len);
+    g_assert_cmphex(lduw_le_p(super + 2), ==, (uint16_t)~(240 + head_len));
+    g_assert_cmpuint(super[5], ==, 3);
+    g_assert_cmpuint(super[4], ==, 2 + base_sequence);
+    g_assert_cmpuint(super[7], ==, head_len);
+    for (unsigned int i = 0; i < 3; i++) {
+        packet[63] = i;
+        cyw43455_sdio_assert_data_response(
+            super + head_len + 80 * i, 80, packet, sizeof(packet),
+            i + 2 + base_sequence,
+            base_sequence + CYW43455_DEFAULT_CREDIT_WINDOW);
+    }
+    for (unsigned int i = 240 + head_len; i < sizeof(super); i++) {
+        g_assert_cmpuint(super[i], ==, 0);
+    }
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    cyw43455_sdio_wait_for_frame(qts);
+    cyw43455_sdio_function2_read_qtest(qts, control, len);
+    cyw43455_sdio_assert_cur_etheraddr_response(
+        control, len, cyw43455_sdio_default_test_mac, 1);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    /* One packet is flushed by the timer using ordinary data framing. */
+    cyw43455_sdio_send_packet(peer, packet, sizeof(packet));
+    g_usleep(10000);
+    cyw43455_sdio_backplane_readl_qtest(qts, CYW43455_SDIO_INTSTATUS);
+    if (migrate) {
+        qts = cyw43455_sdio_reference_migrate(
+            qts, &peer, "-global cyw43455-sdio.rx-glom-max-frames=3 "
+                        "-global cyw43455-sdio.rx-glom-delay-ms=25");
+    }
+    qtest_clock_step(qts, 25 * SCALE_MS);
+    cyw43455_sdio_wait_for_frame(qts);
+    cyw43455_sdio_function2_read_qtest(qts, single, sizeof(single));
+    cyw43455_sdio_assert_data_response(
+        single, sizeof(single), packet, sizeof(packet), 6 + base_sequence,
+        1 + CYW43455_DEFAULT_CREDIT_WINDOW);
+    qtest_quit(qts);
+    close(peer);
+}
+
+static void test_cyw43455_sdio_rx_glom(void)
+{
+    cyw43455_sdio_rx_glom(false);
+}
+
+static void test_cyw43455_sdio_rx_glom_migration(void)
+{
+    cyw43455_sdio_rx_glom(true);
+}
+
+static void cyw43455_sdio_reference_connection(bool migrate)
+{
+    static const uint8_t packet[64] = { 0x02, 0, 0, 0, 0, 1 };
+    uint8_t control[128], join[72] = { }, disassoc[12] = { }, data[80];
+    size_t len;
+    int peer;
+    QTestState *qts = cyw43455_sdio_reference_setup(
+        &peer, "-global cyw43455-sdio.explicit-association=on");
+
+    len = cyw43455_sdio_build_iovar_request(
+        control, sizeof(control), "arpoe", 0, 1);
+    cyw43455_sdio_exchange_control(qts, control, len);
+    cyw43455_sdio_send_packet(peer, packet, sizeof(packet));
+    len = cyw43455_sdio_build_command_request(
+        control, sizeof(control), CYW43455_C_SET_PROMISC, 0, 1, 2);
+    cyw43455_sdio_exchange_control(qts, control, len);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==, 0);
+
+    stl_le_p(join, strlen(CYW43455_BSS_SSID));
+    memcpy(join + 4, CYW43455_BSS_SSID, strlen(CYW43455_BSS_SSID));
+    len = cyw43455_sdio_build_set_iovar_request(
+        control, sizeof(control), "join", join, sizeof(join), 2, 3);
+    cyw43455_sdio_exchange_control(qts, control, len);
+    if (migrate) {
+        qts = cyw43455_sdio_reference_migrate(
+            qts, &peer, "-global cyw43455-sdio.explicit-association=on");
+    }
+    cyw43455_sdio_reference_event(qts, 16, true);
+    cyw43455_sdio_reference_event(qts, 0, true);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==, 0);
+    cyw43455_sdio_send_packet(peer, packet, sizeof(packet));
+    cyw43455_sdio_wait_for_frame(qts);
+    cyw43455_sdio_function2_read_qtest(qts, data, sizeof(data));
+    g_assert_cmpmem(data + 16, sizeof(packet), packet, sizeof(packet));
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    len = cyw43455_sdio_build_payload_command_request(
+        control, sizeof(control), 52, disassoc, sizeof(disassoc), 3, 4);
+    cyw43455_sdio_exchange_control(qts, control, len);
+    cyw43455_sdio_reference_event(qts, 16, false);
+    cyw43455_sdio_send_packet(peer, packet, sizeof(packet));
+    len = cyw43455_sdio_build_command_request(
+        control, sizeof(control), CYW43455_C_SET_PROMISC, 1, 4, 5);
+    cyw43455_sdio_exchange_control(qts, control, len);
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'set_link', 'arguments': { "
+        "'name': 'wifi-reference', 'up': false } }");
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'set_link', 'arguments': { "
+        "'name': 'wifi-reference', 'up': true } }");
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==, 0);
+    len = cyw43455_sdio_build_payload_command_request(
+        control, sizeof(control), 26, join, 36, 5, 6);
+    cyw43455_sdio_exchange_control(qts, control, len);
+    cyw43455_sdio_reference_event(qts, 16, true);
+    cyw43455_sdio_reference_event(qts, 0, true);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==, 0);
+    qtest_quit(qts);
+    close(peer);
+}
+
+static void test_cyw43455_sdio_reference_connection(void)
+{
+    cyw43455_sdio_reference_connection(false);
+}
+
+static void test_cyw43455_sdio_reference_connection_migration(void)
+{
+    cyw43455_sdio_reference_connection(true);
 }
 
 static void test_cyw43455_sdio_network_backend(void)
@@ -8937,6 +9351,22 @@ int main(int argc, char **argv)
         " -machine sdio-wifi=on");
     raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_network_backend",
                      test_cyw43455_sdio_network_backend);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_credit_pressure",
+                     test_cyw43455_sdio_credit_pressure);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_fragmented_tx",
+                     test_cyw43455_sdio_fragmented_tx);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_fragmented_tx_migration",
+                     test_cyw43455_sdio_fragmented_tx_migration);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_rx_glom",
+                     test_cyw43455_sdio_rx_glom);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_rx_glom_migration",
+                     test_cyw43455_sdio_rx_glom_migration);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_credit_pressure_migration",
+                     test_cyw43455_sdio_credit_pressure_migration);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_reference_connection",
+                     test_cyw43455_sdio_reference_connection);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_reference_connection_migration",
+                     test_cyw43455_sdio_reference_connection_migration);
     raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio_migration",
                                test_cyw43455_sdio_migration,
                                " -machine sdio-wifi=on");

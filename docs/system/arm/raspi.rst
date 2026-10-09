@@ -57,10 +57,10 @@ Implemented devices
    UART's supported RTS control and CTS status bits
  * Frame Buffer
  * Arasan eMMC2 SD/MMC host controller and external SD card
- * Opt-in experimental CYW43455-compatible two-function SDIO endpoint on the
-   non-removable eMMC1 bus, with standard enumeration, register transport,
-   a bounded synthetic control responder, SDIO card interrupts and an
-   outbound-only QEMU network backend
+ * Opt-in experimental CYW43455-compatible three-function SDIO endpoint on
+   the non-removable eMMC1 bus, with standard enumeration, register transport,
+   a bounded synthetic control responder, SDIO card interrupts, bidirectional
+   networking and optional receive aggregation
  * USB2 host controller (DWC2 and MPHI)
  * Broadcom GENET v5 Gigabit Ethernet controller with an external
    BCM54213PE-compatible PHY
@@ -100,9 +100,9 @@ Missing devices
  * Physical BCM2711 PCIe power-management and link-training event behavior
  * AUX SPI DMA, fixed-width or LSB-first framing, clock timing, GPIO pin-mux
    and native chip-select wiring
- * CYW43455 firmware execution, inbound data, association and radio behavior;
-   the opt-in SDIO endpoint described below supplies only a curated
-   driver-testing profile and an outbound Ethernet bridge
+ * CYW43455 firmware execution, RF behavior, WPA encryption and firmware
+   signaling modes 1/2; the opt-in endpoint below provides a curated driver
+   test profile with synthetic association and Ethernet transport
 
 Booting Linux from an SD image
 ------------------------------
@@ -137,65 +137,85 @@ the wrong board identity and peripherals even though both boards use BCM2711.
 Experimental CYW43455 SDIO endpoint
 -----------------------------------
 
-The non-removable eMMC1/SDHCI slot can be populated with an experimental,
-local-development CYW43455-compatible endpoint::
+Enable the local-development endpoint on the non-removable eMMC1 slot::
 
   -machine raspi400,sdio-wifi=on
-
-The same option is available on ``raspi4b``.  It is disabled by default so
-that an incomplete wireless model does not change existing guests.  Because
-the virtual endpoint is always powered, enabling it also removes the Wi-Fi
-controller's ``mmc-pwrseq`` reference from the guest DT; the default DT is
-unchanged.  The endpoint reports Broadcom SDIO ID ``02d0:a9bf`` on two
-functions and implements the CMD5, CMD3, CMD7, CMD13, CMD52 and CMD53 paths
-needed for standard Linux SDIO discovery.  Its CCCR, FBR and CIS data describe
-SDIO 2.00, function-ready state and the two function block sizes.  CMD53 byte
-and block transfers use migratable, byte-addressed function register spaces.
-Clock requests complete immediately.  Function-one backplane windows expose
-the Pi 400's observed BCM4345/9 chip signature, a synthetic five-core AI EROM,
-core-wrapper reset registers and synthetic CR4 TCM-bank geometry.  This
-discovery shim is sufficient for ``brcmfmac`` to select the Pi 400 firmware
-and reach its firmware control transactions.  Rather than execute the
-uploaded image, a bounded synthetic SDPCM/BDC responder recognizes the
-commands and iovars needed by the current Linux probe.  It returns a fixed
-BCM4345/9, single-band profile and raises a level SDIO card interrupt for each
-response.  Control queues, interrupt state and pending response data migrate
-with the machine.
-
-With matching Pi 400 firmware files, this curated profile lets ``brcmfmac``
-finish attach, register ``phy0`` and ``wlan0``, and place ``wlan0``
-administratively up.  Function-two outbound SDPCM frames are consumed and
-trace events decode their sequence, channel and data offset.  This is enough
-to exercise and distinguish control-channel and netpoll data-channel traffic
-through the real guest driver.
-
-An optional standard QEMU backend can receive the Ethernet payloads from
-outbound SDPCM data frames.  Select this device explicitly because the board
-also contains GENET.  For example, user-mode networking can deliver an
-outbound UDP packet addressed to its ``10.0.2.2`` host gateway::
-
   -nic user,id=wifi,model=cyw43455-sdio,net=10.0.2.0/24,host=10.0.2.2
 
-The model does **not** implement firmware RAM, the firmware processor,
-inbound frames, association or an 802.11 radio.  Frames arriving from a QEMU
-backend are dropped, and the guest interface remains ``NO-CARRIER`` even
-though statically addressed outbound packets can reach the backend.  Unknown
-backplane reads return zero and writes are ignored.  The responder and
-outbound bridge are test scaffolding, not a claim that the uploaded firmware
-ran or that the modeled profile is hardware-faithful.  The synthetic EROM,
-RAM geometry, control values and interrupt behavior must still be compared
-with real Pi 400 transactions.
+The same option is available on ``raspi4b`` and is disabled by default. The
+virtual endpoint is always powered, so enabling it removes the Wi-Fi
+controller's ``mmc-pwrseq`` reference from the guest DT. It reports Broadcom
+ID ``02d0:a9a6`` on three SDIO functions, matching the observed BCM4345/9.
+Function three is enumeration-only. CMD5, CMD3, CMD7, CMD13, CMD52 and CMD53
+support Linux discovery; function one supplies a synthetic backplane, EROM,
+core reset registers and CR4 RAM geometry. Uploaded firmware is not executed.
+A bounded SDPCM/BDC responder supports the current driver control profile.
 
-``scripts/pi4/cyw43455-sdio-init.sh`` is a focused initramfs probe for this
-endpoint.  Install it as ``/init`` alongside a static BusyBox and the
-``rfkill``, ``cfg80211``, ``brcmutil``, ``brcmfmac`` and ``brcmfmac-cyw``
-modules; it reports the enumerated IDs, module probe result, network devices
-and final kernel log.  A matching firmware binary, NVRAM file and optional
-CLM blob are required for the full attach.  The separate local netpoll rig
-configures dynamic netconsole, emits a marker, records outbound channel-2
-frames and can use the outbound backend to validate UDP delivery to a host
-listener.  It still cannot validate Wi-Fi association, receive traffic or
-radio behavior.
+Matching Pi 400 firmware, NVRAM and CLM files are still needed for Linux
+``brcmfmac`` to attach. Function two transports Ethernet in both directions,
+including host transmit gloms, runtime MAC and multicast filtering, and
+bounded ARP/ND offload. A TX frame split across block and byte CMD53 writes
+is assembled before forwarding. Linux uses its actual driver and SDIO
+interrupt path. Partial TX frames, control replies, RX contents, credit
+deadlines and pending link events
+migrate with the machine.
+
+The default compatibility profile synthesizes association on the first
+post-open promiscuous-filter update. Existing netpoll initramfs fixtures use
+this shortcut. For traffic and recovery tests, select explicit association::
+
+  -global cyw43455-sdio.explicit-association=on
+  -global cyw43455-sdio.rx-glom-max-frames=4
+  -global cyw43455-sdio.rx-glom-delay-ms=1
+  -global cyw43455-sdio.tx-credit-window=41
+  -global cyw43455-sdio.tx-credit-delay-ms=1
+
+In the guest, bring ``wlan0`` up and issue an ordinary nl80211 connection to
+the open synthetic SSID ``qemu-cyw43455`` (for example, with ``iw``). The
+supported join command then produces LINK-up followed by SET_SSID. WLC
+DISASSOC produces LINK-down. Filter changes do not reconnect this profile;
+a new join is required after an explicit disconnect. Incoming packets while
+disconnected are discarded rather than replayed on reconnect. Backend link
+changes generate events only after a requested association. Setting
+``auto-associate=off`` suppresses automatic successful association events.
+The model accepts the open-connection security settings and rejects WPA
+security settings it cannot implement.
+
+The Pi 400 reference capture on 2026-10-09 used firmware 7.84.17.1 and the
+vendor 6.18.39 kernel. All 294 observed control replies advertised a TX
+sequence limit 41 positions beyond the request; this is now the default
+``tx-credit-window``. The advertised limit is exclusive, so this parameter
+is not a count of data packets available to the driver. Header-only credit
+updates use event channel one, as observed on the reference board. A
+nonzero credit delay retires a batch at its first packet's deadline; later
+packets cannot keep postponing it. Incoming data and events carry only
+retired credits. Control replies acknowledge earlier TX data. An occupied
+RX FIFO defers the credit notification without overwriting its contents.
+
+``rx-glom-max-frames`` accepts 1..8 and defaults to 1 (ordinary RX framing).
+Larger values collect up to that many packets for the configured virtual
+``rx-glom-delay-ms`` (0..1000, default 1). Groups of two or more use a glom
+descriptor and block-padded superframe; sparse input stays on data channel
+two. The descriptor reserves the next FIFO read for its superframe, ahead
+of pending control replies, including reads before interrupt acknowledgement.
+Superframe and subframe padding follow the driver's negotiated
+``bus:txglomalign`` alignment (4..128, power of two). Queues are bounded by
+the 16 KiB frame buffer.
+The reference workload observed groups of 2..7 packets. The example's
+four-packet limit and millisecond delays are deterministic test settings,
+not a calibrated reproduction of firmware scheduling or RF latency.
+
+Small credit windows and larger delays remain available for queue-pressure
+and netpoll fixtures (for example, window 2 and delay 10 ms). Such settings
+are synthetic stress conditions. Modeled delivery does not establish that
+radio behavior, firmware execution, encryption, FWS modes 1/2, power-save
+latency or hardware packet-loss rates are reproduced. The captured Pi 400
+had no flow-control XOFF/XON changes, so the model does not invent these
+transitions from that sample.
+
+``scripts/pi4/cyw43455-sdio-init.sh`` remains a focused attach probe. The
+separate reference validation harness uses an ordinary nl80211 helper,
+real guest fixture modules, bidirectional TCP/UDP and explicit reconnect.
 
 Attaching USB storage
 ---------------------

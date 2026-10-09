@@ -334,6 +334,8 @@ struct SDState {
 #define CYW43455_SDPCM_HEADER_LEN        12
 #define CYW43455_SDPCM_CONTROL_CHANNEL   0
 #define CYW43455_SDPCM_EVENT_CHANNEL     1
+#define CYW43455_SDPCM_GLOM_CHANNEL      3
+#define CYW43455_RX_GLOM_MAX             8
 #define CYW43455_SDPCM_DATA_CHANNEL      2
 #define CYW43455_BCDC_HEADER_LEN         16
 #define CYW43455_BCDC_DATA_HEADER_LEN    4
@@ -346,7 +348,11 @@ struct SDState {
 #define CYW43455_BCME_BADLEN             (-24)
 #define CYW43455_BCME_NOTASSOCIATED      (-28)
 #define CYW43455_C_GET_VERSION           1
+#define CYW43455_C_UP                    2
+#define CYW43455_C_DOWN                  3
 #define CYW43455_C_SET_PROMISC           10
+#define CYW43455_C_SET_SSID              26
+#define CYW43455_C_DISASSOC              52
 #define CYW43455_C_GET_ROAM_TRIGGER      54
 #define CYW43455_C_SET_ROAM_TRIGGER      55
 #define CYW43455_C_GET_ROAM_DELTA        56
@@ -418,7 +424,8 @@ struct SDState {
 #define CYW43455_CHANSPEC_LIST_LEN(_count) \
     (sizeof(uint32_t) * (1 + (_count)))
 #define CYW43455_F2_FRAME_MAX            (16 * KiB)
-#define CYW43455_TX_CREDIT_WINDOW_DEFAULT 8
+/* Pi 400 7.84.17.1: 294 observed control replies advanced by 41. */
+#define CYW43455_TX_CREDIT_WINDOW_DEFAULT 41
 #define CYW43455_TX_CREDIT_WINDOW_MAX    64
 #define CYW43455_MULTICAST_MAX           32
 #define CYW43455_ARP_HOSTIP_MAX          8
@@ -612,13 +619,28 @@ struct CYW43455SDIOState {
     uint32_t f2_rx_pos;
     uint32_t f2_rx_pending_len;
     uint8_t f2_rx_seq;
+    QEMUTimer *rx_glom_timer;
+    uint32_t rx_glom_delay_ms;
+    uint8_t rx_glom_max_frames;
+    uint16_t rx_glom_align;
+    uint8_t rx_glom_count;
+    uint16_t rx_glom_lengths[CYW43455_RX_GLOM_MAX];
+    uint8_t rx_glom_frame[CYW43455_F2_FRAME_MAX];
+    uint32_t rx_glom_len;
+    bool rx_glom_ready;
+    bool rx_glom_super_pending;
     QEMUTimer *tx_credit_timer;
     uint32_t tx_credit_delay_ms;
     uint8_t tx_credit_window;
     uint8_t tx_credit_seq;
+    uint8_t tx_credit_limit;
     bool tx_credit_pending;
+    bool tx_credit_update_pending;
     bool rx_data_enabled;
     bool auto_associate;
+    bool explicit_association;
+    bool association_requested;
+    bool link_ssid_pending;
     bool link_event_pending;
     bool link_event_sent;
     bool link_event_up;
@@ -674,6 +696,17 @@ struct CYW43455SDIOState {
     bool promiscuous;
 };
 
+static void cyw43455_sdio_emit_tx_credit_frame(CYW43455SDIOState *s);
+static void cyw43455_sdio_emit_rx_glom(CYW43455SDIOState *s);
+
+static bool cyw43455_sdio_link_available(CYW43455SDIOState *s)
+{
+    return !s->explicit_association ||
+           (s->firmware_connected &&
+            !(s->link_event_pending && !s->link_event_up) &&
+            !qemu_get_queue(s->nic)->link_down);
+}
+
 static SDBus *cyw43455_sdio_bus(CYW43455SDIOState *s)
 {
     BusState *bus = qdev_get_parent_bus(DEVICE(s));
@@ -718,6 +751,7 @@ static bool cyw43455_sdio_rx_ready(CYW43455SDIOState *s)
            !s->f2_rx_pending_len &&
            !s->link_event_pending &&
            !s->escan_event_phase &&
+           !s->rx_glom_ready && !s->rx_glom_super_pending &&
            !(s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND);
 }
 
@@ -860,7 +894,8 @@ static void cyw43455_sdio_emit_event(CYW43455SDIOState *s,
     frame[4] = s->f2_rx_seq++;
     frame[5] = CYW43455_SDPCM_EVENT_CHANNEL;
     frame[7] = CYW43455_SDPCM_HEADER_LEN;
-    frame[9] = s->tx_credit_seq + s->tx_credit_window;
+    frame[9] = s->tx_credit_limit;
+    s->tx_credit_update_pending = false;
 
     bcdc[0] = CYW43455_BCDC_PROTO_VER << 4;
     memcpy(ethernet, s->current_mac, ETH_ALEN);
@@ -892,15 +927,19 @@ static void cyw43455_sdio_emit_event(CYW43455SDIOState *s,
 static void cyw43455_sdio_emit_link_event(CYW43455SDIOState *s)
 {
     uint8_t sequence = s->f2_rx_seq;
+    bool ssid = s->link_event_up &&
+                (!s->explicit_association || s->link_ssid_pending);
 
     assert(s->link_event_pending);
     cyw43455_sdio_emit_event(s,
-                             s->link_event_up ? CYW43455_EVENT_SET_SSID :
-                                                CYW43455_EVENT_LINK,
+                             ssid ? CYW43455_EVENT_SET_SSID :
+                                    CYW43455_EVENT_LINK,
                              CYW43455_EVENT_STATUS_SUCCESS,
                              s->link_event_up ? CYW43455_EVENT_MSG_LINK : 0,
                              NULL, 0);
-    s->link_event_pending = false;
+    s->link_ssid_pending = s->explicit_association &&
+                           s->link_event_up && !ssid;
+    s->link_event_pending = s->link_ssid_pending;
     s->link_event_sent = s->link_event_up;
     if (s->link_event_up && !s->firmware_connected) {
         s->association_time_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
@@ -943,8 +982,25 @@ static void cyw43455_sdio_emit_escan_event(CYW43455SDIOState *s)
 
 static void cyw43455_sdio_advance_rx(CYW43455SDIOState *s)
 {
-    if (s->f2_rx_len ||
-        (s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND)) {
+    if (s->f2_rx_len) {
+        return;
+    }
+
+    /* A descriptor commits the following FIFO read to its superframe. */
+    if (s->rx_glom_super_pending) {
+        s->f2_rx_len = QEMU_ALIGN_UP(s->rx_glom_len, 512);
+        memcpy(s->f2_rx_frame, s->rx_glom_frame, s->f2_rx_len);
+        s->f2_rx_pos = 0;
+        trace_cyw43455_sdio_rx_glom(s->rx_glom_count, s->rx_glom_len, false);
+        s->rx_glom_super_pending = false;
+        s->rx_glom_count = 0;
+        s->rx_glom_len = 0;
+        s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
+        cyw43455_sdio_update_irq(s);
+        return;
+    }
+
+    if (s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND) {
         return;
     }
 
@@ -967,6 +1023,16 @@ static void cyw43455_sdio_advance_rx(CYW43455SDIOState *s)
 
     if (s->escan_event_phase) {
         cyw43455_sdio_emit_escan_event(s);
+        return;
+    }
+
+    if (s->tx_credit_update_pending) {
+        cyw43455_sdio_emit_tx_credit_frame(s);
+        return;
+    }
+
+    if (s->rx_glom_ready) {
+        cyw43455_sdio_emit_rx_glom(s);
         return;
     }
 
@@ -1331,6 +1397,8 @@ static int32_t cyw43455_sdio_bss_info(CYW43455SDIOState *s,
 {
     uint8_t *bss;
     uint32_t requested_len;
+    uint32_t bss_len = s->explicit_association ? CYW43455_ESCAN_BSS_INFO_LEN :
+                                                CYW43455_BSS_INFO_LEN;
 
     if (!s->firmware_connected) {
         return CYW43455_BCME_NOTASSOCIATED;
@@ -1341,14 +1409,14 @@ static int32_t cyw43455_sdio_bss_info(CYW43455SDIOState *s,
 
     requested_len = ldl_le_p(input);
     if (requested_len < CYW43455_BSS_INFO_PREFIX_LEN +
-                        CYW43455_BSS_INFO_LEN ||
+                        bss_len ||
         requested_len > output_len) {
         return CYW43455_BCME_BADLEN;
     }
 
     bss = output + CYW43455_BSS_INFO_PREFIX_LEN;
     stl_le_p(output, requested_len);
-    cyw43455_sdio_fill_bss_info(s, bss, CYW43455_BSS_INFO_LEN, false);
+    cyw43455_sdio_fill_bss_info(s, bss, bss_len, s->explicit_association);
 
     trace_cyw43455_sdio_bss(CYW43455_BSS_BEACON_PERIOD,
                             CYW43455_BSS_DTIM_PERIOD,
@@ -1714,6 +1782,37 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
 {
     uint32_t count;
 
+    if (!strcmp(name, "bus:txglomalign")) {
+        uint32_t alignment;
+
+        if (data_len != sizeof(uint32_t)) {
+            return CYW43455_BCME_BADLEN;
+        }
+        alignment = ldl_le_p(data);
+        if (alignment < 4 || alignment > 128 ||
+            (alignment & (alignment - 1))) {
+            return CYW43455_BCME_BADARG;
+        }
+        if (s->rx_glom_count) {
+            return CYW43455_BCME_BUSY;
+        }
+        s->rx_glom_align = alignment;
+        return 0;
+    }
+
+    if (!strcmp(name, "wpa_auth") || !strcmp(name, "wsec") ||
+        !strcmp(name, "auth") ||
+        !strcmp(name, "sup_wpa")) {
+        if (data_len != sizeof(uint32_t)) {
+            return CYW43455_BCME_BADLEN;
+        }
+        /* The reference traffic profile connects to an open synthetic BSS. */
+        return ldl_le_p(data) == 0 ? 0 : CYW43455_BCME_UNSUPPORTED;
+    }
+    if (!strcmp(name, "wpaie")) {
+        return data_len == 0 ? 0 : CYW43455_BCME_UNSUPPORTED;
+    }
+
     if (!strcmp(name, "pfn") || !strcmp(name, "pfnclear") ||
         !strcmp(name, "pfn_set") || !strcmp(name, "pfn_cfg") ||
         !strcmp(name, "pfn_gscan_cfg") ||
@@ -2036,6 +2135,55 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
     }
 
     if (set) {
+        if (command == CYW43455_C_UP || command == CYW43455_C_DOWN) {
+            if (input_len != 0 && input_len != sizeof(uint32_t)) {
+                return CYW43455_BCME_BADLEN;
+            }
+            s->rx_data_enabled = command == CYW43455_C_UP;
+        }
+        if (command == CYW43455_C_DISASSOC ||
+            command == CYW43455_C_DOWN) {
+            if (command == CYW43455_C_DISASSOC &&
+                input_len != 0 && input_len != 12) {
+                return CYW43455_BCME_BADLEN;
+            }
+            s->association_requested = false;
+            if (!s->rx_glom_super_pending) {
+                timer_del(s->rx_glom_timer);
+                s->rx_glom_count = 0;
+                s->rx_glom_len = 0;
+                s->rx_glom_ready = false;
+            }
+            s->link_ssid_pending = false;
+            s->link_event_up = false;
+            s->link_event_pending = s->firmware_connected;
+            s->link_event_sent = false;
+            return 0;
+        }
+        if (command == CYW43455_C_SET_SSID ||
+            (command == CYW43455_C_SET_VAR && !strcmp(iovar, "join"))) {
+            const uint8_t *ssid = command == CYW43455_C_SET_SSID ?
+                                  input : iovar_data;
+            uint32_t length = command == CYW43455_C_SET_SSID ?
+                              input_len : iovar_data_len;
+
+            /* Both join layouts begin with a 32-byte, length-prefixed SSID. */
+            if (length < 36) {
+                return CYW43455_BCME_BADLEN;
+            }
+            if (ldl_le_p(ssid) != strlen(CYW43455_BSS_SSID) ||
+                !cyw43455_sdio_scan_ssid_match(ssid)) {
+                return CYW43455_BCME_BADARG;
+            }
+            s->association_requested = true;
+            if (s->auto_associate && s->rx_data_enabled &&
+                !qemu_get_queue(s->nic)->link_down) {
+                s->link_event_up = true;
+                s->link_ssid_pending = false;
+                s->link_event_pending = true;
+            }
+            return 0;
+        }
         if (command == CYW43455_C_SET_PM) {
             uint32_t power_mode = UINT32_MAX;
             int32_t status = 0;
@@ -2115,7 +2263,17 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
                                 CYW43455_WLC_BAND_2G);
         return 0;
     case CYW43455_C_GET_VAR:
-        if (!strcmp(iovar, "cur_etheraddr")) {
+        if (!strcmp(iovar, "assoc_info")) {
+            if (output_len < 2 * sizeof(uint32_t)) {
+                return CYW43455_BCME_BADLEN;
+            }
+            /* No separate association request/response IEs in this profile. */
+            memset(output, 0, output_len);
+        } else if (!strcmp(iovar, "wpa_auth") || !strcmp(iovar, "wsec") ||
+            !strcmp(iovar, "auth") ||
+            !strcmp(iovar, "sup_wpa")) {
+            cyw43455_sdio_store_u32(output, output_len, 0, 0);
+        } else if (!strcmp(iovar, "cur_etheraddr")) {
             memcpy(output, s->current_mac,
                    MIN(sizeof(s->current_mac), output_len));
         } else if (!strcmp(iovar, "ver")) {
@@ -2257,6 +2415,10 @@ static void cyw43455_sdio_forward_data(CYW43455SDIOState *s,
     uint16_t destination_port = 0;
     uint8_t ip_protocol = 0;
 
+    if (!cyw43455_sdio_link_available(s)) {
+        return;
+    }
+
     if (software_offset > 4) {
         /* The extension length excludes only the four-byte frame tag. */
         frame_len = lduw_le_p(request + 4) + 4;
@@ -2375,52 +2537,65 @@ static uint8_t cyw43455_sdio_tx_max(CYW43455SDIOState *s,
     return tx_sequence + s->tx_credit_window;
 }
 
-static void cyw43455_sdio_emit_tx_credit(void *opaque)
+static void cyw43455_sdio_emit_tx_credit_frame(CYW43455SDIOState *s)
 {
-    CYW43455SDIOState *s = opaque;
     uint8_t *response = s->f2_rx_frame;
-    uint8_t tx_max;
 
-    if (!s->tx_credit_pending) {
-        return;
-    }
-
-    /* Do not overwrite a control response or an earlier credit update. */
-    if (s->f2_rx_len || s->f2_rx_pending_len ||
-        (s->sdio_intstatus & CYW43455_I_HMB_FRAME_IND)) {
-        timer_mod(s->tx_credit_timer,
-                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
-        return;
-    }
-
+    assert(s->tx_credit_update_pending);
     memset(response, 0, CYW43455_SDPCM_HEADER_LEN);
     stw_le_p(response, CYW43455_SDPCM_HEADER_LEN);
     stw_le_p(response + 2, (uint16_t)~CYW43455_SDPCM_HEADER_LEN);
     response[4] = s->f2_rx_seq++;
-    response[5] = CYW43455_SDPCM_DATA_CHANNEL;
+    /* Observed firmware uses the event channel for header-only updates. */
+    response[5] = CYW43455_SDPCM_EVENT_CHANNEL;
     response[7] = CYW43455_SDPCM_HEADER_LEN;
-    tx_max = cyw43455_sdio_tx_max(s, s->tx_credit_seq);
-    response[9] = tx_max;
+    response[9] = s->tx_credit_limit;
 
     s->f2_rx_len = CYW43455_SDPCM_HEADER_LEN;
     s->f2_rx_pos = 0;
-    s->tx_credit_pending = false;
+    s->tx_credit_update_pending = false;
     s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
-    trace_cyw43455_sdio_credit_emitted(s->tx_credit_seq, tx_max);
+    trace_cyw43455_sdio_credit_emitted(s->tx_credit_seq, s->tx_credit_limit);
     cyw43455_sdio_update_irq(s);
+}
+
+static void cyw43455_sdio_emit_tx_credit(void *opaque)
+{
+    CYW43455SDIOState *s = opaque;
+
+    if (!s->tx_credit_pending) {
+        return;
+    }
+    s->tx_credit_limit = cyw43455_sdio_tx_max(s, s->tx_credit_seq);
+    s->tx_credit_pending = false;
+    s->tx_credit_update_pending = true;
+    /* Coalesce notifications only while the guest has read none of it. */
+    if (s->f2_rx_len == CYW43455_SDPCM_HEADER_LEN && !s->f2_rx_pos &&
+        s->f2_rx_frame[5] == CYW43455_SDPCM_EVENT_CHANNEL &&
+        s->f2_rx_frame[7] == CYW43455_SDPCM_HEADER_LEN) {
+        s->f2_rx_frame[9] = s->tx_credit_limit;
+        s->tx_credit_update_pending = false;
+    }
+    /* A busy receive FIFO defers notification, not credit retirement. */
+    cyw43455_sdio_advance_rx(s);
 }
 
 static void cyw43455_sdio_schedule_tx_credit(CYW43455SDIOState *s,
                                              uint8_t tx_sequence)
 {
     s->tx_credit_seq = tx_sequence;
-    s->tx_credit_pending = true;
     trace_cyw43455_sdio_credit_scheduled(
         tx_sequence, cyw43455_sdio_tx_max(s, tx_sequence),
         s->tx_credit_delay_ms);
-    timer_mod(s->tx_credit_timer,
-              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
-              s->tx_credit_delay_ms);
+    if (!s->tx_credit_delay_ms) {
+        s->tx_credit_limit = cyw43455_sdio_tx_max(s, tx_sequence);
+    }
+    if (!s->tx_credit_pending) {
+        s->tx_credit_pending = true;
+        timer_mod(s->tx_credit_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+                  s->tx_credit_delay_ms);
+    }
 }
 
 static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
@@ -2524,7 +2699,9 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
     response[9] = cyw43455_sdio_tx_max(s, request[software_offset]);
 
     s->tx_credit_seq = request[software_offset];
+    s->tx_credit_limit = response[9];
     s->tx_credit_pending = false;
+    s->tx_credit_update_pending = false;
     timer_del(s->tx_credit_timer);
 
     stl_le_p(response + CYW43455_SDPCM_HEADER_LEN, command);
@@ -2564,11 +2741,13 @@ static void cyw43455_sdio_process_tx_frame(CYW43455SDIOState *s)
         s->link_event_sent = false;
         trace_cyw43455_sdio_link_rearmed();
     }
-    if (s->auto_associate && set && command == CYW43455_C_SET_PROMISC &&
+    if (s->auto_associate && !s->explicit_association && set &&
+        command == CYW43455_C_SET_PROMISC &&
         status == 0 && !s->link_event_sent && !s->link_event_pending &&
         !qemu_get_queue(s->nic)->link_down) {
         /* Netdev open has completed before this asynchronous filter update. */
         s->link_event_up = true;
+        s->association_requested = true;
         s->link_event_pending = true;
     }
     if (!response_queued) {
@@ -2866,6 +3045,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     SDState *sd = &s->parent_obj;
 
     timer_del(s->tx_credit_timer);
+    timer_del(s->rx_glom_timer);
     cyw43455_sdio_init_registers(s);
     memset(s->wrapper_ioctl, 0, sizeof(s->wrapper_ioctl));
     memset(s->wrapper_reset, 0, sizeof(s->wrapper_reset));
@@ -2884,14 +3064,25 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->f2_rx_pos = 0;
     s->f2_rx_pending_len = 0;
     s->f2_rx_seq = 0;
+    s->rx_glom_count = 0;
+    s->rx_glom_align = 4;
+    s->rx_glom_len = 0;
+    s->rx_glom_ready = false;
+    s->rx_glom_super_pending = false;
+    memset(s->rx_glom_frame, 0, sizeof(s->rx_glom_frame));
+    memset(s->rx_glom_lengths, 0, sizeof(s->rx_glom_lengths));
     s->tx_credit_seq = 0;
+    s->tx_credit_limit = s->tx_credit_window;
     s->tx_credit_pending = false;
+    s->tx_credit_update_pending = false;
     s->rx_data_enabled = false;
     s->link_event_pending = false;
     s->link_event_sent = false;
     s->link_event_up = true;
     s->firmware_connected = false;
     s->backend_link_events_armed = false;
+    s->association_requested = false;
+    s->link_ssid_pending = false;
     s->escan_event_phase = CYW43455_ESCAN_EVENT_NONE;
     s->escan_sync_id = 0;
     s->chanspec = s->ap_chanspec;
@@ -3131,9 +3322,6 @@ static size_t cyw43455_sdio_do_command(SDState *sd, SDRequest *request,
                 trace_cyw43455_sdio_rx_read(count, s->f2_rx_len,
                                             s->f2_rx_pos, first_word);
             }
-            if (function == 2 && s->transfer_write) {
-                s->f2_tx_len = 0;
-            }
         }
         return cyw43455_sdio_response(response, response_size, status);
     default:
@@ -3203,7 +3391,20 @@ static size_t cyw43455_sdio_write_data(SDState *sd, const void *buffer,
                 s->transfer_addr++;
             }
             if (s->transfer_func == 2 && !s->transfer_remaining) {
-                cyw43455_sdio_process_tx_frame(s);
+                /* Linux may split a frame into block and byte CMD53 writes. */
+                if (s->f2_tx_len >= CYW43455_SDPCM_HW_HEADER_LEN) {
+                    uint16_t frame_len = lduw_le_p(s->f2_tx_frame);
+                    uint16_t checksum = lduw_le_p(s->f2_tx_frame + 2);
+
+                    if ((uint16_t)~frame_len != checksum ||
+                        frame_len < CYW43455_SDPCM_HEADER_LEN ||
+                        frame_len > sizeof(s->f2_tx_frame)) {
+                        s->f2_tx_len = 0;
+                    } else if (frame_len <= s->f2_tx_len) {
+                        cyw43455_sdio_process_tx_frame(s);
+                        s->f2_tx_len = 0;
+                    }
+                }
             }
         }
     }
@@ -3260,7 +3461,9 @@ static bool cyw43455_sdio_can_receive(NetClientState *nc)
 {
     CYW43455SDIOState *s = qemu_get_nic_opaque(nc);
 
-    return cyw43455_sdio_rx_ready(s) ||
+    /* Drop disconnected input instead of replaying it after association. */
+    return !cyw43455_sdio_link_available(s) ||
+           cyw43455_sdio_rx_ready(s) ||
            (s->arp_offload &&
             (s->arp_mode & CYW43455_ARP_OL_AGENT) &&
             s->arp_hostip_count) ||
@@ -3436,6 +3639,70 @@ static bool cyw43455_sdio_accept_packet(CYW43455SDIOState *s,
     return false;
 }
 
+static void cyw43455_sdio_emit_rx_glom(CYW43455SDIOState *s)
+{
+    uint8_t *frame = s->f2_rx_frame;
+    uint32_t head_len = QEMU_ALIGN_UP(CYW43455_SDPCM_HEADER_LEN,
+                                     s->rx_glom_align);
+    uint32_t offset = head_len;
+    uint32_t descriptor_len = CYW43455_SDPCM_HEADER_LEN +
+                              2 * s->rx_glom_count;
+    unsigned int i;
+
+    assert(s->rx_glom_count && s->rx_glom_ready);
+    timer_del(s->rx_glom_timer);
+    s->rx_glom_ready = false;
+    if (s->rx_glom_count == 1) {
+        /* Sparse traffic keeps the ordinary data-channel framing. */
+        s->f2_rx_len = s->rx_glom_len - head_len;
+        memcpy(frame, s->rx_glom_frame + head_len,
+               s->f2_rx_len);
+        frame[4] = s->f2_rx_seq++;
+        frame[9] = s->tx_credit_limit;
+        s->rx_glom_count = 0;
+        s->rx_glom_len = 0;
+    } else {
+        memset(frame, 0, QEMU_ALIGN_UP(descriptor_len, 4));
+        stw_le_p(frame, descriptor_len);
+        stw_le_p(frame + 2, (uint16_t)~descriptor_len);
+        frame[4] = s->f2_rx_seq++;
+        frame[5] = CYW43455_SDPCM_GLOM_CHANNEL | 0x80;
+        frame[7] = CYW43455_SDPCM_HEADER_LEN;
+        frame[9] = s->tx_credit_limit;
+        stw_le_p(s->rx_glom_frame, s->rx_glom_len);
+        stw_le_p(s->rx_glom_frame + 2, (uint16_t)~s->rx_glom_len);
+        s->rx_glom_frame[4] = s->f2_rx_seq;
+        s->rx_glom_frame[5] = CYW43455_SDPCM_GLOM_CHANNEL;
+        s->rx_glom_frame[7] = head_len;
+        s->rx_glom_frame[9] = s->tx_credit_limit;
+        for (i = 0; i < s->rx_glom_count; i++) {
+            stw_le_p(frame + CYW43455_SDPCM_HEADER_LEN + 2 * i,
+                     s->rx_glom_lengths[i]);
+            s->rx_glom_frame[offset + 4] = s->f2_rx_seq++;
+            s->rx_glom_frame[offset + 9] = s->tx_credit_limit;
+            offset += s->rx_glom_lengths[i] -
+                      (i == 0 ? head_len : 0);
+        }
+        s->f2_rx_len = QEMU_ALIGN_UP(descriptor_len, 4);
+        s->rx_glom_super_pending = true;
+        trace_cyw43455_sdio_rx_glom(s->rx_glom_count, s->rx_glom_len, true);
+    }
+    s->tx_credit_update_pending = false;
+    s->f2_rx_pos = 0;
+    s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
+    cyw43455_sdio_update_irq(s);
+}
+
+static void cyw43455_sdio_rx_glom_timeout(void *opaque)
+{
+    CYW43455SDIOState *s = opaque;
+
+    if (s->rx_glom_count) {
+        s->rx_glom_ready = true;
+        cyw43455_sdio_advance_rx(s);
+    }
+}
+
 static ssize_t cyw43455_sdio_receive(NetClientState *nc,
                                      const uint8_t *buffer, size_t size)
 {
@@ -3445,6 +3712,9 @@ static ssize_t cyw43455_sdio_receive(NetClientState *nc,
                        CYW43455_BCDC_DATA_HEADER_LEN + size;
     size_t stored_len;
 
+    if (!cyw43455_sdio_link_available(s)) {
+        return size;
+    }
     if (cyw43455_sdio_arp_offload(s, buffer, size)) {
         return size;
     }
@@ -3465,13 +3735,46 @@ static ssize_t cyw43455_sdio_receive(NetClientState *nc,
     }
 
     stored_len = QEMU_ALIGN_UP(frame_len, sizeof(uint32_t));
+    if (s->rx_glom_max_frames > 1) {
+        uint32_t head_len = QEMU_ALIGN_UP(CYW43455_SDPCM_HEADER_LEN,
+                                         s->rx_glom_align);
+        uint32_t offset = s->rx_glom_count ? s->rx_glom_len :
+                                           head_len;
+
+        stored_len = QEMU_ALIGN_UP(frame_len, s->rx_glom_align);
+
+        if (QEMU_ALIGN_UP(offset + stored_len, 512) >
+            sizeof(s->rx_glom_frame)) {
+            if (s->rx_glom_count) {
+                s->rx_glom_ready = true;
+                cyw43455_sdio_advance_rx(s);
+                return 0;
+            }
+            /* An individual large packet falls back to ordinary framing. */
+        } else {
+            if (!s->rx_glom_count) {
+                memset(s->rx_glom_frame, 0, sizeof(s->rx_glom_frame));
+                timer_mod(s->rx_glom_timer,
+                          qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+                          s->rx_glom_delay_ms);
+            }
+            frame = s->rx_glom_frame + offset;
+            s->rx_glom_lengths[s->rx_glom_count] = stored_len +
+                (s->rx_glom_count == 0 ? head_len : 0);
+            s->rx_glom_len = offset + stored_len;
+            s->rx_glom_count++;
+        }
+    }
     memset(frame, 0, stored_len);
     stw_le_p(frame, frame_len);
     stw_le_p(frame + 2, (uint16_t)~frame_len);
-    frame[4] = s->f2_rx_seq++;
+    frame[4] = frame == s->f2_rx_frame ? s->f2_rx_seq++ : 0;
     frame[5] = CYW43455_SDPCM_DATA_CHANNEL;
     frame[7] = CYW43455_SDPCM_HEADER_LEN;
-    frame[9] = cyw43455_sdio_tx_max(s, s->tx_credit_seq);
+    frame[9] = s->tx_credit_limit;
+    if (frame == s->f2_rx_frame) {
+        s->tx_credit_update_pending = false;
+    }
     frame[CYW43455_SDPCM_HEADER_LEN] =
         CYW43455_BCDC_PROTO_VER << 4;
     memcpy(frame + CYW43455_SDPCM_HEADER_LEN +
@@ -3485,6 +3788,13 @@ static ssize_t cyw43455_sdio_receive(NetClientState *nc,
         s->rx_multicast_bytes += size;
     }
 
+    if (frame != s->f2_rx_frame) {
+        if (s->rx_glom_count == s->rx_glom_max_frames) {
+            s->rx_glom_ready = true;
+            cyw43455_sdio_advance_rx(s);
+        }
+        return size;
+    }
     s->f2_rx_len = stored_len;
     s->f2_rx_pos = 0;
     s->sdio_intstatus |= CYW43455_I_HMB_FRAME_IND;
@@ -3499,7 +3809,8 @@ static void cyw43455_sdio_link_status_changed(NetClientState *nc)
     CYW43455SDIOState *s = qemu_get_nic_opaque(nc);
     bool link_up = !nc->link_down;
 
-    if (!s->auto_associate || !s->backend_link_events_armed) {
+    if (!s->auto_associate || !s->backend_link_events_armed ||
+        !s->association_requested) {
         return;
     }
 
@@ -3511,6 +3822,13 @@ static void cyw43455_sdio_link_status_changed(NetClientState *nc)
     }
 
     s->link_event_up = link_up;
+    if (!link_up && !s->rx_glom_super_pending) {
+        timer_del(s->rx_glom_timer);
+        s->rx_glom_count = 0;
+        s->rx_glom_len = 0;
+        s->rx_glom_ready = false;
+    }
+    s->link_ssid_pending = false;
     s->link_event_pending = true;
     cyw43455_sdio_advance_rx(s);
     if (link_up) {
@@ -3544,6 +3862,13 @@ static void cyw43455_sdio_realize(DeviceState *device, Error **errp)
                    CYW43455_TX_CREDIT_WINDOW_MAX);
         return;
     }
+    if (!s->rx_glom_max_frames ||
+        s->rx_glom_max_frames > CYW43455_RX_GLOM_MAX ||
+        s->rx_glom_delay_ms > 1000) {
+        error_setg(errp, "rx-glom-max-frames must be 1..%u and "
+                   "rx-glom-delay-ms must be 0..1000", CYW43455_RX_GLOM_MAX);
+        return;
+    }
     if (!cyw43455_sdio_chanspec_info(s->ap_chanspec, &control_channel,
                                      &bandwidth_mhz)) {
         error_setg(errp, "invalid 2.4 GHz AP chanspec 0x%04x",
@@ -3553,6 +3878,8 @@ static void cyw43455_sdio_realize(DeviceState *device, Error **errp)
 
     s->tx_credit_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                       cyw43455_sdio_emit_tx_credit, s);
+    s->rx_glom_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                    cyw43455_sdio_rx_glom_timeout, s);
 
     if (!memcmp(&s->conf.macaddr, &zero_mac, sizeof(zero_mac))) {
         memcpy(s->conf.macaddr.a, cyw43455_sdio_default_mac,
@@ -3580,6 +3907,8 @@ static void cyw43455_sdio_unrealize(DeviceState *device)
     }
     timer_free(s->tx_credit_timer);
     s->tx_credit_timer = NULL;
+    timer_free(s->rx_glom_timer);
+    s->rx_glom_timer = NULL;
     qemu_del_nic(s->nic);
     s->nic = NULL;
 }
@@ -3665,6 +3994,48 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         s->roam_trigger = 0;
         s->roam_delta = 0;
     }
+    if (version_id < 28) {
+        s->rx_glom_align = 4;
+        /* Older streams retained the last completed TX frame in this buffer. */
+        if (!s->transfer_write || s->transfer_func != 2 ||
+            !s->transfer_remaining) {
+            s->f2_tx_len = 0;
+        }
+        s->tx_credit_limit = s->tx_credit_seq + s->tx_credit_window;
+        s->tx_credit_update_pending = false;
+        s->association_requested = s->firmware_connected ||
+                                   (s->link_event_pending && s->link_event_up);
+        s->link_ssid_pending = false;
+        s->rx_glom_count = 0;
+        s->rx_glom_len = 0;
+        s->rx_glom_ready = false;
+        s->rx_glom_super_pending = false;
+    }
+    if (s->rx_glom_align < 4 || s->rx_glom_align > 128 ||
+        (s->rx_glom_align & (s->rx_glom_align - 1)) ||
+        s->rx_glom_count > s->rx_glom_max_frames ||
+        s->rx_glom_count > CYW43455_RX_GLOM_MAX ||
+        s->rx_glom_len > sizeof(s->rx_glom_frame) ||
+        (s->rx_glom_count && s->rx_glom_len < CYW43455_SDPCM_HEADER_LEN) ||
+        (!s->rx_glom_count && (s->rx_glom_ready || s->rx_glom_super_pending)) ||
+        (s->rx_glom_ready && s->rx_glom_super_pending)) {
+        return -EINVAL;
+    }
+    if (s->rx_glom_count) {
+        uint32_t total = 0;
+
+        for (i = 0; i < s->rx_glom_count; i++) {
+            if (s->rx_glom_lengths[i] < CYW43455_SDPCM_HEADER_LEN +
+                (i == 0 ? CYW43455_SDPCM_HEADER_LEN : 0) ||
+                s->rx_glom_lengths[i] % s->rx_glom_align) {
+                return -EINVAL;
+            }
+            total += s->rx_glom_lengths[i];
+        }
+        if (total != s->rx_glom_len) {
+            return -EINVAL;
+        }
+    }
     if (s->multicast_count > CYW43455_MULTICAST_MAX) {
         return -EINVAL;
     }
@@ -3724,7 +4095,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 27,
+    .version_id = 28,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -3829,6 +4200,20 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT32_V(bcn_timeout, CYW43455SDIOState, 26),
         VMSTATE_INT32_V(roam_trigger, CYW43455SDIOState, 27),
         VMSTATE_INT32_V(roam_delta, CYW43455SDIOState, 27),
+        VMSTATE_UINT8_V(tx_credit_limit, CYW43455SDIOState, 28),
+        VMSTATE_BOOL_V(tx_credit_update_pending, CYW43455SDIOState, 28),
+        VMSTATE_BOOL_V(association_requested, CYW43455SDIOState, 28),
+        VMSTATE_BOOL_V(link_ssid_pending, CYW43455SDIOState, 28),
+        VMSTATE_UINT8_V(rx_glom_count, CYW43455SDIOState, 28),
+        VMSTATE_UINT16_V(rx_glom_align, CYW43455SDIOState, 28),
+        VMSTATE_UINT16_ARRAY_V(rx_glom_lengths, CYW43455SDIOState,
+                              CYW43455_RX_GLOM_MAX, 28),
+        VMSTATE_UINT8_ARRAY_V(rx_glom_frame, CYW43455SDIOState,
+                             CYW43455_F2_FRAME_MAX, 28),
+        VMSTATE_UINT32_V(rx_glom_len, CYW43455SDIOState, 28),
+        VMSTATE_BOOL_V(rx_glom_ready, CYW43455SDIOState, 28),
+        VMSTATE_BOOL_V(rx_glom_super_pending, CYW43455SDIOState, 28),
+        VMSTATE_TIMER_PTR_V(rx_glom_timer, CYW43455SDIOState, 28),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -6890,6 +7275,12 @@ static const Property cyw43455_sdio_properties[] = {
                       CYW43455_TX_CREDIT_WINDOW_DEFAULT),
     DEFINE_PROP_BOOL("auto-associate", CYW43455SDIOState,
                      auto_associate, true),
+    DEFINE_PROP_BOOL("explicit-association", CYW43455SDIOState,
+                     explicit_association, false),
+    DEFINE_PROP_UINT8("rx-glom-max-frames", CYW43455SDIOState,
+                      rx_glom_max_frames, 1),
+    DEFINE_PROP_UINT32("rx-glom-delay-ms", CYW43455SDIOState,
+                       rx_glom_delay_ms, 1),
     DEFINE_PROP_UINT32("ap-chanspec", CYW43455SDIOState,
                        ap_chanspec, CYW43455_CHANSPEC_2G_CH1_20MHZ),
 };
