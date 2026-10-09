@@ -61,6 +61,7 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define CPRMAN_OFFSET           0x101000 /* Clock Management */
 #define RNG200_OFFSET           0x104000
 #define GPIO_OFFSET             0x200000
+#define PIXELVALVE4_OFFSET      0x216000
 #define PIXELVALVE2_OFFSET      0x20a000
 #define UART0_OFFSET            0x201000 /* PL011 */
 #define MMCI0_OFFSET            0x202000 /* Legacy MMC */
@@ -100,6 +101,14 @@ uint64_t raspi4_board_ram_size(uint32_t board_rev);
 #define HDMI0_METADATA_OFFSET   0xF01F00
 #define HDMI0_CEC_OFFSET        0xF04300
 #define HDMI0_DDC_OFFSET        0xF04500
+#define HDMI1_CSC_OFFSET        0xF00280
+#define HDMI1_DVP_OFFSET        0xF05300
+#define HDMI1_CORE_OFFSET       0xF05700
+#define HDMI1_PHY_OFFSET        0xF05F00
+#define HDMI1_RM_OFFSET         0xF05F80
+#define HDMI1_PACKET_OFFSET     0xF06B00
+#define HDMI1_METADATA_OFFSET   0xF06F00
+#define HDMI1_CEC_OFFSET        0xF09300
 #define HDMI1_AUTO_I2C_OFFSET   0xF05B00
 #define HDMI1_DDC_OFFSET        0xF09500
 #define HDMI_SHARED_HD_OFFSET   0xF20000

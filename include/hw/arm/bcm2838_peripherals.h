@@ -102,11 +102,15 @@ struct BCM2838PeripheralState {
     BCM2835PWMState pwm1;
     BCM2711HVSState hvs;
     BCM2711V3DState v3d;
+    BCM2835FBState hdmi1_fb;
     BCM2711PixelValveState pixelvalve2;
+    BCM2711PixelValveState pixelvalve4;
     BCM2711HDMIState hdmi0;
+    BCM2711HDMIState hdmi1;
     BCM2711DVPState dvp;
     BCM2711HDMII2CState hdmi_i2c[2];
     I2CDDCState hdmi0_edid;
+    I2CDDCState hdmi1_edid;
     BCM2838AonIntrState aon_intr;
 
     OrIRQState mmc_irq_orgate;

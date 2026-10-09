@@ -8,6 +8,7 @@
 #define HW_DISPLAY_BCM2711_HDMI_H
 
 #include "hw/core/sysbus.h"
+#include "hw/core/clock.h"
 #include "qemu/audio.h"
 #include "qemu/fifo32.h"
 #include "qemu/timer.h"
@@ -47,6 +48,7 @@ struct BCM2711HDMIState {
     BCM2711HDMIRegBank banks[BCM2711_HDMI_BANKS];
     uint32_t regs[BCM2711_HDMI_REGS];
 
+    Clock *pixel_clock;
     qemu_irq audio_dreq;
     QEMUTimer mai_timer;
     Fifo32 mai_fifo;

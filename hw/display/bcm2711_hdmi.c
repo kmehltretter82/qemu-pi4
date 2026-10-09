@@ -8,6 +8,7 @@
 #include "qapi/error.h"
 #include "hw/display/bcm2711_hdmi.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
@@ -125,6 +126,24 @@ static uint32_t *bcm2711_hdmi_bank_reg(BCM2711HDMIState *s,
                                        hwaddr offset)
 {
     return &s->regs[s->banks[id].first + (offset >> 2)];
+}
+
+/*
+ * Linux vc5_hdmi_phy_init programs a 54 MHz reference, a 9.22 RM
+ * offset, and the VCO divider.  Derive the 8-bit TMDS pixel rate from them.
+ */
+static void bcm2711_hdmi_update_pixel_clock(BCM2711HDMIState *s)
+{
+    uint32_t offset = *bcm2711_hdmi_bank_reg(s, BCM2711_HDMI_RM, 0x018);
+    uint32_t divider = extract32(*bcm2711_hdmi_bank_reg(s, BCM2711_HDMI_PHY,
+                                                      0x028), 8, 8);
+    uint64_t rate = 0;
+
+    if (s->clock_enabled && divider && (offset & BIT(31))) {
+        rate = ((uint64_t)(offset & 0x7fffffff) * 54000000 * 2) /
+               ((1ULL << 22) * divider * 10);
+    }
+    clock_update_hz(s->pixel_clock, rate);
 }
 
 static uint32_t bcm2711_hdmi_mai_rate(BCM2711HDMIState *s)
@@ -492,6 +511,9 @@ static void bcm2711_hdmi_write(void *opaque, hwaddr offset, uint64_t value,
     }
 
     *reg = value;
+    if (bank->id == BCM2711_HDMI_RM || bank->id == BCM2711_HDMI_PHY) {
+        bcm2711_hdmi_update_pixel_clock(s);
+    }
 }
 
 static const MemoryRegionOps bcm2711_hdmi_ops = {
@@ -511,6 +533,7 @@ static void bcm2711_hdmi_reset_state(BCM2711HDMIState *s)
     BCM2711HDMIRegBank *dvp = &s->banks[BCM2711_HDMI_DVP];
 
     memset(s->regs, 0, sizeof(s->regs));
+    bcm2711_hdmi_update_pixel_clock(s);
     timer_del(&s->mai_timer);
     fifo32_reset(&s->mai_fifo);
     s->next_sample_ns = 0;
@@ -547,6 +570,7 @@ static void bcm2711_hdmi_clock_input(void *opaque, int irq, int level)
     BCM2711HDMIState *s = opaque;
 
     s->clock_enabled = level;
+    bcm2711_hdmi_update_pixel_clock(s);
     bcm2711_hdmi_update_audio(s);
     bcm2711_hdmi_update_dreq(s);
     bcm2711_hdmi_schedule_sample(s);
@@ -582,6 +606,7 @@ static int bcm2711_hdmi_post_load(void *opaque, int version_id)
         audio_be_set_active_out(s->audio_be, s->voice, false);
     }
     s->audio_active = false;
+    bcm2711_hdmi_update_pixel_clock(s);
     s->dreq_level = false;
     bcm2711_hdmi_update_audio(s);
     bcm2711_hdmi_update_dreq(s);
@@ -682,6 +707,7 @@ static void bcm2711_hdmi_init(Object *obj)
     timer_init_ns(&s->mai_timer, QEMU_CLOCK_VIRTUAL,
                   bcm2711_hdmi_sample, s);
 
+    s->pixel_clock = qdev_init_clock_out(DEVICE(obj), "pixel-clock");
     s->connected = true;
     object_property_add_bool(obj, "connected",
                              bcm2711_hdmi_get_connected,

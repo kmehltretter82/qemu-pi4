@@ -8,6 +8,7 @@
 #define HW_DISPLAY_BCM2711_PIXELVALVE_H
 
 #include "hw/core/sysbus.h"
+#include "hw/core/clock.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
 
@@ -23,6 +24,8 @@ struct BCM2711PixelValveState {
 
     MemoryRegion iomem;
     qemu_irq irq;
+    qemu_irq vblank;
+    Clock *pixel_clock;
     QEMUTimer *vblank_timer;
 
     uint32_t regs[BCM2711_PIXELVALVE_REGS];

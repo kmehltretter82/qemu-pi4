@@ -67,9 +67,9 @@
 #define HVS_CTL2_ALPHA_OPAQUE       0xfff
 #define HVS_PRIMARY_BASE            0x01000000
 #define HVS_OVERLAY_BASE            0x01100000
-#define HVS_TILED_RGB565_BASE       0x01200000
-#define HVS_TILED_RGBA8888_BASE     0x01300000
-#define HVS_TILED_HEIGHT            64
+#define HVS_COLUMN_RGB565_BASE       0x01200000
+#define HVS_COLUMN_RGBA8888_BASE     0x01300000
+#define HVS_COLUMN_HEIGHT            64
 
 #define PIXELVALVE2_BASE            0xfe20a000
 #define PV_CONTROL                  (PIXELVALVE2_BASE + 0x00)
@@ -509,22 +509,22 @@ static void test_hvs_scaled_composition(void)
                  HVS_DISPCTRL_ENABLE | (8U << 16) | 8);
     contents = display_screendump(qts, &length);
 
-    hvs_assert_ppm_pixel(contents, length, 0, 0, 248, 0, 0);
-    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 252, 0);
-    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 248);
-    hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 252, 248);
+    hvs_assert_ppm_pixel(contents, length, 0, 0, 255, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 255, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 255);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 255, 255, 255);
     hvs_assert_ppm_pixel(contents, length, 5, 5, 0, 0, 0);
-    hvs_assert_ppm_pixel(contents, length, 7, 7, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 7, 7, 255, 0, 0);
 
     /* Active display-list writes must update scanout without a list flip. */
     g_clear_pointer(&contents, g_free);
     hvs_write_dlist(qts, 9,
                     HVS_POS0_HFLIP | (2U << HVS_POS0_Y_SHIFT) | 2);
     contents = display_screendump(qts, &length);
-    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 0, 248);
-    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 252, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 0, 255);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 255, 0);
     hvs_assert_ppm_pixel(contents, length, 2, 5, 0, 0, 0);
-    hvs_assert_ppm_pixel(contents, length, 5, 5, 248, 252, 248);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 255, 255, 255);
 
     /* Linux DRM RGB888 uses B, G, R byte order on a little-endian guest. */
     g_clear_pointer(&contents, g_free);
@@ -572,9 +572,9 @@ static void test_hvs_scaled_composition(void)
                     HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT);
     hvs_write_dlist(qts, 16, 2 * sizeof(uint32_t));
     contents = display_screendump(qts, &length);
-    hvs_assert_ppm_pixel(contents, length, 2, 2, 124, 128, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 127, 128, 0);
     hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 255);
-    hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 255, 0, 0);
     hvs_assert_ppm_pixel(contents, length, 5, 5, 0, 0, 0);
 
     /* Plane alpha mixes with per-pixel coverage alpha. */
@@ -583,10 +583,10 @@ static void test_hvs_scaled_composition(void)
                     HVS_CTL2_ALPHA_MIX |
                     (0x800U << HVS_CTL2_ALPHA_SHIFT));
     contents = display_screendump(qts, &length);
-    hvs_assert_ppm_pixel(contents, length, 2, 2, 186, 64, 0);
-    hvs_assert_ppm_pixel(contents, length, 5, 2, 124, 0, 128);
-    hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 0, 0);
-    hvs_assert_ppm_pixel(contents, length, 5, 5, 124, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 191, 64, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 127, 0, 128);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 255, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 127, 0, 0);
 
     /* Premultiplied pixels carry color channels scaled by their alpha. */
     g_clear_pointer(&contents, g_free);
@@ -605,9 +605,9 @@ static void test_hvs_scaled_composition(void)
                     HVS_CTL2_ALPHA_PREMULT |
                     (HVS_CTL2_ALPHA_OPAQUE << HVS_CTL2_ALPHA_SHIFT));
     contents = display_screendump(qts, &length);
-    hvs_assert_ppm_pixel(contents, length, 2, 2, 124, 128, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 127, 128, 0);
     hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 255);
-    hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 255, 0, 0);
     hvs_assert_ppm_pixel(contents, length, 5, 5, 0, 0, 0);
 
     /* The two reflection flags are independent of scaling. */
@@ -615,11 +615,12 @@ static void test_hvs_scaled_composition(void)
     hvs_write_dlist(qts, 9,
                     HVS_POS0_VFLIP | HVS_POS0_HFLIP |
                     (2U << HVS_POS0_Y_SHIFT) | 2);
+    hvs_write_dlist(qts, 14, HVS_OVERLAY_BASE + 8);
     contents = display_screendump(qts, &length);
     hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 0, 0);
-    hvs_assert_ppm_pixel(contents, length, 5, 2, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 255, 0, 0);
     hvs_assert_ppm_pixel(contents, length, 2, 5, 0, 0, 255);
-    hvs_assert_ppm_pixel(contents, length, 5, 5, 124, 128, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 5, 127, 128, 0);
 
     /* A terminated list may use every advertised compositor layer. */
     g_clear_pointer(&contents, g_free);
@@ -643,46 +644,29 @@ static void test_hvs_scaled_composition(void)
     }
     hvs_write_dlist(qts, 16 * 8, HVS_CTL_END);
     contents = display_screendump(qts, &length);
-    hvs_assert_ppm_pixel(contents, length, 0, 0, 248, 0, 0);
-    hvs_assert_ppm_pixel(contents, length, 7, 7, 248, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 0, 0, 255, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 7, 7, 255, 0, 0);
     qtest_quit(qts);
 }
 
-/* T tiles contain 8x8 64-byte microtiles, arranged in 4 KiB supertiles. */
-#define HVS_T_TILE_BYTES 4096
-#define HVS_TILED_RGB565_WIDTH 128
-#define HVS_TILED_RGBA8888_WIDTH 64
-#define HVS_TILED_COLUMNS 2
-#define HVS_TILED_ROWS 2
+/* SAND256 has 256-byte column rows. */
+#define HVS_COLUMN_BYTES 256
+#define HVS_COLUMN_RGB565_WIDTH 256
+#define HVS_COLUMN_RGBA8888_WIDTH 128
+#define HVS_COLUMN_COLUMNS 2
 
-static size_t hvs_tiled_offset(unsigned int bytes_per_pixel,
+static size_t hvs_column_offset(unsigned int bytes_per_pixel,
                                unsigned int tile_columns,
                                unsigned int x, unsigned int y)
 {
-    static const uint8_t even_subtile_map[] = { 0, 3, 1, 2 };
-    static const uint8_t odd_subtile_map[] = { 2, 1, 3, 0 };
-    unsigned int utile_width = bytes_per_pixel == 2 ? 8 : 4;
-    unsigned int utile_x = x / utile_width;
-    unsigned int utile_y = y / 4;
-    unsigned int tile_x = utile_x / 8;
-    unsigned int tile_y = utile_y / 8;
-    unsigned int physical_tile_x = tile_y & 1 ?
-        tile_columns - tile_x - 1 : tile_x;
-    unsigned int subtile = ((utile_y >> 2) & 1) * 2 +
-                           ((utile_x >> 2) & 1);
-    unsigned int subtile_offset =
-        (tile_y & 1 ? odd_subtile_map[subtile] : even_subtile_map[subtile]) *
-        1024;
-    unsigned int utile_offset = ((utile_y & 3) * 4 + (utile_x & 3)) * 64;
-    unsigned int pixel_offset = ((y & 3) * utile_width +
-                                 (x % utile_width)) * bytes_per_pixel;
+    unsigned int byte_x = x * bytes_per_pixel;
 
-    g_assert_cmpuint(tile_x, <, tile_columns);
-    return ((size_t)tile_y * tile_columns + physical_tile_x) *
-        HVS_T_TILE_BYTES + subtile_offset + utile_offset + pixel_offset;
+    g_assert_cmpuint(byte_x / HVS_COLUMN_BYTES, <, tile_columns);
+    return (size_t)(byte_x / HVS_COLUMN_BYTES) * HVS_COLUMN_HEIGHT *
+           HVS_COLUMN_BYTES + y * HVS_COLUMN_BYTES + byte_x % HVS_COLUMN_BYTES;
 }
 
-static uint16_t hvs_tiled_rgb565_pixel(unsigned int x, unsigned int y)
+static uint16_t hvs_column_rgb565_pixel(unsigned int x, unsigned int y)
 {
     uint16_t red = (x * 5 + y * 3) & 0x1f;
     uint16_t green = (x * 11 + y * 7) & 0x3f;
@@ -691,31 +675,31 @@ static uint16_t hvs_tiled_rgb565_pixel(unsigned int x, unsigned int y)
     return (red << 11) | (green << 5) | blue;
 }
 
-static void hvs_write_tiled_rgb565_buffer(QTestState *qts)
+static void hvs_write_column_rgb565_buffer(QTestState *qts)
 {
-    const size_t tiled_size = HVS_TILED_COLUMNS * HVS_TILED_ROWS *
-        HVS_T_TILE_BYTES;
-    g_autofree uint8_t *tiles = g_malloc0(tiled_size);
+    const size_t column_size = HVS_COLUMN_COLUMNS * HVS_COLUMN_HEIGHT *
+        HVS_COLUMN_BYTES;
+    g_autofree uint8_t *tiles = g_malloc0(column_size);
 
-    for (unsigned int y = 0; y < HVS_TILED_HEIGHT; y++) {
-        for (unsigned int x = 0; x < HVS_TILED_RGB565_WIDTH; x++) {
-            size_t offset = hvs_tiled_offset(2, HVS_TILED_COLUMNS, x, y);
+    for (unsigned int y = 0; y < HVS_COLUMN_HEIGHT; y++) {
+        for (unsigned int x = 0; x < HVS_COLUMN_RGB565_WIDTH; x++) {
+            size_t offset = hvs_column_offset(2, HVS_COLUMN_COLUMNS, x, y);
 
-            stw_le_p(tiles + offset, hvs_tiled_rgb565_pixel(x, y));
+            stw_le_p(tiles + offset, hvs_column_rgb565_pixel(x, y));
         }
     }
-    qtest_memwrite(qts, HVS_TILED_RGB565_BASE, tiles, tiled_size);
+    qtest_memwrite(qts, HVS_COLUMN_RGB565_BASE, tiles, column_size);
 }
 
 static void hvs_rgb565_components(uint16_t pixel, uint8_t *red,
                                   uint8_t *green, uint8_t *blue)
 {
-    *red = ((pixel >> 11) & 0x1f) << 3;
-    *green = ((pixel >> 5) & 0x3f) << 2;
-    *blue = (pixel & 0x1f) << 3;
+    *red = ((pixel >> 11) & 0x1f) << 3 | ((pixel >> 11) & 0x1f) >> 2;
+    *green = ((pixel >> 5) & 0x3f) << 2 | ((pixel >> 5) & 0x3f) >> 4;
+    *blue = (pixel & 0x1f) << 3 | (pixel & 0x1f) >> 2;
 }
 
-static void hvs_tiled_rgba8888_components(unsigned int x, unsigned int y,
+static void hvs_column_rgba8888_components(unsigned int x, unsigned int y,
                                            uint8_t *red, uint8_t *green,
                                            uint8_t *blue)
 {
@@ -724,7 +708,7 @@ static void hvs_tiled_rgba8888_components(unsigned int x, unsigned int y,
     *blue = x * 7 + y * 53;
 }
 
-static void hvs_program_tiled_plane(QTestState *qts, uint32_t base,
+static void hvs_program_column_plane(QTestState *qts, uint32_t base,
                                     unsigned int width, unsigned int height,
                                     unsigned int columns, uint32_t format,
                                     uint32_t order, bool hflip)
@@ -742,11 +726,11 @@ static void hvs_program_tiled_plane(QTestState *qts, uint32_t base,
     hvs_write_dlist(qts, 4, 0);
     hvs_write_dlist(qts, 5, base);
     hvs_write_dlist(qts, 6, 0);
-    hvs_write_dlist(qts, 7, columns);
+    hvs_write_dlist(qts, 7, height);
     hvs_write_dlist(qts, 8, HVS_CTL_END);
 }
 
-static void hvs_program_unsupported_scaled_tiled_plane(QTestState *qts)
+static void hvs_program_scaled_column_plane(QTestState *qts)
 {
     const unsigned int dlist = 32;
 
@@ -762,15 +746,15 @@ static void hvs_program_unsupported_scaled_tiled_plane(QTestState *qts)
     hvs_write_dlist(qts, dlist + 3,
                     (32U << HVS_POS1_HEIGHT_SHIFT) | 64);
     hvs_write_dlist(qts, dlist + 4,
-                    (HVS_TILED_HEIGHT << HVS_POS2_HEIGHT_SHIFT) | 128);
+                    (HVS_COLUMN_HEIGHT << HVS_POS2_HEIGHT_SHIFT) | 128);
     hvs_write_dlist(qts, dlist + 5, 0);
-    hvs_write_dlist(qts, dlist + 6, HVS_TILED_RGB565_BASE);
+    hvs_write_dlist(qts, dlist + 6, HVS_COLUMN_RGB565_BASE);
     hvs_write_dlist(qts, dlist + 7, 0);
-    hvs_write_dlist(qts, dlist + 8, 2);
+    hvs_write_dlist(qts, dlist + 8, HVS_COLUMN_HEIGHT);
     hvs_write_dlist(qts, dlist + 9, HVS_CTL_END);
 }
 
-static void test_hvs_t_tiled_rgb_scanout(void)
+static void test_hvs_column_rgb_scanout(void)
 {
     static const unsigned int sample_x[] = {
         0, 7, 8, 31, 32, 63, 64, 95, 96, 127,
@@ -778,41 +762,41 @@ static void test_hvs_t_tiled_rgb_scanout(void)
     static const unsigned int sample_y[] = {
         0, 3, 4, 15, 16, 31, 32, 35, 48, 63,
     };
-    const size_t tiled_size = HVS_TILED_COLUMNS * HVS_TILED_ROWS *
-        HVS_T_TILE_BYTES;
+    const size_t column_size = HVS_COLUMN_COLUMNS * HVS_COLUMN_HEIGHT *
+        HVS_COLUMN_BYTES;
     QTestState *qts = display_start();
-    g_autofree uint8_t *tiles = g_malloc0(tiled_size);
+    g_autofree uint8_t *tiles = g_malloc0(column_size);
     g_autofree char *contents = NULL;
     size_t length;
 
-    hvs_write_tiled_rgb565_buffer(qts);
-    hvs_program_tiled_plane(qts, HVS_TILED_RGB565_BASE,
-                            HVS_TILED_RGB565_WIDTH, HVS_TILED_HEIGHT,
-                            HVS_TILED_COLUMNS,
+    hvs_write_column_rgb565_buffer(qts);
+    hvs_program_column_plane(qts, HVS_COLUMN_RGB565_BASE,
+                            HVS_COLUMN_RGB565_WIDTH, HVS_COLUMN_HEIGHT,
+                            HVS_COLUMN_COLUMNS,
                             HVS_CTL_FORMAT_RGB565, HVS_CTL_ORDER_XRGB,
                             false);
     qtest_writel(qts, HVS_DISPLIST0, 0);
     qtest_writel(qts, HVS_DISPCTRL0,
-                 HVS_DISPCTRL_ENABLE | (HVS_TILED_RGB565_WIDTH << 16) |
-                 HVS_TILED_HEIGHT);
+                 HVS_DISPCTRL_ENABLE | (HVS_COLUMN_RGB565_WIDTH << 16) |
+                 HVS_COLUMN_HEIGHT);
     contents = display_screendump(qts, &length);
     for (unsigned int y_index = 0; y_index < G_N_ELEMENTS(sample_y);
          y_index++) {
         for (unsigned int x_index = 0; x_index < G_N_ELEMENTS(sample_x);
              x_index++) {
             uint8_t red, green, blue;
-            uint16_t pixel = hvs_tiled_rgb565_pixel(sample_x[x_index],
+            uint16_t pixel = hvs_column_rgb565_pixel(sample_x[x_index],
                                                      sample_y[y_index]);
 
             hvs_rgb565_components(pixel, &red, &green, &blue);
             hvs_assert_ppm_pixel_sized(contents, length,
-                                       HVS_TILED_RGB565_WIDTH,
-                                       HVS_TILED_HEIGHT, sample_x[x_index],
+                                       HVS_COLUMN_RGB565_WIDTH,
+                                       HVS_COLUMN_HEIGHT, sample_x[x_index],
                                        sample_y[y_index], red, green, blue);
         }
     }
 
-    /* HVS horizontal reflection is independent of T-tile traversal. */
+    /* HVS horizontal reflection is independent of column addressing. */
     g_clear_pointer(&contents, g_free);
     hvs_write_dlist(qts, 1, HVS_POS0_HFLIP);
     contents = display_screendump(qts, &length);
@@ -821,44 +805,50 @@ static void test_hvs_t_tiled_rgb_scanout(void)
         for (unsigned int x_index = 0; x_index < G_N_ELEMENTS(sample_x);
              x_index++) {
             uint8_t red, green, blue;
-            uint16_t pixel = hvs_tiled_rgb565_pixel(
-                HVS_TILED_RGB565_WIDTH - 1 - sample_x[x_index],
+            uint16_t pixel = hvs_column_rgb565_pixel(
+                HVS_COLUMN_RGB565_WIDTH - 1 - sample_x[x_index],
                 sample_y[y_index]);
 
             hvs_rgb565_components(pixel, &red, &green, &blue);
             hvs_assert_ppm_pixel_sized(contents, length,
-                                       HVS_TILED_RGB565_WIDTH,
-                                       HVS_TILED_HEIGHT, sample_x[x_index],
+                                       HVS_COLUMN_RGB565_WIDTH,
+                                       HVS_COLUMN_HEIGHT, sample_x[x_index],
                                        sample_y[y_index], red, green, blue);
         }
     }
 
-    /* A scaled T plane must leave the last valid scanout untouched. */
+    /* Cropping and vertical reflection start at the adjusted pointer. */
     g_clear_pointer(&contents, g_free);
-    hvs_program_unsupported_scaled_tiled_plane(qts);
-    qtest_writel(qts, HVS_DISPLIST0, 32);
+    hvs_write_dlist(qts, 1, HVS_POS0_VFLIP);
+    hvs_write_dlist(qts, 5, HVS_COLUMN_RGB565_BASE +
+                             (HVS_COLUMN_HEIGHT - 1) * HVS_COLUMN_BYTES);
     contents = display_screendump(qts, &length);
     {
         uint8_t red, green, blue;
-        uint16_t pixel = hvs_tiled_rgb565_pixel(
-            HVS_TILED_RGB565_WIDTH - 1, 0);
+        uint16_t pixel = hvs_column_rgb565_pixel(0, HVS_COLUMN_HEIGHT - 1);
 
         hvs_rgb565_components(pixel, &red, &green, &blue);
         hvs_assert_ppm_pixel_sized(contents, length,
-                                   HVS_TILED_RGB565_WIDTH,
-                                   HVS_TILED_HEIGHT, 0, 0,
-                                   red, green, blue);
+                                   HVS_COLUMN_RGB565_WIDTH, HVS_COLUMN_HEIGHT,
+                                   0, 0, red, green, blue);
     }
-
-    /* 32bpp T tiles have a narrower 32-pixel 4 KiB tile. */
     g_clear_pointer(&contents, g_free);
-    memset(tiles, 0, tiled_size);
-    for (unsigned int y = 0; y < HVS_TILED_HEIGHT; y++) {
-        for (unsigned int x = 0; x < HVS_TILED_RGBA8888_WIDTH; x++) {
-            uint8_t red, green, blue;
-            size_t offset = hvs_tiled_offset(4, HVS_TILED_COLUMNS, x, y);
+    hvs_program_scaled_column_plane(qts);
+    qtest_writel(qts, HVS_DISPLIST0, 32);
+    contents = display_screendump(qts, &length);
+    hvs_assert_ppm_pixel_sized(contents, length,
+                               HVS_COLUMN_RGB565_WIDTH, HVS_COLUMN_HEIGHT,
+                               0, 0, 0, 0, 0);
 
-            hvs_tiled_rgba8888_components(x, y, &red, &green, &blue);
+    /* A 256-byte column row holds 64 RGBA8888 pixels. */
+    g_clear_pointer(&contents, g_free);
+    memset(tiles, 0, column_size);
+    for (unsigned int y = 0; y < HVS_COLUMN_HEIGHT; y++) {
+        for (unsigned int x = 0; x < HVS_COLUMN_RGBA8888_WIDTH; x++) {
+            uint8_t red, green, blue;
+            size_t offset = hvs_column_offset(4, HVS_COLUMN_COLUMNS, x, y);
+
+            hvs_column_rgba8888_components(x, y, &red, &green, &blue);
             /* Guest little-endian ARGB is stored B, G, R, A. */
             tiles[offset] = blue;
             tiles[offset + 1] = green;
@@ -866,29 +856,29 @@ static void test_hvs_t_tiled_rgb_scanout(void)
             tiles[offset + 3] = 0xff;
         }
     }
-    qtest_memwrite(qts, HVS_TILED_RGBA8888_BASE, tiles, tiled_size);
-    hvs_program_tiled_plane(qts, HVS_TILED_RGBA8888_BASE,
-                            HVS_TILED_RGBA8888_WIDTH, HVS_TILED_HEIGHT,
-                            HVS_TILED_COLUMNS,
+    qtest_memwrite(qts, HVS_COLUMN_RGBA8888_BASE, tiles, column_size);
+    hvs_program_column_plane(qts, HVS_COLUMN_RGBA8888_BASE,
+                            HVS_COLUMN_RGBA8888_WIDTH, HVS_COLUMN_HEIGHT,
+                            HVS_COLUMN_COLUMNS,
                             HVS_CTL_FORMAT_RGBA8888, HVS_CTL_ORDER_ARGB,
                             false);
     qtest_writel(qts, HVS_DISPLIST0, 0);
     qtest_writel(qts, HVS_DISPCTRL0,
-                 HVS_DISPCTRL_ENABLE | (HVS_TILED_RGBA8888_WIDTH << 16) |
-                 HVS_TILED_HEIGHT);
+                 HVS_DISPCTRL_ENABLE | (HVS_COLUMN_RGBA8888_WIDTH << 16) |
+                 HVS_COLUMN_HEIGHT);
     contents = display_screendump(qts, &length);
     for (unsigned int y_index = 0; y_index < G_N_ELEMENTS(sample_y);
          y_index++) {
         for (unsigned int x_index = 0; x_index < G_N_ELEMENTS(sample_x);
              x_index++) {
-            unsigned int x = sample_x[x_index] % HVS_TILED_RGBA8888_WIDTH;
+            unsigned int x = sample_x[x_index] % HVS_COLUMN_RGBA8888_WIDTH;
             uint8_t red, green, blue;
 
-            hvs_tiled_rgba8888_components(x, sample_y[y_index],
+            hvs_column_rgba8888_components(x, sample_y[y_index],
                                            &red, &green, &blue);
             hvs_assert_ppm_pixel_sized(contents, length,
-                                       HVS_TILED_RGBA8888_WIDTH,
-                                       HVS_TILED_HEIGHT, x, sample_y[y_index],
+                                       HVS_COLUMN_RGBA8888_WIDTH,
+                                       HVS_COLUMN_HEIGHT, x, sample_y[y_index],
                                        red, green, blue);
         }
     }
@@ -914,12 +904,18 @@ static void hvs_program_ppf_reference(QTestState *qts)
     }
     qtest_memwrite(qts, HVS_OVERLAY_BASE, source, sizeof(source));
 
-    /*
-     * A full RGB PPF list has LBM, horizontal and vertical PPF state, and
-     * four coefficient pointers after the source pitch.  The values are not
-     * decoded by the bounded compositor yet; their presence selects its
-     * Linux PPF approximation instead of the short-list nearest path.
-     */
+    /* Program the PPF phase/scale and the Pi 400's captured kernel. */
+    {
+        static const uint32_t kernel[] = {
+            0x07ebfc00, 0x07e3edf8, 0x004805fd, 0x01dca432,
+            0x0355769b, 0x0001c6e3, 0x0355769b, 0x01dca432,
+            0x004805fd, 0x07e3edf8, 0x07ebfc00,
+        };
+
+        for (unsigned int i = 0; i < G_N_ELEMENTS(kernel); i++) {
+            hvs_write_dlist(qts, 32 + i, kernel[i]);
+        }
+    }
     hvs_write_dlist(qts, 0,
                     HVS_CTL_VALID | (17U << HVS_CTL_SIZE_SHIFT) |
                     (HVS_CTL_ORDER_ARGB << HVS_CTL_ORDER_SHIFT) |
@@ -935,14 +931,61 @@ static void hvs_program_ppf_reference(QTestState *qts)
     hvs_write_dlist(qts, 7, 0xc0c0c0c0);
     hvs_write_dlist(qts, 8, 4 * sizeof(uint32_t));
     hvs_write_dlist(qts, 9, 0);  /* LBM base */
-    hvs_write_dlist(qts, 10, 0); /* horizontal PPF */
-    hvs_write_dlist(qts, 11, 0); /* vertical PPF */
+    hvs_write_dlist(qts, 10, 0x40800060); /* horizontal PPF */
+    hvs_write_dlist(qts, 11, 0x40800060); /* vertical PPF */
     hvs_write_dlist(qts, 12, 0); /* vertical PPF context */
-    hvs_write_dlist(qts, 13, 0); /* horizontal luma PPF kernel */
-    hvs_write_dlist(qts, 14, 0); /* vertical luma PPF kernel */
-    hvs_write_dlist(qts, 15, 0); /* horizontal chroma PPF kernel */
-    hvs_write_dlist(qts, 16, 0); /* vertical chroma PPF kernel */
+    hvs_write_dlist(qts, 13, 32); /* horizontal luma PPF kernel */
+    hvs_write_dlist(qts, 14, 32); /* vertical luma PPF kernel */
+    hvs_write_dlist(qts, 15, 32); /* horizontal chroma PPF kernel */
+    hvs_write_dlist(qts, 16, 32); /* vertical chroma PPF kernel */
     hvs_write_dlist(qts, 17, HVS_CTL_END);
+}
+
+#include "bcm2711-hvs-captures.h"
+
+static void test_hvs_hardware_captures(void)
+{
+    QTestState *qts = display_start();
+
+    for (unsigned int i = 0; i < G_N_ELEMENTS(hvs_references); i++) {
+        const HVSReference *ref = &hvs_references[i];
+        g_autofree char *contents = NULL;
+        size_t length;
+
+        g_test_message("Pi 400 capture: %s", ref->name);
+        for (unsigned int c = 0; c < 3; c++) {
+            qtest_writel(qts, HVS_DISPCTRL0 + c * HVS_CHANNEL_STRIDE, 0);
+        }
+        qtest_writel(qts, HVS_BASE + 0x18, ref->channel << 30);
+        qtest_writel(qts, HVS_BASE + 0x14, 3U << 30);
+        for (unsigned int j = 0; j < ref->regions_count; j++) {
+            const HVSReferenceRegion *region = &ref->regions[j];
+            gsize size;
+            g_autofree uint8_t *data = g_base64_decode(region->data, &size);
+
+            qtest_memwrite(qts, region->base, data, size);
+        }
+        for (unsigned int j = 0; j < ref->segments_count; j++) {
+            const HVSReferenceSegment *segment = &ref->segments[j];
+
+            for (unsigned int k = 0; k < segment->length; k++) {
+                hvs_write_dlist(qts, segment->offset + k, segment->words[k]);
+            }
+        }
+        qtest_writel(qts, HVS_DISPLIST0 + 4 * ref->channel, ref->start);
+        qtest_writel(qts, HVS_DISPCTRL0 + HVS_CHANNEL_STRIDE * ref->channel,
+                     HVS_DISPCTRL_ENABLE | (ref->width << 16) | ref->height);
+        contents = display_screendump(qts, &length);
+        for (unsigned int j = 0; j < ref->pixels_count; j++) {
+            const HVSReferencePixel *pixel = &ref->pixels[j];
+
+            hvs_assert_ppm_pixel_sized(contents, length,
+                                       ref->width, ref->height,
+                                       pixel->x, pixel->y, pixel->rgb >> 16,
+                                       pixel->rgb >> 8, pixel->rgb);
+        }
+    }
+    qtest_quit(qts);
 }
 
 static void test_hvs_ppf_filter_reference(void)
@@ -967,9 +1010,9 @@ static void test_hvs_ppf_filter_reference(void)
      * The software Mitchell filter is intentionally close to, rather than
      * bit-identical with, the hardware's quantized coefficient datapath.
      */
-    hvs_assert_ppm_pixel_close(contents, length, 3, 0, 237, 0, 18, 20);
-    hvs_assert_ppm_pixel_close(contents, length, 4, 0, 111, 0, 144, 20);
-    hvs_assert_ppm_pixel_close(contents, length, 5, 0, 2, 0, 253, 20);
+    hvs_assert_ppm_pixel_close(contents, length, 3, 0, 237, 0, 18, 0);
+    hvs_assert_ppm_pixel_close(contents, length, 4, 0, 111, 0, 144, 0);
+    hvs_assert_ppm_pixel_close(contents, length, 5, 0, 2, 0, 253, 0);
 
     qtest_quit(qts);
 }
@@ -1010,10 +1053,10 @@ static void hvs_program_tpz_reference(QTestState *qts)
     hvs_write_dlist(qts, 7, 0xc0c0c0c0);
     hvs_write_dlist(qts, 8, 8 * sizeof(uint32_t));
     hvs_write_dlist(qts, 9, 0);  /* LBM base */
-    hvs_write_dlist(qts, 10, 0); /* horizontal TPZ */
-    hvs_write_dlist(qts, 11, 0); /* horizontal TPZ reciprocal */
-    hvs_write_dlist(qts, 12, 0); /* vertical TPZ */
-    hvs_write_dlist(qts, 13, 0); /* vertical TPZ reciprocal */
+    hvs_write_dlist(qts, 10, 0x02000000); /* horizontal TPZ */
+    hvs_write_dlist(qts, 11, 0x7fff); /* horizontal TPZ reciprocal */
+    hvs_write_dlist(qts, 12, 0x02000000); /* vertical TPZ */
+    hvs_write_dlist(qts, 13, 0x7fff); /* vertical TPZ reciprocal */
     hvs_write_dlist(qts, 14, 0); /* vertical TPZ context */
     hvs_write_dlist(qts, 15, HVS_CTL_END);
 }
@@ -1844,9 +1887,6 @@ static void test_display_migration(void)
     qtest_writel(source, HDMI_SCHEDULER_CONTROL,
                  HDMI_SCHEDULER_MODE_HDMI);
     qtest_writel(source, HDMI0_PHY_BASE, 0x89abcdef);
-    hdmi_set_connected(source, false);
-    g_assert_false(hdmi_get_connected(source));
-    g_assert_cmphex(qtest_readl(source, HDMI_HOTPLUG), ==, 0);
 
     /*
      * Migrate a live stereo MAI stream with two frames queued and a DMA
@@ -1882,6 +1922,9 @@ static void test_display_migration(void)
     g_assert_cmphex(qtest_readl(source, BSC_DATA_IN(HDMI0_DDC_BASE, 0)),
                     ==, 0x10);
 
+    hdmi_set_connected(source, false);
+    g_assert_false(hdmi_get_connected(source));
+    g_assert_cmphex(qtest_readl(source, HDMI_HOTPLUG), ==, 0);
     qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
     tmpdir = g_dir_make_tmp("bcm2711-display-migration-XXXXXX", &error);
     g_assert_no_error(error);
@@ -1910,10 +1953,10 @@ static void test_display_migration(void)
     g_assert_cmphex(qtest_readl(destination, HVS_DISPSTAT0), ==,
                     HVS_DISPSTAT_RUN);
     contents = display_screendump(destination, &length);
-    hvs_assert_ppm_pixel(contents, length, 0, 0, 248, 0, 0);
-    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 252, 0);
-    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 248);
-    hvs_assert_ppm_pixel(contents, length, 2, 5, 248, 252, 248);
+    hvs_assert_ppm_pixel(contents, length, 0, 0, 255, 0, 0);
+    hvs_assert_ppm_pixel(contents, length, 2, 2, 0, 255, 0);
+    hvs_assert_ppm_pixel(contents, length, 5, 2, 0, 0, 255);
+    hvs_assert_ppm_pixel(contents, length, 2, 5, 255, 255, 255);
     hvs_assert_ppm_pixel(contents, length, 5, 5, 0, 0, 0);
 
     g_assert_cmphex(qtest_readl(destination, HDMI_RAM_PACKET_CONFIG), ==,
@@ -2018,9 +2061,9 @@ static void test_hvs_ppf_filter_migration(void)
     g_assert_cmphex(qtest_readl(destination, HVS_DISPCTRL0), ==,
                     hvs_control);
     contents = display_screendump(destination, &length);
-    hvs_assert_ppm_pixel_close(contents, length, 3, 0, 237, 0, 18, 20);
-    hvs_assert_ppm_pixel_close(contents, length, 4, 0, 111, 0, 144, 20);
-    hvs_assert_ppm_pixel_close(contents, length, 5, 0, 2, 0, 253, 20);
+    hvs_assert_ppm_pixel_close(contents, length, 3, 0, 237, 0, 18, 0);
+    hvs_assert_ppm_pixel_close(contents, length, 4, 0, 111, 0, 144, 0);
+    hvs_assert_ppm_pixel_close(contents, length, 5, 0, 2, 0, 253, 0);
 
     qtest_quit(destination);
     qtest_quit(source);
@@ -2073,7 +2116,7 @@ static void test_hvs_tpz_filter_migration(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
-static void test_hvs_t_tiled_rgb_scanout_migration(void)
+static void test_hvs_column_rgb_scanout_migration(void)
 {
     g_autoptr(GError) error = NULL;
     g_autofree char *contents = NULL;
@@ -2084,29 +2127,29 @@ static void test_hvs_t_tiled_rgb_scanout_migration(void)
     QTestState *source = display_start();
     QTestState *destination;
     const uint32_t hvs_control = HVS_DISPCTRL_ENABLE |
-        (HVS_TILED_RGB565_WIDTH << 16) | HVS_TILED_HEIGHT;
+        (HVS_COLUMN_RGB565_WIDTH << 16) | HVS_COLUMN_HEIGHT;
     size_t length;
     uint8_t red, green, blue;
-    uint16_t pixel = hvs_tiled_rgb565_pixel(96, 35);
+    uint16_t pixel = hvs_column_rgb565_pixel(96, 35);
 
-    hvs_write_tiled_rgb565_buffer(source);
-    hvs_program_tiled_plane(source, HVS_TILED_RGB565_BASE,
-                            HVS_TILED_RGB565_WIDTH, HVS_TILED_HEIGHT,
-                            HVS_TILED_COLUMNS,
+    hvs_write_column_rgb565_buffer(source);
+    hvs_program_column_plane(source, HVS_COLUMN_RGB565_BASE,
+                            HVS_COLUMN_RGB565_WIDTH, HVS_COLUMN_HEIGHT,
+                            HVS_COLUMN_COLUMNS,
                             HVS_CTL_FORMAT_RGB565, HVS_CTL_ORDER_XRGB,
                             false);
     qtest_writel(source, HVS_DISPLIST0, 0);
     qtest_writel(source, HVS_DISPCTRL0, hvs_control);
 
-    /* Populate the source-side scratch cache before migration. */
+    /* Render the source console before migration. */
     contents = display_screendump(source, &length);
     hvs_rgb565_components(pixel, &red, &green, &blue);
-    hvs_assert_ppm_pixel_sized(contents, length, HVS_TILED_RGB565_WIDTH,
-                               HVS_TILED_HEIGHT, 96, 35, red, green, blue);
+    hvs_assert_ppm_pixel_sized(contents, length, HVS_COLUMN_RGB565_WIDTH,
+                               HVS_COLUMN_HEIGHT, 96, 35, red, green, blue);
     g_clear_pointer(&contents, g_free);
 
     qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
-    tmpdir = g_dir_make_tmp("bcm2711-hvs-t-tile-migration-XXXXXX", &error);
+    tmpdir = g_dir_make_tmp("bcm2711-hvs-column-migration-XXXXXX", &error);
     g_assert_no_error(error);
     g_assert_nonnull(tmpdir);
     state_path = g_build_filename(tmpdir, "state", NULL);
@@ -2124,8 +2167,8 @@ static void test_hvs_t_tiled_rgb_scanout_migration(void)
     g_assert_cmphex(qtest_readl(destination, HVS_DISPCTRL0), ==,
                     hvs_control);
     contents = display_screendump(destination, &length);
-    hvs_assert_ppm_pixel_sized(contents, length, HVS_TILED_RGB565_WIDTH,
-                               HVS_TILED_HEIGHT, 96, 35, red, green, blue);
+    hvs_assert_ppm_pixel_sized(contents, length, HVS_COLUMN_RGB565_WIDTH,
+                               HVS_COLUMN_HEIGHT, 96, 35, red, green, blue);
 
     qtest_quit(destination);
     qtest_quit(source);
@@ -2134,14 +2177,249 @@ static void test_hvs_t_tiled_rgb_scanout_migration(void)
 }
 #endif
 
+static void test_hvs_frame_interrupts(void)
+{
+    QTestState *qts = display_start();
+    const uint32_t control = HVS_DISPCTRL_ENABLE | (8U << 16) | 8;
+
+    qtest_irq_intercept_out_named(qts, "/machine/soc/peripherals/hvs",
+                                  "sysbus-irq");
+    hvs_program_scaled_rgb565(qts);
+    qtest_writel(qts, HVS_DISPLIST0, 0);
+    qtest_writel(qts, HVS_DISPCTRL0, control);
+    qtest_writel(qts, HVS_BASE, BIT(7) | BIT(1));
+    qtest_writel(qts, PV_CONTROL, PV_CONTROL_ENABLE);
+    qtest_writel(qts, PV_V_CONTROL, PV_V_CONTROL_VIDEO_ENABLE);
+    qtest_clock_step(qts, PV_FRAME_PERIOD_NS);
+    g_assert_cmphex(qtest_readl(qts, PV_INTSTAT), ==, PV_INT_VFP_START);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPSTAT), ==, BIT(8) | BIT(1));
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* Masking the CPU IRQ preserves the event and its summary. */
+    qtest_writel(qts, HVS_BASE, BIT(7));
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPSTAT), ==, BIT(8) | BIT(1));
+    qtest_writel(qts, HVS_DISPSTAT, BIT(8));
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPSTAT), ==, 0);
+    qtest_writel(qts, HVS_BASE, BIT(7) | BIT(1));
+
+    /* Acknowledgement halfway through a frame must retain its deadline. */
+    qtest_clock_step(qts, PV_FRAME_PERIOD_NS / 2);
+    qtest_writel(qts, PV_INTSTAT, PV_INT_VFP_START);
+    qtest_writel(qts, HVS_DISPCTRL0, control | BIT(15));
+    qtest_clock_step(qts, PV_FRAME_PERIOD_NS - PV_FRAME_PERIOD_NS / 2 - 1);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_false(qtest_readl(qts, HVS_DISPCTRL0) & HVS_DISPCTRL_ENABLE);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPSTAT0), ==, BIT(30));
+    qtest_writel(qts, HVS_DISPSTAT, BIT(0)); /* clear all */
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, HVS_DISPSTAT), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_quit(qts);
+}
+
+static void display_program_mode_clock(QTestState *qts)
+{
+    qtest_writel(qts, DVP_MISC_CONFIG, 0);
+    /* RM offset 30.0 and divider 6 select a 54 MHz pixel clock. */
+    qtest_writel(qts, HDMI0_PHY_BASE + 0x028, 6U << 8);
+    qtest_writel(qts, 0xfef00f80 + 0x018, BIT(31) | (30U << 22));
+    /* 400 two-pixel clocks per line, 1000 lines per frame. */
+    qtest_writel(qts, PIXELVALVE2_BASE + 0x0c, (32U << 16) | 16);
+    qtest_writel(qts, PIXELVALVE2_BASE + 0x10, (32U << 16) | 320);
+    qtest_writel(qts, PIXELVALVE2_BASE + 0x14, (24U << 16) | 4);
+    qtest_writel(qts, PIXELVALVE2_BASE + 0x18, (12U << 16) | 960);
+    qtest_writel(qts, PV_INTEN, PV_INT_VFP_START);
+    qtest_writel(qts, PV_CONTROL, PV_CONTROL_ENABLE);
+    qtest_writel(qts, PV_V_CONTROL, PV_V_CONTROL_VIDEO_ENABLE);
+}
+
+static void test_pixelvalve_mode_timing(void)
+{
+    QTestState *qts = display_start();
+    const int64_t period = 14814815;
+
+    qtest_irq_intercept_out_named(qts, PIXELVALVE2_QOM_PATH, "sysbus-irq");
+    display_program_mode_clock(qts);
+    qtest_clock_step(qts, period - 1);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, PV_INTSTAT, PV_INT_VFP_START);
+    qtest_writel(qts, HDMI0_PHY_BASE + 0x028, 3U << 8); /* 108 MHz */
+    qtest_clock_step(qts, 7407407);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, PV_INTSTAT, PV_INT_VFP_START);
+    qtest_writel(qts, DVP_MISC_CONFIG, BIT(3));
+    qtest_clock_step(qts, period * 2);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_writel(qts, DVP_MISC_CONFIG, 0);
+    qtest_clock_step(qts, 7407408);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_quit(qts);
+}
+
+static void test_hdmi1_scanout_and_ddc(void)
+{
+    QTestState *qts = display_start();
+    g_autoptr(GError) error = NULL;
+    g_autofree char *path = NULL;
+    g_autofree char *contents = NULL;
+    uint8_t pixel[2];
+    size_t length;
+    int fd;
+
+    g_assert_cmphex(qtest_readl(qts, 0xfef05700 + 0x1a8), ==, 0);
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'qom-set', 'arguments': {"
+        " 'path': '/machine/soc/peripherals/hdmi1',"
+        " 'property': 'connected', 'value': true } }");
+    g_assert_cmphex(qtest_readl(qts, 0xfef05700 + 0x1a8), ==, 1);
+    ddc_release(qts, HDMI1_AUTO_I2C_BASE);
+    ddc_set_pointer(qts, HDMI1_DDC_BASE, 0, false);
+    g_assert_cmphex(ddc_transfer(qts, HDMI1_DDC_BASE, EDID_ADDRESS_READ,
+                                true, 1, 0), ==, BSC_IIC_INTERRUPT);
+    g_assert_cmphex(qtest_readl(qts, BSC_DATA_OUT(HDMI1_DDC_BASE, 0)) & 255,
+                    ==, 0);
+    qtest_writel(qts, 0xfef05f00, 0x12345678);
+    qtest_writel(qts, DVP_SW_INIT, BIT(1));
+    g_assert_cmphex(qtest_readl(qts, 0xfef05f00), ==, 0);
+    qtest_writel(qts, DVP_SW_INIT, 0);
+
+    /* Two channels feed distinct QEMU consoles through the output muxes. */
+    stw_le_p(pixel, 0xf800);
+    qtest_memwrite(qts, HVS_COLUMN_RGB565_BASE, pixel, sizeof(pixel));
+    hvs_program_column_plane(qts, HVS_COLUMN_RGB565_BASE, 1, 1, 1,
+                            HVS_CTL_FORMAT_RGB565, HVS_CTL_ORDER_XRGB, false);
+    for (unsigned int i = 0; i < 9; i++) {
+        hvs_write_dlist(qts, 32 + i, qtest_readl(qts, HVS_DLIST_BASE + 4 * i));
+    }
+    stw_le_p(pixel, 0x001f);
+    qtest_memwrite(qts, HVS_COLUMN_RGBA8888_BASE, pixel, sizeof(pixel));
+    hvs_write_dlist(qts, 32 + 5, HVS_COLUMN_RGBA8888_BASE);
+    qtest_writel(qts, HVS_BASE + 0x18, 0);
+    qtest_writel(qts, HVS_BASE + 0x14, 1U << 30);
+    qtest_writel(qts, HVS_DISPLIST0, 0);
+    qtest_writel(qts, HVS_DISPLIST0 + 4, 32);
+    qtest_writel(qts, HVS_DISPCTRL0, HVS_DISPCTRL_ENABLE | (8U << 16) | 8);
+    qtest_writel(qts, HVS_DISPCTRL0 + 0x10,
+                 HVS_DISPCTRL_ENABLE | (8U << 16) | 8);
+    contents = display_screendump(qts, &length);
+    hvs_assert_ppm_pixel(contents, length, 0, 0, 255, 0, 0);
+    g_clear_pointer(&contents, g_free);
+    fd = g_file_open_tmp("bcm2711-hdmi1-XXXXXX.ppm", &path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'screendump', 'arguments': {"
+        " 'filename': %s, 'device': 'hdmi1-fb' } }", path);
+    g_file_get_contents(path, &contents, &length, &error);
+    g_assert_no_error(error);
+    unlink(path);
+    hvs_assert_ppm_pixel(contents, length, 0, 0, 0, 0, 255);
+    qtest_quit(qts);
+}
+
+#ifndef _WIN32
+static void test_display_mode_migration_common(bool oneshot)
+{
+    QTestState *source = display_start();
+    QTestState *destination;
+    g_autoptr(GError) error = NULL;
+    g_autofree char *directory = NULL;
+    g_autofree char *path = NULL;
+    g_autofree char *uri = NULL;
+    g_autofree char *arguments = NULL;
+    g_autofree char *source_image = NULL;
+    g_autofree char *destination_image = NULL;
+    size_t source_length, destination_length;
+    const uint32_t control = HVS_DISPCTRL_ENABLE | (8U << 16) | 8 |
+                             (oneshot ? BIT(15) : 0);
+    const int64_t period = 14814815;
+
+    hvs_program_scaled_rgb565(source);
+    qtest_writel(source, HVS_DISPLIST0, 0);
+    qtest_writel(source, HVS_DISPCTRL0, control);
+    qtest_writel(source, HVS_BASE, BIT(7) | BIT(1));
+    display_program_mode_clock(source);
+    qtest_clock_step(source, period + period / 3);
+    g_assert_cmphex(qtest_readl(source, HVS_DISPSTAT), ==, BIT(8) | BIT(1));
+    source_image = display_screendump(source, &source_length);
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    directory = g_dir_make_tmp("bcm2711-mode-migration-XXXXXX", &error);
+    g_assert_no_error(error);
+    path = g_build_filename(directory, "state", NULL);
+    uri = g_strdup_printf("file:%s", path);
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    wait_for_migration(source);
+    arguments = g_strdup_printf("-machine raspi4b -nic none -incoming %s", uri);
+    destination = qtest_init(arguments);
+    wait_for_migration(destination);
+    qtest_irq_intercept_out_named(destination, "/machine/soc/peripherals/hvs",
+                                  "sysbus-irq");
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPSTAT),
+                    ==, BIT(8) | BIT(1));
+    g_assert_cmphex(qtest_readl(destination, HVS_DISPSTAT0),
+                    ==, (oneshot ? 1U : 2U) << 30);
+    destination_image = display_screendump(destination, &destination_length);
+    g_assert_cmpmem(source_image, source_length,
+                    destination_image, destination_length);
+    qtest_writel(destination, HVS_BASE, BIT(7) | BIT(1));
+    g_assert_true(qtest_get_irq(destination, 0));
+    qtest_writel(destination, HVS_DISPSTAT, BIT(8));
+    g_assert_false(qtest_get_irq(destination, 0));
+    qtest_writel(destination, PV_INTSTAT, PV_INT_VFP_START);
+    if (oneshot) {
+        qtest_writel(destination, HVS_DISPCTRL0, control);
+    }
+    qtest_qmp_assert_success(destination, "{ 'execute': 'cont' }");
+    /* Migration must retain the original deadline, not start a full frame. */
+    qtest_clock_set(destination, 2 * period - 1);
+    g_assert_false(qtest_get_irq(destination, 0));
+    g_assert_cmphex(qtest_readl(destination, PV_INTSTAT), ==, 0);
+    qtest_clock_step(destination, 1);
+    g_assert_true(qtest_get_irq(destination, 0));
+    g_assert_cmphex(qtest_readl(destination, PV_INTSTAT), ==, PV_INT_VFP_START);
+    qtest_quit(destination);
+    qtest_quit(source);
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_rmdir(directory), ==, 0);
+}
+
+static void test_display_mode_migration(void)
+{
+    test_display_mode_migration_common(false);
+}
+
+static void test_display_one_shot_migration(void)
+{
+    test_display_mode_migration_common(true);
+}
+#endif
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    qtest_add_func("/bcm2711/display/hvs/frame_interrupts",
+                   test_hvs_frame_interrupts);
+    qtest_add_func("/bcm2711/display/pixelvalve/mode_timing",
+                   test_pixelvalve_mode_timing);
+    qtest_add_func("/bcm2711/display/hdmi1/scanout_and_ddc",
+                   test_hdmi1_scanout_and_ddc);
+    qtest_add_func("/bcm2711/display/hvs/hardware_captures",
+                   test_hvs_hardware_captures);
     qtest_add_func("/bcm2711/display/hvs", test_hvs_registers_and_reset);
     qtest_add_func("/bcm2711/display/hvs/scaled_composition",
                    test_hvs_scaled_composition);
-    qtest_add_func("/bcm2711/display/hvs/t_tiled_rgb_scanout",
-                   test_hvs_t_tiled_rgb_scanout);
+    qtest_add_func("/bcm2711/display/hvs/column_rgb_scanout",
+                   test_hvs_column_rgb_scanout);
     qtest_add_func("/bcm2711/display/hvs/ppf_filter_reference",
                    test_hvs_ppf_filter_reference);
     qtest_add_func("/bcm2711/display/hvs/tpz_filter_reference",
@@ -2167,6 +2445,10 @@ int main(int argc, char **argv)
                    test_ddc_registers_reset_and_nack);
     qtest_add_func("/bcm2711/display/ddc/edid", test_ddc_edid);
 #ifndef _WIN32
+    qtest_add_func("/bcm2711/display/mode_migration",
+                   test_display_mode_migration);
+    qtest_add_func("/bcm2711/display/one_shot_migration",
+                   test_display_one_shot_migration);
     qtest_add_func("/bcm2711/display/framebuffer/migration",
                    test_legacy_framebuffer_migration);
     qtest_add_func("/bcm2711/display/migration", test_display_migration);
@@ -2174,8 +2456,8 @@ int main(int argc, char **argv)
                    test_hvs_ppf_filter_migration);
     qtest_add_func("/bcm2711/display/hvs/tpz_filter_migration",
                    test_hvs_tpz_filter_migration);
-    qtest_add_func("/bcm2711/display/hvs/t_tiled_rgb_scanout_migration",
-                   test_hvs_t_tiled_rgb_scanout_migration);
+    qtest_add_func("/bcm2711/display/hvs/column_rgb_scanout_migration",
+                   test_hvs_column_rgb_scanout_migration);
 #endif
     return g_test_run();
 }

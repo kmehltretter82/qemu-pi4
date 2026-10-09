@@ -74,7 +74,7 @@ static void bcm2711_hdmi_i2c_transfer(BCM2711HDMII2CState *s)
     bool no_ack = false;
     bool receive;
 
-    if (!s->released) {
+    if (!s->released || (s->hdmi && !s->hdmi->connected)) {
         no_ack = true;
         goto complete;
     }

@@ -200,18 +200,38 @@ static void bcm2838_peripherals_init(Object *obj)
                             TYPE_BCM2838_AON_INTR);
 
     /* BCM2711 native display pipeline and HDMI service plane. */
+    object_initialize_child(obj, "hdmi1-fb", &s->hdmi1_fb, TYPE_BCM2835_FB);
+    DEVICE(&s->hdmi1_fb)->id = g_strdup("hdmi1-fb");
+    object_property_add_const_link(OBJECT(&s->hdmi1_fb), "dma-mr",
+                                   OBJECT(&s_base->gpu_bus_mr));
     object_initialize_child(obj, "hvs", &s->hvs, TYPE_BCM2711_HVS);
     object_property_add_const_link(OBJECT(&s->hvs), "fb",
                                    OBJECT(&s_base->fb));
+    object_property_add_const_link(OBJECT(&s->hvs), "fb1",
+                                   OBJECT(&s->hdmi1_fb));
     object_initialize_child(obj, "v3d", &s->v3d, TYPE_BCM2711_V3D);
     object_initialize_child(obj, "pixelvalve2", &s->pixelvalve2,
                             TYPE_BCM2711_PIXELVALVE);
+    object_initialize_child(obj, "pixelvalve4", &s->pixelvalve4,
+                            TYPE_BCM2711_PIXELVALVE);
     object_initialize_child(obj, "hdmi0", &s->hdmi0, TYPE_BCM2711_HDMI);
+    object_initialize_child(obj, "hdmi1", &s->hdmi1, TYPE_BCM2711_HDMI);
+    object_property_set_bool(OBJECT(&s->hdmi1), "connected", false,
+                             &error_abort);
+    qdev_connect_clock_in(DEVICE(&s->pixelvalve2), "pixel-clock",
+                          qdev_get_clock_out(DEVICE(&s->hdmi0), "pixel-clock"));
+    qdev_connect_clock_in(DEVICE(&s->pixelvalve4), "pixel-clock",
+                          qdev_get_clock_out(DEVICE(&s->hdmi1), "pixel-clock"));
     object_initialize_child(obj, "dvp", &s->dvp, TYPE_BCM2711_DVP);
     object_initialize_child(obj, "hdmi0-i2c", &s->hdmi_i2c[0],
                             TYPE_BCM2711_HDMI_I2C);
     object_initialize_child(obj, "hdmi1-i2c", &s->hdmi_i2c[1],
                             TYPE_BCM2711_HDMI_I2C);
+    s->hdmi_i2c[0].hdmi = &s->hdmi0;
+    s->hdmi_i2c[1].hdmi = &s->hdmi1;
+    object_initialize_child(obj, "hdmi1-edid", &s->hdmi1_edid, TYPE_I2CDDC);
+    qdev_prop_set_uint8(DEVICE(&s->hdmi1_edid), "address", 0x50);
+    qdev_prop_set_bit(DEVICE(&s->hdmi1_edid), "hdmi", true);
     object_initialize_child(obj, "hdmi0-edid", &s->hdmi0_edid, TYPE_I2CDDC);
     qdev_prop_set_uint8(DEVICE(&s->hdmi0_edid), "address", 0x50);
     qdev_prop_set_bit(DEVICE(&s->hdmi0_edid), "hdmi", true);
@@ -405,7 +425,15 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
         &s_base->peri_mr, DVP_OFFSET,
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->dvp), 0));
 
-    /* HVS, HDMI0 Pixel Valve and HDMI0 transmitter. */
+    qdev_prop_set_uint32(DEVICE(&s->hdmi1_fb), "vcram-base",
+                         s_base->fb.vcram_base);
+    qdev_prop_set_uint32(DEVICE(&s->hdmi1_fb), "vcram-size",
+                         s_base->fb.vcram_size);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->hdmi1_fb), errp)) {
+        return;
+    }
+
+    /* HVS, HDMI0 pixel valve and transmitter. */
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->hvs), errp)) {
         return;
     }
@@ -482,6 +510,34 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     qdev_connect_gpio_out_named(DEVICE(&s->dvp), "clock-enable", 0,
         qdev_get_gpio_in_named(DEVICE(&s->hdmi0), "clock-enable", 0));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->pixelvalve4), errp) ||
+        !sysbus_realize(SYS_BUS_DEVICE(&s->hdmi1), errp)) {
+        return;
+    }
+    memory_region_add_subregion(&s_base->peri_mr, PIXELVALVE4_OFFSET,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pixelvalve4), 0));
+    /* The HD/MAI window is shared and remains owned by HDMI0. */
+    {
+        static const hwaddr offsets[] = {
+            HDMI1_CORE_OFFSET, HDMI1_DVP_OFFSET, HDMI1_PHY_OFFSET,
+            HDMI1_RM_OFFSET, HDMI1_PACKET_OFFSET, HDMI1_METADATA_OFFSET,
+            HDMI1_CSC_OFFSET, HDMI1_CEC_OFFSET,
+        };
+
+        for (unsigned int i = 0; i < ARRAY_SIZE(offsets); i++) {
+            memory_region_add_subregion(&s_base->peri_mr, offsets[i],
+                sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi1), i));
+        }
+    }
+    qdev_connect_gpio_out_named(DEVICE(&s->dvp), "reset", 1,
+        qdev_get_gpio_in_named(DEVICE(&s->hdmi1), "reset", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->dvp), "clock-enable", 1,
+        qdev_get_gpio_in_named(DEVICE(&s->hdmi1), "clock-enable", 0));
+
+    qdev_connect_gpio_out_named(DEVICE(&s->pixelvalve2), "vblank", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->hvs), "vblank", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->pixelvalve4), "vblank", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->hvs), "vblank", 1));
     /* Both HDMI DDC engines; the default display is attached to HDMI0. */
     for (n = 0; n < ARRAY_SIZE(s->hdmi_i2c); n++) {
         hwaddr bsc_offset = n ? HDMI1_DDC_OFFSET : HDMI0_DDC_OFFSET;
@@ -497,6 +553,9 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
         memory_region_add_subregion(
             &s_base->peri_mr, auto_offset,
             sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->hdmi_i2c[n]), 1));
+    }
+    if (!qdev_realize(DEVICE(&s->hdmi1_edid), BUS(s->hdmi_i2c[1].bus), errp)) {
+        return;
     }
     if (!qdev_realize(DEVICE(&s->hdmi0_edid),
                       BUS(s->hdmi_i2c[0].bus), errp)) {

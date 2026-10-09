@@ -139,100 +139,375 @@ static void draw_line_src16(void *opaque, uint8_t *dst, const uint8_t *src,
     }
 }
 
-static void fb_hvs_decode_pixel(const BCM2835FBHVSLayer *layer,
-                                const uint8_t *source,
-                                uint8_t *red, uint8_t *green,
-                                uint8_t *blue, uint8_t *alpha)
-{
-    uint32_t pixel;
+/* HVS components remain at 12 bits through filtering, CSC and blending. */
+typedef struct HVSImage {
+    uint16_t *data;
+    uint32_t width, height, components;
+} HVSImage;
 
-    switch (layer->bpp) {
+static HVSImage fb_hvs_image(uint32_t width, uint32_t height,
+                            uint32_t components)
+{
+    HVSImage image = { .width = width, .height = height,
+                       .components = components };
+
+    image.data = g_new0(uint16_t, (size_t)width * height * components);
+    return image;
+}
+
+static uint16_t fb_hvs_clamp(int64_t value)
+{
+    return MAX(0, MIN(value, 4095));
+}
+
+static uint16_t fb_hvs_expand(uint32_t value, unsigned int bits)
+{
+    uint32_t result = 0;
+
+    for (int shift = 12 - bits; shift > -(int)bits; shift -= bits) {
+        result |= shift >= 0 ? value << shift : value >> -shift;
+    }
+    return result & 0xfff;
+}
+
+static void fb_hvs_decode_pixel(const BCM2835FBHVSLayer *layer,
+                                const uint8_t *source, uint16_t *rgba)
+{
+    uint32_t v = 0;
+    unsigned int bits = 8;
+    uint32_t r = 0, g = 0, b = 0;
+
+    for (unsigned int i = 0; i < layer->bpp / 8; i++) {
+        v |= (uint32_t)source[i] << (8 * i);
+    }
+    rgba[3] = 4095;
+    switch (layer->format) {
+    case 0:
+        if (layer->order == 3) {
+            rgba[0] = fb_hvs_expand(v & 7, 3);
+            rgba[1] = fb_hvs_expand((v >> 3) & 7, 3);
+            rgba[2] = fb_hvs_expand(v >> 6, 2);
+        } else {
+            rgba[0] = fb_hvs_expand(v >> 5, 3);
+            rgba[1] = fb_hvs_expand((v >> 2) & 7, 3);
+            rgba[2] = fb_hvs_expand(v & 3, 2);
+        }
+        return;
+    case 3:
+        r = (v >> 10) & 31;
+        g = (v >> 5) & 31;
+        b = v & 31;
+        bits = 5;
+        rgba[3] = v & BIT(15) ? 4095 : 0;
+        break;
+    case 4:
+        rgba[0] = fb_hvs_expand((v >> 11) & 31, 5);
+        rgba[1] = fb_hvs_expand((v >> 5) & 63, 6);
+        rgba[2] = fb_hvs_expand(v & 31, 5);
+        goto order;
+    case 5:
+    case 7:
+        r = (v >> 16) & 255;
+        g = (v >> 8) & 255;
+        b = v & 255;
+        if (layer->format == 7) {
+            rgba[3] = fb_hvs_expand(v >> 24, 8);
+        }
+        break;
     case 16:
-        pixel = lduw_le_p(source);
-        *red = ((pixel >> 11) & 0x1f) << 3;
-        *green = ((pixel >> 5) & 0x3f) << 2;
-        *blue = (pixel & 0x1f) << 3;
-        *alpha = 0xff;
-        break;
-    case 24:
-        *red = source[0];
-        *green = source[1];
-        *blue = source[2];
-        *alpha = 0xff;
-        break;
-    case 32:
-        *red = source[0];
-        *green = source[1];
-        *blue = source[2];
-        *alpha = source[3];
-        break;
-    default:
-        *red = *green = *blue = 0;
-        *alpha = 0xff;
+        r = (v >> 20) & 1023;
+        g = (v >> 10) & 1023;
+        b = v & 1023;
+        bits = 10;
+        rgba[3] = fb_hvs_expand(v >> 30, 2);
         break;
     }
+    rgba[0] = fb_hvs_expand(r, bits);
+    rgba[1] = fb_hvs_expand(g, bits);
+    rgba[2] = fb_hvs_expand(b, bits);
+order:
+    if (layer->order == 3) {
+        uint16_t swap = rgba[0];
 
-    if (!layer->pixo) {
-        uint8_t swap = *red;
-
-        *red = *blue;
-        *blue = swap;
+        rgba[0] = rgba[2];
+        rgba[2] = swap;
     }
 }
 
-static uint32_t fb_hvs_blend_pixel(uint32_t destination,
-                                   const BCM2835FBHVSLayer *layer,
-                                   uint8_t red, uint8_t green,
-                                   uint8_t blue, uint8_t pixel_alpha)
+static bool fb_hvs_read_line(BCM2835FBState *s,
+                             const BCM2835FBHVSLayer *layer,
+                             uint32_t base, uint32_t pitch, uint32_t y,
+                             uint8_t *line, size_t length)
 {
-    unsigned int plane_alpha =
-        (MIN(layer->alpha, 0xfffU) * 0xffU + 0x7ffU) / 0xfffU;
-    unsigned int alpha;
-    unsigned int dest_red = (destination >> 16) & 0xff;
-    unsigned int dest_green = (destination >> 8) & 0xff;
-    unsigned int dest_blue = destination & 0xff;
-    unsigned int out_red;
-    unsigned int out_green;
-    unsigned int out_blue;
+    int64_t row = layer->vflip ? -(int64_t)y : y;
 
-    if (layer->alpha_mode == 0) {
-        alpha = pixel_alpha;
-        if (layer->alpha_mix) {
-            alpha = (alpha * plane_alpha + 0x7f) / 0xff;
+    if (!layer->column_tiled) {
+        uint32_t address = base + row * pitch;
+
+        return address_space_read(&s->dma_as, address, MEMTXATTRS_UNSPECIFIED,
+                                  line, length) == MEMTX_OK;
+    }
+    /*
+     * HVS5 tiling=3 selects 256-byte columns.  The low pitch halfword is
+     * the column stride in rows; bits 22:16 encode the additional row step.
+     * The pointer already includes the crop and vertical reflection origin.
+     */
+    for (size_t at = 0; at < length; ) {
+        uint32_t x = (base & 255) + at;
+        size_t chunk = MIN(length - at, 256 - (x & 255));
+        uint32_t address = (base & ~255U) + (x / 256) * (pitch & 0xffff) * 256 +
+                           row * (((pitch >> 16) & 127) + 1) * 256 + (x & 255);
+
+        if (address_space_read(&s->dma_as, address, MEMTXATTRS_UNSPECIFIED,
+                               line + at, chunk) != MEMTX_OK) {
+            return false;
         }
+        at += chunk;
+    }
+    return true;
+}
+
+static HVSImage fb_hvs_read_rgb(BCM2835FBState *s,
+                                const BCM2835FBHVSLayer *layer)
+{
+    HVSImage image = fb_hvs_image(layer->source_width, layer->source_height, 4);
+    unsigned int cpp = layer->bpp / 8;
+    size_t length = (size_t)image.width * cpp;
+    g_autofree uint8_t *line = g_malloc(length);
+
+    for (uint32_t y = 0; y < image.height; y++) {
+        if (!fb_hvs_read_line(s, layer, layer->base, layer->pitch, y,
+                              line, length)) {
+            g_free(image.data);
+            image.data = NULL;
+            break;
+        }
+        for (uint32_t x = 0; x < image.width; x++) {
+            uint16_t *rgba = image.data + ((size_t)y * image.width + x) * 4;
+
+            fb_hvs_decode_pixel(layer, line + x * cpp,
+                                 rgba);
+        }
+    }
+    return image;
+}
+
+static HVSImage fb_hvs_read_yuv(BCM2835FBState *s,
+                                const BCM2835FBHVSLayer *layer, bool chroma)
+{
+    unsigned int vsub = layer->format == 8 || layer->format == 9 ? 2 : 1;
+    uint32_t width = chroma ? DIV_ROUND_UP(layer->source_width, 2) :
+                             layer->source_width;
+    uint32_t height = chroma ? MAX(1, layer->source_height / vsub) :
+                              layer->source_height;
+    bool planar = layer->format == 8 || layer->format == 10;
+    unsigned int step = chroma && !planar ? 2 : 1;
+    HVSImage image = fb_hvs_image(width, height, chroma ? 2 : 1);
+    g_autofree uint8_t *line = g_malloc(width * step);
+
+    for (unsigned int c = 0; c < image.components; c++) {
+        uint32_t base = chroma ? layer->chroma_base[planar ? c : 0] :
+                                layer->base;
+        uint32_t pitch = chroma ? layer->chroma_pitch[planar ? c : 0] :
+                                 layer->pitch;
+        unsigned int component = chroma && layer->order == 1 ? 1 - c : c;
+
+        for (uint32_t y = 0; y < height; y++) {
+            if (!fb_hvs_read_line(s, layer, base, pitch, y,
+                                  line, width * step)) {
+                g_free(image.data);
+                image.data = NULL;
+                return image;
+            }
+            for (uint32_t x = 0; x < width; x++) {
+                uint8_t value = line[x * step + (step == 2 ? c : 0)];
+
+                image.data[((size_t)y * width + x) * image.components +
+                           component] = fb_hvs_expand(value, 8);
+            }
+        }
+    }
+    return image;
+}
+
+static uint16_t fb_hvs_filter(const uint16_t *source, uint32_t size,
+                              size_t stride, uint32_t output,
+                              const BCM2835FBHVSScale *scale)
+{
+    if (scale->mode == BCM2835_FB_HVS_SCALE_PPF) {
+        int64_t position = (int64_t)sextract32(scale->param, 0, 7) * 1024 +
+                           (int64_t)output * ((scale->param >> 8) & 0x1ffff);
+        int base = position >> 16;
+        unsigned int phase = (position & 0xffff) >> 13;
+        int sub = scale->param & BIT(31) ? 0 :
+                           (position >> 10) & 7;
+        int coefficient[4];
+        int sum = 0, largest = 0;
+        int64_t accumulator = 512;
+
+        for (unsigned int tap = 0; tap < 4; tap++) {
+            unsigned int at = 8 * (3 - tap) + phase;
+
+            coefficient[tap] = (scale->kernel[at] * (8 - sub) +
+                                scale->kernel[at + 1] * sub + 1) >> 1;
+            sum += coefficient[tap];
+            if (coefficient[tap] > coefficient[largest]) {
+                largest = tap;
+            }
+        }
+        if (scale->param & BIT(30)) {
+            coefficient[largest] += 1024 - sum;
+        }
+        for (unsigned int tap = 0; tap < 4; tap++) {
+            uint32_t index = MAX(0, MIN(base - 1 + (int)tap, (int)size - 1));
+
+            accumulator += (int64_t)coefficient[tap] * source[index * stride];
+        }
+        return fb_hvs_clamp(accumulator >> 10);
+    } else if (scale->mode == BCM2835_FB_HVS_SCALE_TPZ) {
+        uint32_t step = (scale->param >> 8) & 0x1fffff;
+        uint64_t first, last, accumulator = 0;
+
+        step = step ? step : 1 << 21;
+        first = (uint64_t)output * step;
+        last = first + step;
+        for (uint64_t index = first >> 16; (index << 16) < last; index++) {
+            uint64_t lo = MAX(first, index << 16);
+            uint64_t hi = MIN(last, (index + 1) << 16);
+
+            accumulator += (hi - lo) * source[MIN(index, size - 1) * stride];
+        }
+        return fb_hvs_clamp((accumulator * (scale->reciprocal & 0xffff) +
+                             (1ULL << 31)) >> 32);
+    }
+    return source[MIN(output, size - 1) * stride];
+}
+
+static void fb_hvs_scale_axis(HVSImage *image, uint32_t output_size,
+                               const BCM2835FBHVSScale *scale, bool horizontal)
+{
+    uint32_t input_size = horizontal ? image->width : image->height;
+    HVSImage out;
+
+    if (!scale->mode && input_size == output_size) {
+        return;
+    }
+    out = fb_hvs_image(horizontal ? output_size : image->width,
+                       horizontal ? image->height : output_size,
+                       image->components);
+    for (uint32_t y = 0; y < out.height; y++) {
+        for (uint32_t x = 0; x < out.width; x++) {
+            uint32_t index = horizontal ? x : y;
+            size_t start = horizontal ? (size_t)y * image->width : x;
+            size_t stride = horizontal ? 1 : image->width;
+
+            if (!scale->mode) {
+                index = (uint64_t)index * input_size / output_size;
+            }
+            for (uint32_t c = 0; c < image->components; c++) {
+                out.data[((size_t)y * out.width + x) * out.components + c] =
+                    fb_hvs_filter(image->data + start * image->components + c,
+                                   input_size, stride * image->components,
+                                   index, scale);
+            }
+        }
+    }
+    g_free(image->data);
+    *image = out;
+}
+
+static void fb_hvs_scale(HVSImage *image, const BCM2835FBHVSLayer *layer,
+                          unsigned int channel)
+{
+    const BCM2835FBHVSScale *horizontal = &layer->scale[channel][0];
+    const BCM2835FBHVSScale *vertical = &layer->scale[channel][1];
+    bool horizontal_first = horizontal->mode == BCM2835_FB_HVS_SCALE_TPZ ||
+        (horizontal->mode == BCM2835_FB_HVS_SCALE_PPF &&
+         ((horizontal->param >> 8) & 0x1ffff) >= 0x10000);
+
+    /* The HVS keeps the narrower image in the line buffer. */
+    if (horizontal_first) {
+        fb_hvs_scale_axis(image, layer->dest_width, horizontal, true);
+        fb_hvs_scale_axis(image, layer->dest_height, vertical, false);
     } else {
-        alpha = plane_alpha;
+        fb_hvs_scale_axis(image, layer->dest_height, vertical, false);
+        fb_hvs_scale_axis(image, layer->dest_width, horizontal, true);
     }
+}
 
-    if (!alpha) {
-        return destination;
+static HVSImage fb_hvs_convert_yuv(BCM2835FBState *s,
+                                   const BCM2835FBHVSLayer *layer)
+{
+    HVSImage luma = fb_hvs_read_yuv(s, layer, false);
+    HVSImage chroma = fb_hvs_read_yuv(s, layer, true);
+    HVSImage out = { 0 };
+    uint32_t c0 = layer->csc[0], c1 = layer->csc[1], c2 = layer->csc[2];
+    int yofs = sextract32(c0, 16, 8) * 16;
+    int cbofs = sextract32(c0, 8, 8) * 16 - 2048;
+    int crofs = sextract32(c0, 0, 8) * 16 - 2048;
+    int yy = extract32(c1, 2, 10);
+    int cb_red = sextract32(c2, 20, 10);
+    int cr_red = extract32(c2, 10, 10);
+    int cb_green = sextract32(c1, 22, 10);
+    int cr_green = sextract32(c1, 12, 10);
+    int cb_blue = extract32(c2, 0, 10);
+    int cr_blue = sextract32(((c0 >> 24) << 2) | (c1 & 3), 0, 10);
+
+    if (!luma.data || !chroma.data) {
+        goto done;
     }
-    if (alpha == 0xff && !layer->alpha_premult) {
-        return (red << 16) | (green << 8) | blue;
+    fb_hvs_scale(&luma, layer, 1);
+    fb_hvs_scale(&chroma, layer, 0);
+    out = fb_hvs_image(layer->dest_width, layer->dest_height, 4);
+    for (size_t i = 0; i < (size_t)out.width * out.height; i++) {
+        int y = MAX(0, luma.data[i] + yofs);
+        int cb = chroma.data[2 * i] + cbofs;
+        int cr = chroma.data[2 * i + 1] + crofs;
+
+        out.data[4 * i] = fb_hvs_clamp((yy * y + cb_red * cb +
+                                      cr_red * cr + 128) >> 8);
+        out.data[4 * i + 1] = fb_hvs_clamp((yy * y + cb_green * cb +
+                                          cr_green * cr + 128) >> 8);
+        out.data[4 * i + 2] = fb_hvs_clamp((yy * y + cb_blue * cb +
+                                          cr_blue * cr + 128) >> 8);
+        out.data[4 * i + 3] = 4095;
     }
+done:
+    g_free(luma.data);
+    g_free(chroma.data);
+    return out;
+}
 
-    if (layer->alpha_mode == 0 && layer->alpha_premult) {
-        unsigned int color_alpha = layer->alpha_mix ? plane_alpha : 0xff;
+static unsigned int fb_hvs_multiply(unsigned int value, unsigned int alpha)
+{
+    return (value * alpha + 2047) / 4095;
+}
 
-        out_red = (red * color_alpha + 0x7f) / 0xff;
-        out_green = (green * color_alpha + 0x7f) / 0xff;
-        out_blue = (blue * color_alpha + 0x7f) / 0xff;
-        out_red += (dest_red * (0xff - alpha) + 0x7f) / 0xff;
-        out_green += (dest_green * (0xff - alpha) + 0x7f) / 0xff;
-        out_blue += (dest_blue * (0xff - alpha) + 0x7f) / 0xff;
-        out_red = MIN(out_red, 0xffU);
-        out_green = MIN(out_green, 0xffU);
-        out_blue = MIN(out_blue, 0xffU);
-    } else {
-        out_red = (red * alpha + dest_red * (0xff - alpha) + 0x7f) /
-                  0xff;
-        out_green = (green * alpha + dest_green * (0xff - alpha) +
-                     0x7f) / 0xff;
-        out_blue = (blue * alpha + dest_blue * (0xff - alpha) + 0x7f) /
-                   0xff;
+static uint64_t fb_hvs_blend_pixel(uint64_t destination,
+                                   const BCM2835FBHVSLayer *layer,
+                                   const uint16_t *rgba)
+{
+    unsigned int alpha = layer->alpha_mode == 0 ? rgba[3] : layer->alpha;
+    uint64_t result = 0;
+
+    if (layer->alpha_mix) {
+        alpha = fb_hvs_multiply(alpha, layer->alpha);
     }
+    for (unsigned int c = 0; c < 3; c++) {
+        unsigned int value = rgba[c];
+        unsigned int dst = (destination >> (c * 12)) & 4095;
 
-    return (out_red << 16) | (out_green << 8) | out_blue;
+        if (layer->alpha_mode == 0 && layer->alpha_premult) {
+            if (layer->alpha_mix) {
+                value = fb_hvs_multiply(value, layer->alpha);
+            }
+        } else {
+            value = fb_hvs_multiply(value, alpha);
+        }
+        value += fb_hvs_multiply(dst, 4095 - alpha);
+        result |= (uint64_t)MIN(value, 4095) << (c * 12);
+    }
+    return result;
 }
 
 static void fb_hvs_store_pixel(uint8_t *destination, int bpp,
@@ -266,460 +541,68 @@ static void fb_hvs_store_pixel(uint8_t *destination, int bpp,
     }
 }
 
-static int fb_hvs_floor(double value)
-{
-    int integer = value;
-
-    return value < integer ? integer - 1 : integer;
-}
-
-static uint32_t fb_hvs_clamp_source_index(int index, uint32_t size)
-{
-    if (index < 0) {
-        return 0;
-    }
-    if (index >= size) {
-        return size - 1;
-    }
-    return index;
-}
-
-static uint8_t fb_hvs_clamp_component(double value)
-{
-    if (value <= 0.0) {
-        return 0;
-    }
-    if (value >= 255.0) {
-        return 255;
-    }
-    return value + 0.5;
-}
-
-static uint8_t fb_hvs_truncate_component(double value)
-{
-    if (value <= 0.0) {
-        return 0;
-    }
-    if (value >= 255.0) {
-        return 255;
-    }
-    return value;
-}
-
-/*
- * Linux programs the BCM2711 HVS PPF with the Mitchell-Netravali B=C=1/3
- * filter.  The hardware consumes a quantized coefficient table, whereas the
- * bounded software compositor evaluates the corresponding continuous kernel.
- */
-static double fb_hvs_mitchell_weight(double value)
-{
-    if (value < 0.0) {
-        value = -value;
-    }
-
-    if (value < 1.0) {
-        return ((7.0 * value * value * value) -
-                (12.0 * value * value) + (16.0 / 3.0)) / 6.0;
-    }
-    if (value < 2.0) {
-        return ((-7.0 / 3.0 * value * value * value) +
-                (12.0 * value * value) - (20.0 * value) +
-                (32.0 / 3.0)) / 6.0;
-    }
-    return 0.0;
-}
-
-/*
- * TPZ downscaling treats each destination pixel as a source-coverage region.
- * Express both source-pixel and destination-pixel boundaries in units of one
- * destination pixel, which keeps the overlap arithmetic exact for the integer
- * dimensions in an HVS display list.
- */
-static uint32_t fb_hvs_tpz_first_source(uint32_t output_index,
-                                        uint32_t source_size,
-                                        uint32_t dest_size)
-{
-    return (uint64_t)output_index * source_size / dest_size;
-}
-
-static uint32_t fb_hvs_tpz_last_source(uint32_t output_index,
-                                       uint32_t source_size,
-                                       uint32_t dest_size)
-{
-    uint64_t end = (uint64_t)(output_index + 1) * source_size;
-    uint64_t last = DIV_ROUND_UP(end, dest_size);
-
-    return MIN(last, (uint64_t)source_size);
-}
-
-static double fb_hvs_tpz_weight(uint32_t source_index,
-                                uint32_t output_index,
-                                uint32_t source_size,
-                                uint32_t dest_size)
-{
-    uint64_t output_start = (uint64_t)output_index * source_size;
-    uint64_t output_end = (uint64_t)(output_index + 1) * source_size;
-    uint64_t source_start = (uint64_t)source_index * dest_size;
-    uint64_t source_end = (uint64_t)(source_index + 1) * dest_size;
-    uint64_t overlap_start;
-    uint64_t overlap_end;
-
-    overlap_start = MAX(output_start, source_start);
-    overlap_end = MIN(output_end, source_end);
-    if (overlap_start >= overlap_end) {
-        return 0.0;
-    }
-    return (double)(overlap_end - overlap_start) / source_size;
-}
-
-/*
- * The HVS TPZ datapath also has scale, reciprocal and context words.  Its
- * complete filter is still out of scope, but Pi 400 checkerboard references
- * at 2:1 through 3.5:1 establish its coverage-filtered behavior.  This
- * bounded area-box path follows the source/destination geometry without
- * claiming to reproduce the programmed scale, reciprocal or context words.
- */
-
-/* A BCM2711 HVS5 T tile is eight by eight 64-byte microtiles. */
-#define HVS_T_TILE_BYTES       4096
-#define HVS_T_TILE_HEIGHT      32
-
-static bool fb_hvs_cache_tiled_row(BCM2835FBState *s,
-                                   const BCM2835FBHVSLayer *layer,
-                                   uint32_t tile_row)
-{
-    size_t cache_size;
-
-    /* PITCH0's right-side T-tile width is a seven-bit field. */
-    if (!layer->tile_columns || layer->tile_columns > 0x7f) {
-        return false;
-    }
-    cache_size = (size_t)layer->tile_columns * HVS_T_TILE_BYTES;
-    if (s->hvs_tiled_row_valid &&
-        s->hvs_tiled_row_base == layer->base &&
-        s->hvs_tiled_row_index == tile_row &&
-        s->hvs_tiled_row_columns == layer->tile_columns &&
-        s->hvs_tiled_row_bpp == layer->bpp) {
-        return true;
-    }
-    if (s->hvs_tiled_row_size < cache_size) {
-        s->hvs_tiled_row = g_realloc(s->hvs_tiled_row, cache_size);
-        s->hvs_tiled_row_size = cache_size;
-    }
-
-    s->hvs_tiled_row_valid = false;
-    for (uint32_t tile_x = 0; tile_x < layer->tile_columns; tile_x++) {
-        uint32_t physical_tile_x = tile_row & 1 ?
-            layer->tile_columns - tile_x - 1 : tile_x;
-        hwaddr address = layer->base +
-            ((hwaddr)tile_row * layer->tile_columns + physical_tile_x) *
-            HVS_T_TILE_BYTES;
-
-        if (address_space_read(&s->dma_as, address,
-                               MEMTXATTRS_UNSPECIFIED,
-                               s->hvs_tiled_row +
-                               (size_t)tile_x * HVS_T_TILE_BYTES,
-                               HVS_T_TILE_BYTES) != MEMTX_OK) {
-            return false;
-        }
-    }
-
-    s->hvs_tiled_row_base = layer->base;
-    s->hvs_tiled_row_index = tile_row;
-    s->hvs_tiled_row_columns = layer->tile_columns;
-    s->hvs_tiled_row_bpp = layer->bpp;
-    s->hvs_tiled_row_valid = true;
-    return true;
-}
-
-static const uint8_t *fb_hvs_tiled_pixel(BCM2835FBState *s,
-                                          const BCM2835FBHVSLayer *layer,
-                                          uint32_t x, uint32_t y)
-{
-    static const uint8_t even_subtile_map[] = { 0, 3, 1, 2 };
-    static const uint8_t odd_subtile_map[] = { 2, 1, 3, 0 };
-    uint32_t bytes_per_pixel = layer->bpp >> 3;
-    uint32_t utile_width = layer->bpp == 16 ? 8 : 4;
-    uint32_t tile_width = utile_width * 8;
-    uint32_t tile_x = x / tile_width;
-    uint32_t tile_row = y / HVS_T_TILE_HEIGHT;
-    uint32_t utile_x = (x % tile_width) / utile_width;
-    uint32_t utile_y = (y % HVS_T_TILE_HEIGHT) / 4;
-    uint32_t subtile = ((utile_y >> 2) << 1) | (utile_x >> 2);
-    uint32_t subtile_offset = (tile_row & 1 ? odd_subtile_map[subtile] :
-                               even_subtile_map[subtile]) * 1024;
-    uint32_t utile_offset = ((utile_y & 3) * 4 + (utile_x & 3)) * 64;
-    uint32_t pixel_offset = ((y & 3) * utile_width +
-                             (x % utile_width)) * bytes_per_pixel;
-
-    if (tile_x >= layer->tile_columns ||
-        !fb_hvs_cache_tiled_row(s, layer, tile_row)) {
-        return NULL;
-    }
-    return s->hvs_tiled_row + (size_t)tile_x * HVS_T_TILE_BYTES +
-           subtile_offset + utile_offset + pixel_offset;
-}
-
-static bool fb_hvs_read_source_line(BCM2835FBState *s,
-                                    const BCM2835FBHVSLayer *layer,
-                                    uint32_t source_y, uint8_t *destination,
-                                    size_t line_size)
-{
-    uint32_t bytes_per_pixel = layer->bpp >> 3;
-
-    if (!layer->t_tiled) {
-        hwaddr address = layer->base + (hwaddr)source_y * layer->pitch;
-
-        return address_space_read(&s->dma_as, address,
-                                  MEMTXATTRS_UNSPECIFIED, destination,
-                                  line_size) == MEMTX_OK;
-    }
-
-    for (uint32_t x = 0; x < layer->source_width; x++) {
-        const uint8_t *pixel = fb_hvs_tiled_pixel(s, layer, x, source_y);
-
-        if (!pixel) {
-            return false;
-        }
-        memcpy(destination + (size_t)x * bytes_per_pixel, pixel,
-               bytes_per_pixel);
-    }
-    return true;
-}
-
 static bool fb_hvs_update_display(BCM2835FBState *s)
 {
     DisplaySurface *surface = qemu_console_surface(s->con);
-    uint32_t width = s->config.xres;
-    uint32_t height = s->config.yres;
-    size_t pixel_count = (size_t)width * height;
-    int surface_bpp = surface_bits_per_pixel(surface);
-    unsigned int surface_bytes = DIV_ROUND_UP(surface_bpp, 8);
+    uint32_t width = s->config.xres, height = s->config.yres;
+    size_t count = (size_t)width * height;
+    int bpp = surface_bits_per_pixel(surface);
+    unsigned int bytes = DIV_ROUND_UP(bpp, 8);
 
-    if (!width || !height || !surface_bpp) {
+    if (!width || !height || !bpp) {
         return true;
     }
-    if (s->hvs_pixels_count < pixel_count) {
-        s->hvs_pixels = g_renew(uint32_t, s->hvs_pixels, pixel_count);
-        s->hvs_pixels_count = pixel_count;
+    if (s->hvs_pixels_count < count) {
+        s->hvs_pixels = g_renew(uint64_t, s->hvs_pixels, count);
+        s->hvs_pixels_count = count;
     }
-    memset(s->hvs_pixels, 0, pixel_count * sizeof(*s->hvs_pixels));
-    /* Guest memory may have changed since the prior display update. */
-    s->hvs_tiled_row_valid = false;
+    memset(s->hvs_pixels, 0, count * sizeof(*s->hvs_pixels));
+    for (unsigned int i = 0; i < s->hvs_layer_count; i++) {
+        const BCM2835FBHVSLayer *layer = &s->hvs_layers[i];
+        uint32_t right = MIN((uint64_t)layer->dest_x + layer->dest_width,
+                              width);
+        uint32_t bottom = MIN((uint64_t)layer->dest_y + layer->dest_height,
+                               height);
+        bool yuv = layer->format >= 8 && layer->format <= 11;
+        HVSImage image;
 
-    for (unsigned int index = 0; index < s->hvs_layer_count; index++) {
-        const BCM2835FBHVSLayer *layer = &s->hvs_layers[index];
-        unsigned int source_bytes = layer->bpp >> 3;
-        size_t source_line_size = (size_t)layer->source_width * source_bytes;
-        uint64_t dest_right = (uint64_t)layer->dest_x + layer->dest_width;
-        uint64_t dest_bottom = (uint64_t)layer->dest_y + layer->dest_height;
-        uint32_t first_x = MIN(layer->dest_x, width);
-        uint32_t first_y = MIN(layer->dest_y, height);
-        uint32_t last_x = MIN(dest_right, (uint64_t)width);
-        uint32_t last_y = MIN(dest_bottom, (uint64_t)height);
-        unsigned int source_line_count;
-        size_t source_cache_size;
-
-        if (!layer->source_width || !layer->source_height ||
-            !layer->dest_width || !layer->dest_height || !source_bytes ||
-            !source_line_size || first_x >= last_x || first_y >= last_y) {
+        if (layer->dest_x >= right || layer->dest_y >= bottom) {
             continue;
         }
-        source_line_count = layer->ppf_y ? 4 :
-            layer->tpz_y ? MIN(layer->source_height,
-                                DIV_ROUND_UP(layer->source_height,
-                                             layer->dest_height) + 1) : 1;
-        if (source_line_size > SIZE_MAX / source_line_count) {
+        image = yuv ? fb_hvs_convert_yuv(s, layer) : fb_hvs_read_rgb(s, layer);
+        if (!image.data) {
             continue;
         }
-        source_cache_size = source_line_size * source_line_count;
-        if (s->hvs_source_line_size < source_cache_size) {
-            s->hvs_source_line = g_realloc(s->hvs_source_line,
-                                           source_cache_size);
-            s->hvs_source_line_size = source_cache_size;
+        if (!yuv) {
+            fb_hvs_scale(&image, layer, 0);
         }
+        for (uint32_t y = layer->dest_y; y < bottom; y++) {
+            for (uint32_t x = layer->dest_x; x < right; x++) {
+                uint32_t sx = x - layer->dest_x;
+                size_t at = (size_t)y * width + x;
+                const uint16_t *rgba;
 
-        for (uint32_t y = first_y; y < last_y; y++) {
-            uint32_t source_y[4];
-            double y_weight[4] = { 0 };
-            uint32_t tpz_first_y = 0;
-            uint32_t tpz_last_y = 0;
-            unsigned int y_taps = layer->ppf_y ? 4 : 1;
-            bool source_read_failed = false;
-
-            if (layer->ppf_y) {
-                double coordinate =
-                    (double)(y - layer->dest_y) * layer->source_height /
-                    layer->dest_height - 0.5;
-                int first_source_y = fb_hvs_floor(coordinate) - 1;
-
-                for (unsigned int tap = 0; tap < y_taps; tap++) {
-                    source_y[tap] = fb_hvs_clamp_source_index(
-                        first_source_y + tap, layer->source_height);
-                    y_weight[tap] = fb_hvs_mitchell_weight(
-                        coordinate - (first_source_y + tap));
+                if (layer->hflip) {
+                    sx = image.width - 1 - sx;
                 }
-            } else if (layer->tpz_y) {
-                tpz_first_y = fb_hvs_tpz_first_source(
-                    y - layer->dest_y, layer->source_height,
-                    layer->dest_height);
-                tpz_last_y = fb_hvs_tpz_last_source(
-                    y - layer->dest_y, layer->source_height,
-                    layer->dest_height);
-                y_taps = tpz_last_y - tpz_first_y;
-            } else {
-                source_y[0] = ((uint64_t)(y - layer->dest_y) *
-                               layer->source_height) /
-                              layer->dest_height;
-                source_y[0] = MIN(source_y[0], layer->source_height - 1);
-                y_weight[0] = 1.0;
-            }
-
-            for (unsigned int tap = 0; tap < y_taps; tap++) {
-                uint32_t source_y_index;
-                uint8_t *source_line;
-
-                if (layer->tpz_y) {
-                    source_y_index = tpz_first_y + tap;
-                } else {
-                    source_y_index = source_y[tap];
-                }
-
-                if (layer->vflip) {
-                    source_y_index = layer->source_height - 1 -
-                                     source_y_index;
-                }
-                source_line = s->hvs_source_line +
-                              (size_t)tap * source_line_size;
-                if (!fb_hvs_read_source_line(s, layer, source_y_index,
-                                             source_line,
-                                             source_line_size)) {
-                    source_read_failed = true;
-                    break;
-                }
-            }
-            if (source_read_failed) {
-                continue;
-            }
-
-            for (uint32_t x = first_x; x < last_x; x++) {
-                uint32_t source_x[4];
-                double x_weight[4] = { 0 };
-                uint32_t tpz_first_x = 0;
-                uint32_t tpz_last_x = 0;
-                unsigned int x_taps = layer->ppf_x ? 4 : 1;
-                double red_sum = 0.0;
-                double green_sum = 0.0;
-                double blue_sum = 0.0;
-                double alpha_sum = 0.0;
-                double weight_sum = 0.0;
-                uint8_t red;
-                uint8_t green;
-                uint8_t blue;
-                uint8_t alpha;
-                uint32_t *destination;
-
-                if (layer->ppf_x) {
-                    double coordinate =
-                        (double)(x - layer->dest_x) * layer->source_width /
-                        layer->dest_width - 0.5;
-                    int first_source_x = fb_hvs_floor(coordinate) - 1;
-
-                    for (unsigned int tap = 0; tap < x_taps; tap++) {
-                        source_x[tap] = fb_hvs_clamp_source_index(
-                            first_source_x + tap, layer->source_width);
-                        x_weight[tap] = fb_hvs_mitchell_weight(
-                            coordinate - (first_source_x + tap));
-                    }
-                } else if (layer->tpz_x) {
-                    tpz_first_x = fb_hvs_tpz_first_source(
-                        x - layer->dest_x, layer->source_width,
-                        layer->dest_width);
-                    tpz_last_x = fb_hvs_tpz_last_source(
-                        x - layer->dest_x, layer->source_width,
-                        layer->dest_width);
-                    x_taps = tpz_last_x - tpz_first_x;
-                } else {
-                    source_x[0] = ((uint64_t)(x - layer->dest_x) *
-                                   layer->source_width) /
-                                  layer->dest_width;
-                    source_x[0] = MIN(source_x[0], layer->source_width - 1);
-                    x_weight[0] = 1.0;
-                }
-
-                for (unsigned int y_tap = 0; y_tap < y_taps; y_tap++) {
-                    for (unsigned int x_tap = 0; x_tap < x_taps; x_tap++) {
-                        uint32_t source_x_index;
-                        uint8_t source_red;
-                        uint8_t source_green;
-                        uint8_t source_blue;
-                        uint8_t source_alpha;
-                        double y_tap_weight = layer->ppf_y ?
-                            y_weight[y_tap] : layer->tpz_y ?
-                            fb_hvs_tpz_weight(tpz_first_y + y_tap,
-                                              y - layer->dest_y,
-                                              layer->source_height,
-                                              layer->dest_height) : 1.0;
-                        double x_tap_weight = layer->ppf_x ?
-                            x_weight[x_tap] : layer->tpz_x ?
-                            fb_hvs_tpz_weight(tpz_first_x + x_tap,
-                                              x - layer->dest_x,
-                                              layer->source_width,
-                                              layer->dest_width) : 1.0;
-                        double weight = y_tap_weight * x_tap_weight;
-
-                        if (layer->tpz_x) {
-                            source_x_index = tpz_first_x + x_tap;
-                        } else {
-                            source_x_index = source_x[x_tap];
-                        }
-
-                        if (layer->hflip) {
-                            source_x_index = layer->source_width - 1 -
-                                             source_x_index;
-                        }
-                        fb_hvs_decode_pixel(
-                            layer, s->hvs_source_line +
-                            (size_t)y_tap * source_line_size +
-                            (size_t)source_x_index * source_bytes,
-                            &source_red, &source_green, &source_blue,
-                            &source_alpha);
-                        red_sum += source_red * weight;
-                        green_sum += source_green * weight;
-                        blue_sum += source_blue * weight;
-                        alpha_sum += source_alpha * weight;
-                        weight_sum += weight;
-                    }
-                }
-                if (weight_sum == 0.0) {
-                    continue;
-                }
-                if (layer->tpz_x || layer->tpz_y) {
-                    red = fb_hvs_truncate_component(red_sum / weight_sum);
-                    green = fb_hvs_truncate_component(green_sum / weight_sum);
-                    blue = fb_hvs_truncate_component(blue_sum / weight_sum);
-                    alpha = fb_hvs_truncate_component(alpha_sum / weight_sum);
-                } else {
-                    red = fb_hvs_clamp_component(red_sum / weight_sum);
-                    green = fb_hvs_clamp_component(green_sum / weight_sum);
-                    blue = fb_hvs_clamp_component(blue_sum / weight_sum);
-                    alpha = fb_hvs_clamp_component(alpha_sum / weight_sum);
-                }
-                destination = &s->hvs_pixels[(size_t)y * width + x];
-                *destination = fb_hvs_blend_pixel(*destination, layer,
-                                                  red, green, blue, alpha);
+                rgba = image.data +
+                       ((size_t)(y - layer->dest_y) * image.width + sx) * 4;
+                s->hvs_pixels[at] = fb_hvs_blend_pixel(s->hvs_pixels[at],
+                                                     layer, rgba);
             }
         }
+        g_free(image.data);
     }
-
     for (uint32_t y = 0; y < height; y++) {
-        uint8_t *destination = surface_data(surface) +
-                               (size_t)y * surface_stride(surface);
+        uint8_t *dst = surface_data(surface) +
+                       (size_t)y * surface_stride(surface);
 
         for (uint32_t x = 0; x < width; x++) {
-            fb_hvs_store_pixel(destination + (size_t)x * surface_bytes,
-                               surface_bpp,
-                               s->hvs_pixels[(size_t)y * width + x]);
+            uint64_t pixel = s->hvs_pixels[(size_t)y * width + x];
+            uint32_t rgb = ((pixel >> 4) & 255) << 16 |
+                           ((pixel >> 16) & 255) << 8 | ((pixel >> 28) & 255);
+
+            fb_hvs_store_pixel(dst + (size_t)x * bytes, bpp, rgb);
         }
     }
     qemu_console_update(s->con, 0, 0, width, height);
@@ -856,7 +739,6 @@ void bcm2835_fb_reconfigure(BCM2835FBState *s, BCM2835FBConfig *newconfig)
 
     s->hvs_mode = false;
     s->hvs_layer_count = 0;
-    s->hvs_tiled_row_valid = false;
     s->config = *newconfig;
 
     s->invalidate = true;
@@ -884,7 +766,6 @@ void bcm2835_fb_reconfigure_hvs(BCM2835FBState *s,
     s->config.alpha = 0;
     s->hvs_mode = true;
     s->hvs_layer_count = layer_count;
-    s->hvs_tiled_row_valid = false;
     memcpy(s->hvs_layers, layers, layer_count * sizeof(*layers));
     s->invalidate = true;
     qemu_console_resize(s->con, xres, yres);
@@ -1052,7 +933,6 @@ static void bcm2835_fb_reset(DeviceState *dev)
 
     s->hvs_mode = false;
     s->hvs_layer_count = 0;
-    s->hvs_tiled_row_valid = false;
     s->invalidate = true;
     if (s->con) {
         qemu_console_resize(s->con, s->config.xres, s->config.yres);
@@ -1065,8 +945,6 @@ static void bcm2835_fb_finalize(Object *obj)
     BCM2835FBState *s = BCM2835_FB(obj);
 
     g_free(s->hvs_pixels);
-    g_free(s->hvs_source_line);
-    g_free(s->hvs_tiled_row);
 }
 
 static void bcm2835_fb_realize(DeviceState *dev, Error **errp)

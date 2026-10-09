@@ -76,8 +76,6 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
         "brcm,bcm2711-pixelvalve0",
         "brcm,bcm2711-pixelvalve1",
         "brcm,bcm2711-pixelvalve3",
-        "brcm,bcm2711-pixelvalve4",
-        "brcm,bcm2711-hdmi1",
         "brcm,2711-v3d",
     };
 

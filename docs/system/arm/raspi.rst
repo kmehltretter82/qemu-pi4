@@ -42,12 +42,12 @@ Implemented devices
  * Both BCM2711 PWM controllers, with FIFO and DMA-paced stereo playback
  * BCM2711 always-on edge-latched L2 interrupt controller, with independently
    masked CPU and PCI banks
- * BCM2711 HVS, HDMI0 pixel valve and HDMI0 transmitter, including linear RGB
-   multi-plane composition, a bounded full-surface T-tiled RGB scanout path,
-   and functional scaling for native Linux VC4 DRM scanout to a QEMU display
+ * BCM2711 HVS, HDMI0/HDMI1 pixel valves and transmitters, including RGB and
+   linear YUV multi-plane composition, coefficient-driven PPF/TPZ scaling,
+   256-byte-column RGB addressing and native Linux VC4 DRM scanout
  * BCM2711 HDMI DVP clock/reset controller and both HDMI DDC I2C controllers,
-   with a connected virtual EDID monitor on HDMI0 and a runtime hot-plug
-   detect line on the HDMI0 transmitter
+   with virtual EDID monitors gated by each transmitter's runtime connection
+   state; HDMI0 starts connected and HDMI1 disconnected
  * BCM2711 HDMI0 MAI audio, with a 64-word FIFO, DMA DREQ pacing and PCM
    playback through a QEMU audio backend
  * System Timer
@@ -88,10 +88,10 @@ Missing devices
    substrate and shared interrupt are modeled, but the device-tree node stays
    disabled because command-list execution and Mesa acceleration are not yet
    modeled.
- * Remaining native-display features: cropped, vertically reflected and scaled
-   HVS T-tiled planes; compressed and YUV formats; exact PPF/TPZ coefficient
-   and LBM behavior; pixel valves other than HDMI0's; HDMI1;
-   HPD interrupt edges, EDID that tracks the hot-plug line, CEC and
+ * Remaining native-display features: compressed and column-addressed YUV
+   formats; exact TPZ and blend rounding in some captured cases; physical
+   LBM/FIFO behavior and full scanline events; pixel valves 0, 1 and 3;
+   interlaced and deep-colour timing; HDMI1 audio; HPD interrupt edges, CEC,
    signal-level TMDS and HDMI audio-packet transport
  * Physical BCM2711 PCIe power-management and link-training event behavior
  * AUX SPI DMA, fixed-width or LSB-first framing, clock timing, GPIO pin-mux
@@ -429,14 +429,15 @@ at run time, but detection is polled: no connect, disconnect or CEC edge is
 delivered through this controller.  It therefore supplies the Linux-visible
 interrupt topology without claiming HPD interrupt or CEC emulation.
 
-Native HDMI0 scanout, DVP clocks and DDC
-----------------------------------------
+Native HDMI scanout, DVP clocks and DDC
+--------------------------------------
 
 The native display path exposes the HVS at ARM physical address
-``0xfe400000``, HDMI0 pixel valve 2 at ``0xfe20a000`` and the HDMI0
-transmitter register banks beginning at ``0xfef00200``.  Their upstream
-device-tree nodes remain visible, while the other four pixel valves, HDMI1
-and V3D stay hidden.  A non-executing V3D 4.2 hub/core register substrate is
+``0xfe400000``, HDMI0 pixel valve 2 at ``0xfe20a000``, HDMI1 pixel valve 4 at
+``0xfe216000`` and HDMI transmitter register banks beginning at
+``0xfef00200`` and ``0xfef05700`` respectively.  Their device-tree nodes
+remain visible, while pixel valves 0, 1 and 3 and V3D stay hidden.
+A non-executing V3D 4.2 hub/core register substrate is
 present at its real addresses, but its device-tree node remains disabled until
 the command-list engine can be modeled faithfully.
 
@@ -466,54 +467,79 @@ machine types without submitting a GPU job::
   scripts/pi4/test-v3d-probe.py --qemu build/qemu-system-aarch64 \\
       --machine raspi400
 
-The HVS consumes the channel display list programmed by the Linux VC4 driver
-and redirects supported planes to QEMU's existing Raspberry Pi framebuffer
-console.  The implemented HVS5 subset composites multiple linear RGB565,
-RGB888 or RGBA8888 planes in display-list order.  It supports nonnegative
-positions with output clipping, independent horizontal and vertical
-reflection, and the fixed-alpha and pipeline-alpha modes emitted by Linux,
-including coverage, premultiplied and plane-alpha mixing behavior.  It also
-reads full-surface unity-mode T-tiled RGB565 and RGBA8888 planes, including
-their alternating 4 KiB tile rows and microtile ordering.  That bounded tiled
-path requires an aligned base with no crop or vertical-traversal fields in
-``PITCH0``; horizontal reflection remains available.  Unity linear planes use
-the existing dirty-page scanout fast path when possible; other supported lists
-use a software compositor.
+The HVS consumes the Linux VC4 driver's channel display lists.  Output 4's
+``DISPEOLN`` mux selects the channel for HDMI0; output 5's ``DISPDITHER`` mux
+selects HDMI1, with value 3 disabling either output.  The primary console is
+the existing Raspberry Pi framebuffer; HDMI1 has a separate console named
+``hdmi1-fb``, selectable with the QMP ``screendump`` command's ``device``
+argument.  The implemented HVS5 subset composites up to sixteen planes in
+display-list order with output clipping and nonnegative destination positions.
+Source and output dimensions are bounded at 3840x2560.
 
-Short functional display lists use deterministic nearest-neighbor sampling.
-For a structurally complete linear-RGB list selecting HVS PPF scaling, the
-software compositor instead evaluates a separable Mitchell--Netravali
-``B=C=1/3`` approximation with the Linux driver's half-pixel initial phase.
-This produces the filtered transition seen in the project's Pi 400 reference
-capture, but it is not a reproduction of the hardware's quantized
-guest-programmed coefficient tables.  A complete linear-RGB TPZ downscale list
-uses a source-coverage box approximation; it matches Pi 400 2:1, horizontal
-2.5:1 and 3:1 one-pixel-checker captures but not the full TPZ scale,
-reciprocal or context datapath.  Exact PPF phase arithmetic, TPZ fixed-point
-quantization and line-buffer-memory behavior also remain unmodeled.  The
-display-list RAM, channel controls and active-list
-pointers are guest visible and migrate; destination post-load reconstructs the
-composite scanout from those registers and migrated guest RAM.  A list
-containing an unsupported format, tiled form or alpha mode leaves the previous
-scanout unchanged.
+All sixteen RGB formats exercised by the Pi 400 captures are supported,
+including RGB332, RGB/BGR565, 5551, 888, 8888 and 1010102 layouts and the
+driver's fixed-alpha variants.  Linear NV12/NV21, NV16/NV61, YUV/YVU420,
+422 and 444 are supported through their luma/chroma pointers, pitches,
+independent filters and programmed CSC words.  The captured BT.601, BT.709
+and BT.2020 limited/full-range matrices match.  Components remain at twelve
+bits through filtering, colour conversion and blending, then reduce to eight
+bits for console output.  Fixed and per-pixel alpha, coverage, premultiplied
+alpha and plane-alpha mixing are implemented.
 
-Pixel valve 2 retains its programmed register state and supplies the
-write-one-to-clear VFP-start interrupt used by Linux.  While both video-enable
-bits are set, it schedules one event every 16,666,667 virtual nanoseconds and
-wires the resulting IRQ to GIC SPI 101.  This is a fixed approximately 60 Hz
-functional vblank source rather than timing derived from the programmed mode.
-The HVS IRQ is wired to GIC SPI 97, although HVS-generated interrupt events
-are not yet modeled.
+PPF scaling reads the guest's signed nine-bit coefficient tables, programmed
+scale and fractional phase, coefficient interpolation and gain correction.
+TPZ downscaling uses the programmed fixed-point scale and reciprocal.  Both
+filters clamp and round between axes; horizontal filtering runs first when it
+does not enlarge the image, otherwise vertical filtering runs first.  Vertical
+reflection reads source lines upward from the driver-adjusted pointer;
+horizontal reflection mirrors the filtered output.  Fractional crops are
+represented by the source pointer and phase.  The project's old short RGB
+test lists retain their nearest-neighbour fallback.
 
-The HDMI0 model exposes all register banks described by the BCM2711 device
-tree and implements the hotplug, FIFO, packet-status and scheduler responses
-needed by the Linux HDMI driver.  It starts connected, accepts a runtime
-``connected`` property change that a polled guest observes through
-``HDMI_HOTPLUG``, and consumes HDMI0's DVP clock-enable and reset signals.  Most transmitter registers are retained
-control state rather than a signal-level HDMI encoder; there is no TMDS,
-blanking-interval, audio-packet or physical-monitor model.  The separate MAI
-functional model described below terminates audio at QEMU's host audio core
-rather than synthesizing an HDMI wire stream.
+Pi 400 captures with the HVS tiling field set to 3 show 256-byte-column RGB
+addressing rather than the T-format memory layout described by the driver's
+modifier name.  The renderer follows those observed addresses, including
+column crossings, source-pointer crops, reflection and scaling.  The low
+``PITCH0`` halfword supplies the column stride in rows; bits 22:16 select the
+additional row step.  That row-step formula has only been observed for field
+values 0, 1 and 2.  Column-addressed YUV and compressed formats are not
+implemented.  These are constrained hardware observations, not a complete
+specification of all tiling encodings.
+
+Display-list RAM, controls and active-list pointers migrate.  The destination
+reconstructs filter state and scanout from these registers and migrated guest
+RAM, including the image and EOF state of a completed one-shot channel.
+A list containing an unsupported format, tiling encoding or alpha mode
+leaves the previous scanout configuration unchanged.
+
+Pixel valves 2 and 4 supply sticky, write-one-to-clear VFP-start interrupts on
+GIC SPIs 101 and 110.  Their frame periods derive from the programmed
+horizontal and vertical totals and each HDMI PHY/RM pixel clock.  The rate
+calculation follows Linux's 54 MHz reference, RM offset and VCO divider for
+eight-bit TMDS; both pixel valves consume two pixels per clock.  Supported
+frame periods are bounded between 1 ms and 1 s.  Disabling
+the HDMI clock stops a mode with programmed timings.  Register-only tests
+without timing totals retain a 16,666,667 ns fallback.  Events continue while
+the interrupt remains pending, and acknowledgement preserves the next frame's
+deadline.  Interlace, deep colour and physical scanline timing remain outside
+this functional model.
+
+Each pixel valve's frame event drives its routed HVS channel.  HVS EOF and
+short-frame status, per-channel interrupt masks and summaries, the global
+IRQ enables, write-one-to-clear status and one-shot channel completion are
+implemented on GIC SPI 97.  Physical FIFO underrun, LBM allocation and the
+remaining scanline events are not simulated.
+
+Both HDMI transmitters expose their independent register banks and consume
+their own DVP clock-enable and reset signals.  HDMI0 starts connected;
+HDMI1 starts disconnected.  Each accepts a runtime QOM ``connected``
+property change at ``/machine/soc/peripherals/hdmi0`` or ``hdmi1``, which a
+polled guest observes through ``HDMI_HOTPLUG``.  DDC transfers NACK when the
+corresponding connector is disconnected.  Most transmitter registers retain
+control state rather than encoding an HDMI signal; TMDS, blanking-interval
+packets and a physical monitor are not modeled.  The shared HD/MAI window
+belongs to HDMI0, whose separate audio model is described below.  HDMI1's
+virtual monitor does not advertise audio.
 
 The HDMI DVP clock/reset controller is mapped at ARM physical address
 ``0xfef00000``.  It exposes six software-reset bits and two active-low HDMI
@@ -533,11 +559,11 @@ ignore-ACK mode, clock-control readback and the BCM2711 ownership-release
 operation.  Transfers complete synchronously because the Pi 4 device tree
 supplies no DDC interrupt and Linux uses the controller's polling path.
 
-HDMI0 contains QEMU's standard virtual DDC monitor at address ``0x50``;
-HDMI1 has no target by default and therefore reports NACK, representing a
-disconnected connector.  The virtual EDID is a QEMU display contract, not an
-EDID captured from the project's physical monitor.  Its 256 bytes contain a
-CTA-861 revision 3 extension with Basic Audio, a two-channel LPCM short audio
+Each connector contains QEMU's standard virtual DDC monitor at address
+``0x50``, gated by the transmitter's connection state.  The virtual EDIDs are
+QEMU display contracts, not captures of the project's physical monitor.
+HDMI0's 256 bytes contain a CTA-861 revision 3 extension with Basic Audio,
+a two-channel LPCM short audio
 descriptor for 32, 44.1 and 48 kHz at 16, 20 and 24 bits, front-left/right
 speaker allocation and an HDMI vendor data block.  Linux 7.2 binds
 ``brcm2711-dvp`` and both ``brcmstb-i2c`` instances on ``raspi4b`` and
@@ -545,15 +571,19 @@ speaker allocation and an HDMI vendor data block.  Linux 7.2 binds
 and two 128-byte reads through ``/dev/i2c-*``, exercises eight hardware-sized
 chunks, validates both checksums and parses the HDMI and audio capabilities.
 
-DVP, HDMI-transmitter, HVS, pixel-valve and DDC register state, the vblank
-deadline, an open I2C transaction and the attached EDID cursor migrate.  Reset
+DVP, both HDMI transmitters, HVS, pixel-valve and DDC register state, pixel
+clocks, vblank deadlines, open I2C transactions and EDID cursors migrate.  Reset
 closes an active DDC transaction and returns each engine to auto-I2C
 ownership.  Focused qtests cover register masks, reset, ownership, ACK/NACK
-behavior, malformed-length cleanup, chunked EDID access, vblank IRQ timing and
-migration with an active display pipeline.
+behavior, malformed-length cleanup, chunked EDID access, independent HDMI1
+scanout, coefficient-driven filtering, HVS frame events, mode-derived IRQ
+timing and migration with an active display pipeline.  Fifty-five fixtures
+contain source buffers and sampled golden output pixels from Pi 400 writeback
+captures; these compare directly with hardware data at zero tolerance.
 
-The pinned upstream Linux 7.2 image binds HVS, HDMI0, TXP and pixel valve 2,
-registers ``/dev/dri/card0`` and creates a 1280x800 RGB565 ``/dev/fb0`` on
+The pinned upstream Linux 7.2 image binds HVS, HDMI0/HDMI1, TXP and pixel
+valves 2 and 4, registers ``/dev/dri/card0`` and creates a 1280x800 RGB565
+``/dev/fb0`` on
 both machines.  The acceptance init checks the connector, preferred mode and
 framebuffer geometry.  A separate end-to-end gate writes deterministic red,
 green, blue and white bands to the primary framebuffer, uses the production
@@ -567,14 +597,27 @@ quadrants::
   scripts/pi4/test-display.py --qemu build/qemu-system-aarch64 \
       --machine raspi400
 
-This is native Linux-programmed scanout, but it remains a deliberately bounded
-display-pipeline subset.  Cropped, vertically reflected and scaled T-tiled
-planes, compressed and YUV formats, negative destination coordinates, full TPZ
-and exact coefficient-table-driven scaling, mode-derived timings, HDMI1,
-HPD interrupt edges, hot-plug-tracking EDID, CEC, signal-level TMDS and
-audio-packet transport, and V3D command execution are not modeled.  The DDC
-controller also
-omits the combined hardware DTF encodings and ten-bit I2C addressing.
+Add ``--hdmi1`` to connect the second virtual monitor before Linux boots.  The
+same gate then checks HDMI1's independent 1280x800 console, including primary
+pixels in regions covered by HDMI0's overlay.  With ``--output`` it retains a
+second screendump with ``-hdmi1`` appended to the filename stem.
+
+This is native Linux-programmed scanout within the bounded display subset
+described above.  The October 9, 2026 replay of 334 Pi 400 writeback captures
+matches 301 images exactly.  Twenty-four captures retain one-count TPZ or blend
+differences.  Nine column-layout captures require addresses outside their
+saved source buffers under the inferred layout, so their remaining differences
+require controlled recapture before they can validate the addressing model.
+Those counts describe this capture set, not every possible guest configuration.
+The local replay tool is
+``scripts/pi4/hvs-diff.py replay``; per-capture results and SHA256 identifiers
+are saved in the outer workspace's
+``harnesses/hvs-diff-20261009/validation`` directory.
+
+Negative destination coordinates, HPD interrupt edges, CEC, signal-level TMDS
+and audio-packet transport, and V3D command execution remain unmodeled.  The
+DDC controller also omits the combined hardware DTF encodings and ten-bit
+I2C addressing.
 
 HDMI0 MAI audio
 ---------------

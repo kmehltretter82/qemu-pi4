@@ -8,6 +8,7 @@
 #define HW_I2C_BCM2711_HDMI_I2C_H
 
 #include "hw/core/sysbus.h"
+#include "hw/display/bcm2711_hdmi.h"
 #include "hw/i2c/i2c.h"
 #include "qom/object.h"
 
@@ -22,6 +23,7 @@ struct BCM2711HDMII2CState {
     MemoryRegion bsc_iomem;
     MemoryRegion auto_i2c_iomem;
     I2CBus *bus;
+    BCM2711HDMIState *hdmi;
 
     uint32_t chip_address;
     uint32_t data_in[BCM2711_HDMI_I2C_DATA_REGS];

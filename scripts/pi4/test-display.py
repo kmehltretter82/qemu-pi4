@@ -46,6 +46,10 @@ def parse_args():
         type=Path,
         help="retain the validated PPM screendump at this path",
     )
+    parser.add_argument(
+        "--hdmi1", action="store_true",
+        help="connect HDMI1 before boot and verify its independent scanout",
+    )
     parser.add_argument("--timeout", type=float, default=30.0)
     return parser.parse_args()
 
@@ -165,7 +169,7 @@ def read_ppm(path):
     return width, height, pixels
 
 
-def validate_pattern(path):
+def validate_pattern(path, overlay=True):
     width, _height, pixels = read_ppm(path)
     primary_samples = (
         (width // 8, (248, 0, 0), "red"),
@@ -180,7 +184,8 @@ def validate_pattern(path):
         (800, 500, (0, 0, 0), "black overlay quadrant"),
     )
 
-    for y in (100, DISPLAY_HEIGHT - 100):
+    rows = (100, DISPLAY_HEIGHT - 100) if overlay else (100, 300, 500, 700)
+    for y in rows:
         for x, expected, name in primary_samples:
             offset = (y * width + x) * 3
             actual = tuple(pixels[offset : offset + 3])
@@ -190,7 +195,7 @@ def validate_pattern(path):
                     f"got {actual}, expected approximately {expected}"
                 )
 
-    for x, y, expected, name in overlay_samples:
+    for x, y, expected, name in (overlay_samples if overlay else ()):
         offset = (y * width + x) * 3
         actual = tuple(pixels[offset : offset + 3])
         if any(abs(got - want) > 7 for got, want in zip(actual, expected)):
@@ -237,6 +242,7 @@ def main():
         tmpdir = Path(tmp)
         qmp_path = tmpdir / "qmp.sock"
         screenshot = tmpdir / "scanout.ppm"
+        second_screenshot = tmpdir / "hdmi1.ppm"
         command = (
             str(qemu),
             "-machine",
@@ -263,6 +269,8 @@ def main():
             "stdio",
             "-no-reboot",
         )
+        if args.hdmi1:
+            command += ("-S",)
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
@@ -277,6 +285,12 @@ def main():
         try:
             deadline = time.monotonic() + args.timeout
             client, stream = connect_qmp(qmp_path, process, deadline)
+            if args.hdmi1:
+                qmp_command(stream, "qom-set", {
+                    "path": "/machine/soc/peripherals/hdmi1",
+                    "property": "connected", "value": True,
+                })
+                qmp_command(stream, "cont")
             wait_for_guest(messages, process, max(0.1, deadline - time.monotonic()))
             qmp_command(stream, "screendump", {"filename": str(screenshot)})
             validate_pattern(screenshot)
@@ -284,10 +298,27 @@ def main():
                 f"PI4-DISPLAY: {args.machine} native 1280x800 "
                 "RGB565 primary plus scaled overlay verified"
             )
+            if args.hdmi1:
+                qmp_command(stream, "screendump", {
+                    "filename": str(second_screenshot), "device": "hdmi1-fb",
+                })
+                validate_pattern(second_screenshot, overlay=False)
+                print(
+                    f"PI4-DISPLAY: {args.machine} native HDMI1 scanout verified"
+                )
             if args.output:
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(screenshot, args.output)
                 print(f"PI4-DISPLAY: retained screendump at {args.output}")
+                if args.hdmi1:
+                    second_output = args.output.with_name(
+                        args.output.stem + "-hdmi1" + args.output.suffix
+                    )
+                    shutil.copyfile(second_screenshot, second_output)
+                    print(
+                        "PI4-DISPLAY: retained HDMI1 screendump at "
+                        f"{second_output}"
+                    )
             qmp_command(stream, "quit")
             process.wait(timeout=5)
         finally:

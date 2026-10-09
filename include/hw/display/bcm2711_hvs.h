@@ -23,6 +23,7 @@ struct BCM2711HVSState {
     MemoryRegion iomem;
     qemu_irq irq;
     BCM2835FBState *fb;
+    BCM2835FBState *fb1;
 
     uint32_t regs[BCM2711_HVS_REGS];
 };
