@@ -206,6 +206,8 @@
 #define RASPI4_GENET_RBUF_CTRL        (RASPI4_GENET_BASE + 0x0300)
 #define RASPI4_GENET_TBUF_CTRL        (RASPI4_GENET_BASE + 0x0600)
 #define RASPI4_GENET_UMAC_CMD         (RASPI4_GENET_BASE + 0x0808)
+#define RASPI4_GENET_UMAC_MAC0        (RASPI4_GENET_BASE + 0x080c)
+#define RASPI4_GENET_UMAC_MAC1        (RASPI4_GENET_BASE + 0x0810)
 #define RASPI4_GENET_MDIO_CMD         (RASPI4_GENET_BASE + 0x0e14)
 #define RASPI4_GENET_RDMA_DESC        (RASPI4_GENET_BASE + 0x2000)
 #define RASPI4_GENET_RDMA_RING        (RASPI4_GENET_BASE + 0x2c00)
@@ -2825,6 +2827,30 @@ static void test_firmware_board_identity(void)
     g_assert_cmphex(property_payload(2), ==, 0x13579bdf);
 }
 
+static void test_firmware_mac_address(void)
+{
+    const uint32_t get_mac[] = { UINT32_MAX, UINT32_MAX };
+    uint32_t low;
+    uint32_t high;
+    uint32_t mac0;
+    uint32_t mac1;
+
+    property_request(RPI_FWREQ_GET_BOARD_MAC_ADDRESS, get_mac,
+                     G_N_ELEMENTS(get_mac), 6);
+    low = property_payload(0);
+    high = property_payload(1);
+
+    mac0 = ((low & 0x000000ff) << 24) |
+           ((low & 0x0000ff00) << 8) |
+           ((low & 0x00ff0000) >> 8) |
+           ((low & 0xff000000) >> 24);
+    mac1 = ((high & 0x000000ff) << 8) |
+           ((high & 0x0000ff00) >> 8);
+
+    g_assert_cmphex(readl(RASPI4_GENET_UMAC_MAC0), ==, mac0);
+    g_assert_cmphex(readl(RASPI4_GENET_UMAC_MAC1), ==, mac1);
+}
+
 static void test_firmware_malformed_buffers(void)
 {
     uint8_t message[64];
@@ -4324,6 +4350,8 @@ int main(int argc, char **argv)
                      test_firmware_dma_channels);
     raspi4b_add_test("/raspi4b/firmware/board_identity",
                      test_firmware_board_identity);
+    raspi4b_add_test("/raspi4b/firmware/mac_address",
+                     test_firmware_mac_address);
     raspi4b_add_test("/raspi4b/firmware/malformed_buffers",
                      test_firmware_malformed_buffers);
     raspi4b_add_test("/raspi4b/firmware/framebuffer_operation",

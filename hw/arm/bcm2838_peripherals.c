@@ -269,6 +269,17 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
     Error *err = NULL;
     int n;
 
+    /*
+     * The firmware property channel and GENET describe the same physical
+     * Ethernet interface.  Choose GENET's address before the common realize
+     * path realizes the property device, then expose that address through
+     * GET_BOARD_MAC_ADDRESS as real firmware does.
+     */
+    if (!qemu_configure_nic_device(DEVICE(&s->genet), true, "genet")) {
+        qemu_macaddr_default_if_unset(&s->genet.conf.macaddr);
+    }
+    s_base->property.macaddr = s->genet.conf.macaddr;
+
     object_property_set_uint(OBJECT(&s_base->property), "dma-channels",
                              BCM2838_DMA_CHANNEL_MASK, &error_abort);
 
@@ -591,7 +602,6 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
         sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pcie), 0));
 
     /* GENET is in the BCM2711 lower-peripheral window. */
-    qemu_configure_nic_device(DEVICE(&s->genet), true, "genet");
     object_property_set_link(OBJECT(&s->genet), "dma-memory",
                              OBJECT(get_system_memory()), &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->genet), errp)) {
