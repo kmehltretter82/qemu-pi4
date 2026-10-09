@@ -322,8 +322,8 @@ static void usb_hub_detach(USBPort *port1)
     s->dev.port->ops->child_detach(s->dev.port, port1->dev);
 
     usb_hub_port_clear(port, PORT_STAT_CONNECTION);
-    usb_hub_port_clear(port, PORT_STAT_ENABLE);
-    usb_hub_port_clear(port, PORT_STAT_SUSPEND);
+    /* A disconnect must only report C_PORT_CONNECTION. */
+    port->wPortStatus &= ~(PORT_STAT_ENABLE | PORT_STAT_SUSPEND);
     usb_wakeup(s->intr, 0);
 }
 
@@ -498,7 +498,8 @@ static void usb_hub_handle_control(USBDevice *dev, USBPacket *p,
                 usb_hub_port_clear(port, PORT_STAT_RESET);
                 if (pdev && pdev->attached) {
                     usb_device_reset(pdev);
-                    usb_hub_port_set(port, PORT_STAT_ENABLE);
+                    /* A successful reset enables without C_PORT_ENABLE. */
+                    port->wPortStatus |= PORT_STAT_ENABLE;
                 }
                 usb_wakeup(s->intr, 0);
                 break;
