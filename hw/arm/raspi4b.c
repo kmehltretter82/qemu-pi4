@@ -38,13 +38,16 @@
 #endif
 
 /*
- * Add ARM-visible RAM above the VideoCore window without describing the
- * BCM2711 low-peripheral alias as memory (BCM2711 datasheet, section 1.2).
+ * Add ARM-visible RAM above the VideoCore window to the existing low-memory
+ * node.  Keep the low range first, matching the firmware-provided DT and the
+ * ordering expected by bootloaders when they choose a relocation base.
  */
-static void raspi_add_memory_node(void *fdt, hwaddr mem_base, hwaddr mem_len)
+static void raspi_extend_memory_node(void *fdt,
+                                     hwaddr low_base, hwaddr low_len,
+                                     hwaddr high_base, hwaddr high_len)
 {
     uint32_t acells, scells;
-    char *nodename = g_strdup_printf("/memory@%" PRIx64, mem_base);
+    char *nodename = g_strdup_printf("/memory@%" PRIx64, low_base);
 
     acells = qemu_fdt_getprop_cell(fdt, "/", "#address-cells",
                                    NULL, &error_fatal);
@@ -53,11 +56,9 @@ static void raspi_add_memory_node(void *fdt, hwaddr mem_base, hwaddr mem_len)
     /* validated by arm_load_dtb */
     g_assert(acells && scells);
 
-    qemu_fdt_add_subnode(fdt, nodename);
-    qemu_fdt_setprop_string(fdt, nodename, "device_type", "memory");
     qemu_fdt_setprop_sized_cells(fdt, nodename, "reg",
-                                        acells, mem_base,
-                                        scells, mem_len);
+                                 acells, low_base, scells, low_len,
+                                 acells, high_base, scells, high_len);
 
     g_free(nodename);
 }
@@ -110,8 +111,9 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
     upper_end = MIN(ram_size, (uint64_t)BCM2838_PERI_LOW_BASE);
 
     if (upper_end > UPPER_RAM_BASE) {
-        raspi_add_memory_node(fdt, UPPER_RAM_BASE,
-                              upper_end - UPPER_RAM_BASE);
+        raspi_extend_memory_node(fdt, info->loader_start, info->ram_size,
+                                 UPPER_RAM_BASE,
+                                 upper_end - UPPER_RAM_BASE);
     }
 }
 
