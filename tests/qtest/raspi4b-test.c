@@ -33,6 +33,7 @@
 
 #define RASPI4_VCRAM_BASE      0x3c000000
 #define RASPI4_GPU_RAM_ALIAS   0x40000000
+#define RASPI4_POWER_USB_HCD_ID 3
 #define RASPI4_EMMC2_BASE      0xfe340000
 #define RASPI4_EMMC2_CAPAREG   0x0000a52545ee6432ULL
 
@@ -2979,23 +2980,42 @@ static void test_firmware_malformed_buffers(void)
         g_assert_cmphex(response[i], ==, 0xa5);
     }
 
-    /*
-     * Reserved request codes and incomplete required inputs are parse errors.
-     */
+    /* U-Boot supplies the request payload length in the per-tag code. */
+    memset(message, 0xa5, 32);
+    stl_le_p(message, 32);
+    stl_le_p(message + 4, 0);
+    stl_le_p(message + 8, RPI_FWREQ_SET_POWER_STATE);
+    stl_le_p(message + 12, 8);
+    stl_le_p(message + 16, 8);
+    stl_le_p(message + 20, RASPI4_POWER_USB_HCD_ID);
+    stl_le_p(message + 24, RPI_FIRMWARE_STATE_ENABLE | BIT(1));
+    stl_le_p(message + 28, RPI_FWREQ_PROPERTY_END);
+    memwrite(RASPI4_PROPERTY_BUFFER, message, 32);
+    property_submit_raw();
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
+                    PROPERTY_RESPONSE_SUCCESS);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 0x80000008);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==,
+                    RASPI4_POWER_USB_HCD_ID);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 24), ==,
+                    RPI_FIRMWARE_STATE_ENABLE);
+
+    /* A response marker is not valid in a fresh request. */
     memset(message, 0xa5, 28);
     stl_le_p(message, 28);
     stl_le_p(message + 4, 0);
     stl_le_p(message + 8, RPI_FWREQ_GET_FIRMWARE_REVISION);
     stl_le_p(message + 12, 4);
-    stl_le_p(message + 16, 1);
+    stl_le_p(message + 16, BIT(31));
     stl_le_p(message + 24, RPI_FWREQ_PROPERTY_END);
     memwrite(RASPI4_PROPERTY_BUFFER, message, 28);
     property_submit_raw();
     g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 4), ==,
                     PROPERTY_RESPONSE_ERROR);
-    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, 1);
+    g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 16), ==, BIT(31));
     g_assert_cmphex(readl(RASPI4_PROPERTY_BUFFER + 20), ==, 0xa5a5a5a5);
 
+    /* Incomplete required inputs are parse errors. */
     memset(message, 0, 28);
     stl_le_p(message, 28);
     stl_le_p(message + 8, RPI_FWREQ_GET_CLOCK_RATE);

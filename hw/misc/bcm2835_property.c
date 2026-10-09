@@ -557,7 +557,13 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s,
         padded = ((uint64_t)bufsize + sizeof(uint32_t) - 1) &
                  ~(uint64_t)(sizeof(uint32_t) - 1);
         next = value + sizeof(rpi_firmware_prop_request_t) + padded;
-        if (tag_code != 0 || next > end - sizeof(uint32_t)) {
+        /*
+         * U-Boot and Raspberry Pi's vcmailbox utility put the request
+         * payload length in the low 31 bits, although the published format
+         * calls those bits reserved.  Real firmware accepts that form; only
+         * bit 31 distinguishes an already completed response.
+         */
+        if ((tag_code & BIT(31)) || next > end - sizeof(uint32_t)) {
             parse_error = true;
             break;
         }
