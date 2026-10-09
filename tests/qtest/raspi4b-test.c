@@ -209,6 +209,11 @@
 #define RASPI4_GENET_UMAC_MAC0        (RASPI4_GENET_BASE + 0x080c)
 #define RASPI4_GENET_UMAC_MAC1        (RASPI4_GENET_BASE + 0x0810)
 #define RASPI4_GENET_MDIO_CMD         (RASPI4_GENET_BASE + 0x0e14)
+#define RASPI4_GENET_UMAC_MDF_CTRL    (RASPI4_GENET_BASE + 0x0e50)
+#define RASPI4_GENET_UMAC_MDF_ADDR0(n) \
+    (RASPI4_GENET_BASE + 0x0e54 + (n) * 8)
+#define RASPI4_GENET_UMAC_MDF_ADDR1(n) \
+    (RASPI4_GENET_BASE + 0x0e58 + (n) * 8)
 #define RASPI4_GENET_RDMA_DESC        (RASPI4_GENET_BASE + 0x2000)
 #define RASPI4_GENET_RDMA_RING        (RASPI4_GENET_BASE + 0x2c00)
 #define RASPI4_GENET_RDMA_COMMON      (RASPI4_GENET_BASE + 0x3040)
@@ -218,6 +223,7 @@
 
 #define RASPI4_GENET_GIC_IRQ0         157
 #define RASPI4_GENET_GIC_IRQ1         158
+#define GENET_DMA_DESC_SIZE           0x0c
 #define GENET_DMA_RING_SIZE           0x40
 #define GENET_DMA_DEFAULT_RING        16
 #define GENET_DMA_RING_INDEX          0x08
@@ -231,6 +237,8 @@
 #define GENET_DMA_EOP                 0x4000
 #define GENET_UMAC_TX_ENABLE          (1U << 0)
 #define GENET_UMAC_RX_ENABLE          (1U << 1)
+#define GENET_UMAC_PROMISC            (1U << 4)
+#define GENET_MDF_ENABLE(n)           (1U << (16 - (n)))
 #define GENET_TX_RING_IRQ             (1U << 0)
 #define GENET_RX_RING_IRQ             (1U << 16)
 #define GENET_RX_DEFAULT_IRQ          (1U << 13)
@@ -3984,6 +3992,13 @@ static void genet_configure_ring(uint64_t ring, uint64_t common,
            GENET_DMA_ENABLE | (1U << (index + 1)));
 }
 
+static void genet_configure_broadcast_filter(void)
+{
+    writel(RASPI4_GENET_UMAC_MDF_ADDR0(0), 0xffff);
+    writel(RASPI4_GENET_UMAC_MDF_ADDR1(0), 0xffffffff);
+    writel(RASPI4_GENET_UMAC_MDF_CTRL, GENET_MDF_ENABLE(0));
+}
+
 static void genet_recv_all(void *buf, size_t size)
 {
     uint8_t *p = buf;
@@ -4017,7 +4032,9 @@ static void test_genet_packet_dma(void)
     };
     const uint64_t tx_buffer = 0x20000;
     const uint64_t rx_buffer = 0x30000;
+    const uint64_t promisc_buffer = 0x31000;
     uint8_t tx_dma[GENET_STATUS_BLOCK_SIZE + sizeof(frame)] = { 0 };
+    uint8_t filtered_frame[sizeof(frame)];
     uint8_t received[sizeof(frame)];
     uint32_t frame_len;
     uint32_t length_status;
@@ -4061,9 +4078,27 @@ static void test_genet_packet_dma(void)
                          RASPI4_GENET_RDMA_COMMON, 256, 0);
     writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_MASK_CLEAR,
            GENET_RX_RING_IRQ);
+
+    /* Only the broadcast address is enabled in the MAC destination filter. */
+    genet_configure_broadcast_filter();
     writel(RASPI4_GENET_UMAC_CMD,
            GENET_UMAC_TX_ENABLE | GENET_UMAC_RX_ENABLE);
 
+    memcpy(filtered_frame, frame, sizeof(filtered_frame));
+    memcpy(filtered_frame, "\x00\x11\x22\x33\x44\x55", 6);
+    iov[1].iov_base = filtered_frame;
+    ret = iov_send(genet_test_socket, iov, 2, 0,
+                   sizeof(net_len) + sizeof(filtered_frame));
+    g_assert_cmpint(ret, ==, sizeof(net_len) + sizeof(filtered_frame));
+    qtest_qmp_assert_success(global_qtest,
+                             "{ 'execute': 'query-status' }");
+    for (unsigned int i = 0; i < 100; i++) {
+        qtest_clock_step(global_qtest, 100);
+    }
+    g_assert_cmphex(readl(RASPI4_GENET_RDMA_RING + GENET_DMA_RING_INDEX),
+                    ==, 0);
+
+    iov[1].iov_base = (void *)frame;
     ret = iov_send(genet_test_socket, iov, 2, 0,
                    sizeof(net_len) + sizeof(frame));
     g_assert_cmpint(ret, ==, sizeof(net_len) + sizeof(frame));
@@ -4089,6 +4124,33 @@ static void test_genet_packet_dma(void)
     writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_CLEAR,
            GENET_RX_RING_IRQ);
     g_assert_false(get_irq(RASPI4_GENET_GIC_IRQ1));
+
+    /* Promiscuous mode bypasses the destination filter. */
+    writel(RASPI4_GENET_RDMA_DESC + GENET_DMA_DESC_SIZE + 4,
+           promisc_buffer);
+    writel(RASPI4_GENET_RDMA_DESC + GENET_DMA_DESC_SIZE + 8, 0);
+    writel(RASPI4_GENET_UMAC_CMD,
+           GENET_UMAC_TX_ENABLE | GENET_UMAC_RX_ENABLE |
+           GENET_UMAC_PROMISC);
+    iov[1].iov_base = filtered_frame;
+    ret = iov_send(genet_test_socket, iov, 2, 0,
+                   sizeof(net_len) + sizeof(filtered_frame));
+    g_assert_cmpint(ret, ==, sizeof(net_len) + sizeof(filtered_frame));
+    qtest_qmp_assert_success(global_qtest,
+                             "{ 'execute': 'query-status' }");
+    for (unsigned int i = 0;
+         i < 1000 &&
+         readl(RASPI4_GENET_RDMA_RING + GENET_DMA_RING_INDEX) == 1;
+         i++) {
+        qtest_clock_step(global_qtest, 100);
+    }
+
+    g_assert_cmphex(readl(RASPI4_GENET_RDMA_RING + GENET_DMA_RING_INDEX),
+                    ==, 2);
+    memread(promisc_buffer + GENET_RX_PREFIX_SIZE,
+            received, sizeof(received));
+    g_assert_cmpmem(received, sizeof(received),
+                    filtered_frame, sizeof(filtered_frame));
 }
 
 static void test_genet_default_ring_packet_dma(void)
@@ -4148,6 +4210,7 @@ static void test_genet_default_ring_packet_dma(void)
                          GENET_DMA_DEFAULT_RING);
     writel(RASPI4_GENET_INTRL2_0 + RASPI4_GENET_IRQ_MASK_CLEAR,
            GENET_RX_DEFAULT_IRQ);
+    genet_configure_broadcast_filter();
     writel(RASPI4_GENET_UMAC_CMD,
            GENET_UMAC_TX_ENABLE | GENET_UMAC_RX_ENABLE);
 

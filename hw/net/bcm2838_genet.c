@@ -35,6 +35,9 @@
 #define GENET_UMAC_MAC1                 0x0810
 #define GENET_UMAC_MODE                 0x0844
 #define GENET_UMAC_MDIO_CMD             0x0e14
+#define GENET_UMAC_MDF_CTRL             0x0e50
+#define GENET_UMAC_MDF_ADDR0(n)         (0x0e54 + (n) * 8)
+#define GENET_UMAC_MDF_ADDR1(n)         (0x0e58 + (n) * 8)
 
 /* Interrupt controller registers */
 #define INTRL2_CPU_STAT                 0x00
@@ -59,9 +62,13 @@
 #define TBUF_64B_EN                     BIT(0)
 #define UMAC_CMD_TX_EN                  BIT(0)
 #define UMAC_CMD_RX_EN                  BIT(1)
+#define UMAC_CMD_PROMISC                BIT(4)
 #define UMAC_CMD_SW_RESET               BIT(13)
 #define UMAC_MODE_LINK_STATUS           BIT(5)
 #define RGMII_LINK                      BIT(4)
+
+#define GENET_MDF_FILTER_COUNT          17
+#define GENET_MDF_ENABLE(n)             BIT(16 - (n))
 
 /* UniMAC MDIO command fields */
 #define MDIO_START_BUSY                 BIT(29)
@@ -534,6 +541,37 @@ static bool genet_can_receive(NetClientState *nc)
            genet_select_rx_ring(s) >= 0;
 }
 
+static bool genet_accept_frame(BCM2838GenetState *s, const uint8_t *buf,
+                               size_t size)
+{
+    uint32_t cmd = genet_reg_read(s, GENET_UMAC_CMD);
+    uint32_t control = genet_reg_read(s, GENET_UMAC_MDF_CTRL);
+    uint32_t addr0;
+    uint32_t addr1;
+
+    if (cmd & UMAC_CMD_PROMISC) {
+        return true;
+    }
+
+    if (size < ETH_ALEN) {
+        return false;
+    }
+
+    addr0 = (uint32_t)buf[0] << 8 | buf[1];
+    addr1 = (uint32_t)buf[2] << 24 | (uint32_t)buf[3] << 16 |
+            (uint32_t)buf[4] << 8 | buf[5];
+
+    for (unsigned int i = 0; i < GENET_MDF_FILTER_COUNT; i++) {
+        if ((control & GENET_MDF_ENABLE(i)) &&
+            genet_reg_read(s, GENET_UMAC_MDF_ADDR0(i)) == addr0 &&
+            genet_reg_read(s, GENET_UMAC_MDF_ADDR1(i)) == addr1) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static ssize_t genet_receive(NetClientState *nc, const uint8_t *buf,
                              size_t size)
 {
@@ -556,6 +594,10 @@ static ssize_t genet_receive(NetClientState *nc, const uint8_t *buf,
 
     if (!genet_can_receive(nc)) {
         return -1;
+    }
+
+    if (!genet_accept_frame(s, buf, size)) {
+        return size;
     }
 
     ring_index = genet_select_rx_ring(s);
