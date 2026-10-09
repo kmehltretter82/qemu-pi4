@@ -199,9 +199,12 @@
 #define RASPI4_GENET_BASE             0xfd580000
 #define RASPI4_GENET_REV              (RASPI4_GENET_BASE + 0x0000)
 #define RASPI4_GENET_INTRL2_0         (RASPI4_GENET_BASE + 0x0200)
+#define RASPI4_GENET_INTRL2_1         (RASPI4_GENET_BASE + 0x0240)
 #define RASPI4_GENET_IRQ_STAT         0x00
 #define RASPI4_GENET_IRQ_CLEAR        0x08
 #define RASPI4_GENET_IRQ_MASK_CLEAR   0x14
+#define RASPI4_GENET_RBUF_CTRL        (RASPI4_GENET_BASE + 0x0300)
+#define RASPI4_GENET_TBUF_CTRL        (RASPI4_GENET_BASE + 0x0600)
 #define RASPI4_GENET_UMAC_CMD         (RASPI4_GENET_BASE + 0x0808)
 #define RASPI4_GENET_MDIO_CMD         (RASPI4_GENET_BASE + 0x0e14)
 #define RASPI4_GENET_RDMA_DESC        (RASPI4_GENET_BASE + 0x2000)
@@ -213,20 +216,28 @@
 
 #define RASPI4_GENET_GIC_IRQ0         157
 #define RASPI4_GENET_GIC_IRQ1         158
+#define GENET_DMA_RING_SIZE           0x40
+#define GENET_DMA_DEFAULT_RING        16
 #define GENET_DMA_RING_INDEX          0x08
 #define GENET_DMA_RING_INDEX_UPDATE   0x0c
 #define GENET_DMA_RING_BUF_SIZE       0x10
 #define GENET_DMA_RING_START          0x14
 #define GENET_DMA_RING_END            0x1c
 #define GENET_DMA_CTRL                0x04
-#define GENET_DMA_ENABLE              0x03
+#define GENET_DMA_ENABLE              (1U << 0)
 #define GENET_DMA_SOP                 0x2000
 #define GENET_DMA_EOP                 0x4000
 #define GENET_UMAC_TX_ENABLE          (1U << 0)
 #define GENET_UMAC_RX_ENABLE          (1U << 1)
-#define GENET_TX_IRQ                  (1U << 0)
-#define GENET_RX_IRQ                  (1U << 16)
+#define GENET_TX_RING_IRQ             (1U << 0)
+#define GENET_RX_RING_IRQ             (1U << 16)
+#define GENET_RX_DEFAULT_IRQ          (1U << 13)
+#define GENET_TX_DEFAULT_IRQ          (1U << 16)
+#define GENET_RBUF_64B_ENABLE         (1U << 0)
+#define GENET_RBUF_ALIGN_2B           (1U << 1)
+#define GENET_TBUF_64B_ENABLE         (1U << 0)
 #define GENET_STATUS_BLOCK_SIZE       64
+#define GENET_RX_PAD_SIZE             2
 #define GENET_RX_PREFIX_SIZE          66
 #define GENET_MDIO_BUSY               (1U << 29)
 #define GENET_MDIO_FAIL               (1U << 28)
@@ -3920,6 +3931,11 @@ static void test_genet_registers_and_mdio(void)
     writel(RASPI4_GENET_INTRL2_0 + RASPI4_GENET_IRQ_CLEAR,
            GENET_MDIO_DONE_IRQ);
 
+    command = genet_mdio_read(1, 0x19);
+    g_assert_cmphex(command & 0x8704, ==, 0x8704);
+    writel(RASPI4_GENET_INTRL2_0 + RASPI4_GENET_IRQ_CLEAR,
+           GENET_MDIO_DONE_IRQ);
+
     command = genet_mdio_read(0, 2);
     g_assert_true(command & GENET_MDIO_FAIL);
     g_assert_cmphex(command & 0xffff, ==, 0xffff);
@@ -3930,15 +3946,16 @@ static void test_genet_registers_and_mdio(void)
 
 #ifndef _WIN32
 static void genet_configure_ring(uint64_t ring, uint64_t common,
-                                 unsigned int count)
+                                 unsigned int count, unsigned int index)
 {
     writel(ring + GENET_DMA_RING_INDEX, 0);
     writel(ring + GENET_DMA_RING_INDEX_UPDATE, 0);
     writel(ring + GENET_DMA_RING_BUF_SIZE, (count << 16) | 2048);
     writel(ring + GENET_DMA_RING_START, 0);
     writel(ring + GENET_DMA_RING_END, count * 3 - 1);
-    writel(common, 1);
-    writel(common + GENET_DMA_CTRL, GENET_DMA_ENABLE);
+    writel(common, 1U << index);
+    writel(common + GENET_DMA_CTRL,
+           GENET_DMA_ENABLE | (1U << (index + 1)));
 }
 
 static void genet_recv_all(void *buf, size_t size)
@@ -3987,14 +4004,15 @@ static void test_genet_packet_dma(void)
 
     memcpy(tx_dma + GENET_STATUS_BLOCK_SIZE, frame, sizeof(frame));
     memwrite(tx_buffer, tx_dma, sizeof(tx_dma));
+    writel(RASPI4_GENET_TBUF_CTRL, GENET_TBUF_64B_ENABLE);
     writel(RASPI4_GENET_TDMA_DESC,
            (sizeof(tx_dma) << 16) | GENET_DMA_SOP | GENET_DMA_EOP);
     writel(RASPI4_GENET_TDMA_DESC + 4, tx_buffer);
     writel(RASPI4_GENET_TDMA_DESC + 8, 0);
     genet_configure_ring(RASPI4_GENET_TDMA_RING,
-                         RASPI4_GENET_TDMA_COMMON, 128);
-    writel(RASPI4_GENET_BASE + 0x0240 + RASPI4_GENET_IRQ_MASK_CLEAR,
-           GENET_TX_IRQ);
+                         RASPI4_GENET_TDMA_COMMON, 128, 0);
+    writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_MASK_CLEAR,
+           GENET_TX_RING_IRQ);
     writel(RASPI4_GENET_UMAC_CMD, GENET_UMAC_TX_ENABLE);
 
     writel(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX_UPDATE, 1);
@@ -4005,16 +4023,18 @@ static void test_genet_packet_dma(void)
     g_assert_cmphex(readl(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX),
                     ==, 1);
     g_assert_true(get_irq(RASPI4_GENET_GIC_IRQ1));
-    writel(RASPI4_GENET_BASE + 0x0240 + RASPI4_GENET_IRQ_CLEAR,
-           GENET_TX_IRQ);
+    writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_CLEAR,
+           GENET_TX_RING_IRQ);
     g_assert_false(get_irq(RASPI4_GENET_GIC_IRQ1));
 
     writel(RASPI4_GENET_RDMA_DESC + 4, rx_buffer);
     writel(RASPI4_GENET_RDMA_DESC + 8, 0);
+    writel(RASPI4_GENET_RBUF_CTRL,
+           GENET_RBUF_64B_ENABLE | GENET_RBUF_ALIGN_2B);
     genet_configure_ring(RASPI4_GENET_RDMA_RING,
-                         RASPI4_GENET_RDMA_COMMON, 256);
-    writel(RASPI4_GENET_BASE + 0x0240 + RASPI4_GENET_IRQ_MASK_CLEAR,
-           GENET_RX_IRQ);
+                         RASPI4_GENET_RDMA_COMMON, 256, 0);
+    writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_MASK_CLEAR,
+           GENET_RX_RING_IRQ);
     writel(RASPI4_GENET_UMAC_CMD,
            GENET_UMAC_TX_ENABLE | GENET_UMAC_RX_ENABLE);
 
@@ -4040,9 +4060,93 @@ static void test_genet_packet_dma(void)
     memread(rx_buffer + GENET_RX_PREFIX_SIZE, received, sizeof(received));
     g_assert_cmpmem(received, sizeof(received), frame, sizeof(frame));
     g_assert_true(get_irq(RASPI4_GENET_GIC_IRQ1));
-    writel(RASPI4_GENET_BASE + 0x0240 + RASPI4_GENET_IRQ_CLEAR,
-           GENET_RX_IRQ);
+    writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_CLEAR,
+           GENET_RX_RING_IRQ);
     g_assert_false(get_irq(RASPI4_GENET_GIC_IRQ1));
+}
+
+static void test_genet_default_ring_packet_dma(void)
+{
+    static const uint8_t frame[42] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x52, 0x54, 0x00, 0x12, 0x34, 0x56,
+        0x08, 0x06,
+        0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01,
+        0x52, 0x54, 0x00, 0x12, 0x34, 0x56,
+        0x0a, 0x00, 0x02, 0x0f,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0a, 0x00, 0x02, 0x02,
+    };
+    const uint64_t tx_buffer = 0x40000;
+    const uint64_t rx_buffer = 0x50000;
+    const uint64_t tdma_ring = RASPI4_GENET_TDMA_RING +
+                               GENET_DMA_DEFAULT_RING * GENET_DMA_RING_SIZE;
+    const uint64_t rdma_ring = RASPI4_GENET_RDMA_RING +
+                               GENET_DMA_DEFAULT_RING * GENET_DMA_RING_SIZE;
+    uint8_t received[sizeof(frame)];
+    uint32_t frame_len;
+    int net_len = htonl(sizeof(frame));
+    struct iovec iov[] = {
+        { .iov_base = &net_len, .iov_len = sizeof(net_len) },
+        { .iov_base = (void *)frame, .iov_len = sizeof(frame) },
+    };
+    int ret;
+
+    memwrite(tx_buffer, frame, sizeof(frame));
+    writel(RASPI4_GENET_TDMA_DESC,
+           (sizeof(frame) << 16) | GENET_DMA_SOP | GENET_DMA_EOP);
+    writel(RASPI4_GENET_TDMA_DESC + 4, tx_buffer);
+    writel(RASPI4_GENET_TDMA_DESC + 8, 0);
+    genet_configure_ring(tdma_ring, RASPI4_GENET_TDMA_COMMON, 128,
+                         GENET_DMA_DEFAULT_RING);
+    writel(RASPI4_GENET_INTRL2_0 + RASPI4_GENET_IRQ_MASK_CLEAR,
+           GENET_TX_DEFAULT_IRQ);
+    writel(RASPI4_GENET_UMAC_CMD, GENET_UMAC_TX_ENABLE);
+
+    writel(tdma_ring + GENET_DMA_RING_INDEX_UPDATE, 1);
+    genet_recv_all(&frame_len, sizeof(frame_len));
+    g_assert_cmpuint(ntohl(frame_len), ==, sizeof(frame));
+    genet_recv_all(received, sizeof(received));
+    g_assert_cmpmem(received, sizeof(received), frame, sizeof(frame));
+    g_assert_cmphex(readl(tdma_ring + GENET_DMA_RING_INDEX), ==, 1);
+    g_assert_true(get_irq(RASPI4_GENET_GIC_IRQ0));
+    g_assert_false(get_irq(RASPI4_GENET_GIC_IRQ1));
+    writel(RASPI4_GENET_INTRL2_0 + RASPI4_GENET_IRQ_CLEAR,
+           GENET_TX_DEFAULT_IRQ);
+    g_assert_false(get_irq(RASPI4_GENET_GIC_IRQ0));
+
+    writel(RASPI4_GENET_RDMA_DESC + 4, rx_buffer);
+    writel(RASPI4_GENET_RDMA_DESC + 8, 0);
+    writel(RASPI4_GENET_RBUF_CTRL, GENET_RBUF_ALIGN_2B);
+    genet_configure_ring(rdma_ring, RASPI4_GENET_RDMA_COMMON, 256,
+                         GENET_DMA_DEFAULT_RING);
+    writel(RASPI4_GENET_INTRL2_0 + RASPI4_GENET_IRQ_MASK_CLEAR,
+           GENET_RX_DEFAULT_IRQ);
+    writel(RASPI4_GENET_UMAC_CMD,
+           GENET_UMAC_TX_ENABLE | GENET_UMAC_RX_ENABLE);
+
+    ret = iov_send(genet_test_socket, iov, 2, 0,
+                   sizeof(net_len) + sizeof(frame));
+    g_assert_cmpint(ret, ==, sizeof(net_len) + sizeof(frame));
+    qtest_qmp_assert_success(global_qtest,
+                             "{ 'execute': 'query-status' }");
+    for (unsigned int i = 0;
+         i < 1000 && readl(rdma_ring + GENET_DMA_RING_INDEX) == 0;
+         i++) {
+        qtest_clock_step(global_qtest, 100);
+    }
+
+    g_assert_cmphex(readl(rdma_ring + GENET_DMA_RING_INDEX), ==, 1);
+    g_assert_cmphex(readl(RASPI4_GENET_RDMA_DESC), ==,
+                    ((sizeof(frame) + GENET_RX_PAD_SIZE) << 16) |
+                    GENET_DMA_SOP | GENET_DMA_EOP | 0x40);
+    memread(rx_buffer + GENET_RX_PAD_SIZE, received, sizeof(received));
+    g_assert_cmpmem(received, sizeof(received), frame, sizeof(frame));
+    g_assert_true(get_irq(RASPI4_GENET_GIC_IRQ0));
+    g_assert_false(get_irq(RASPI4_GENET_GIC_IRQ1));
+    writel(RASPI4_GENET_INTRL2_0 + RASPI4_GENET_IRQ_CLEAR,
+           GENET_RX_DEFAULT_IRQ);
+    g_assert_false(get_irq(RASPI4_GENET_GIC_IRQ0));
 }
 #endif /* _WIN32 */
 
@@ -4262,6 +4366,8 @@ int main(int argc, char **argv)
                      test_genet_registers_and_mdio);
 #ifndef _WIN32
     raspi4b_add_test("/raspi4b/genet/packet_dma", test_genet_packet_dma);
+    raspi4b_add_test("/raspi4b/genet/default_ring_packet_dma",
+                     test_genet_default_ring_packet_dma);
     raspi4b_add_test("/raspi4b/hdmi/hotplug", test_hdmi_hotplug);
 #endif
 

@@ -47,11 +47,16 @@
 /* Interrupt sources */
 #define UMAC_IRQ_LINK_UP                BIT(4)
 #define UMAC_IRQ_LINK_DOWN              BIT(5)
+#define UMAC_IRQ_RXDMA_DONE             BIT(13)
+#define UMAC_IRQ_TXDMA_DONE             BIT(16)
 #define UMAC_IRQ_MDIO_DONE              BIT(23)
 #define UMAC_IRQ_MDIO_ERROR             BIT(24)
 #define UMAC_IRQ1_RX_SHIFT              16
 
 /* UniMAC command and link bits */
+#define RBUF_64B_EN                     BIT(0)
+#define RBUF_ALIGN_2B                   BIT(1)
+#define TBUF_64B_EN                     BIT(0)
 #define UMAC_CMD_TX_EN                  BIT(0)
 #define UMAC_CMD_RX_EN                  BIT(1)
 #define UMAC_CMD_SW_RESET               BIT(13)
@@ -79,6 +84,7 @@
 #define GENET_DMA_RING_SIZE             0x40
 #define GENET_RDMA_COMMON_BASE          0x3040
 #define GENET_TDMA_COMMON_BASE          0x5040
+#define GENET_DMA_DEFAULT_RING          16
 
 /* Per-ring registers */
 #define DMA_RING_READ_WRITE_PTR_LO      0x00
@@ -111,6 +117,10 @@
 
 #define BCM54213PE_PHY_ID1              0x600d
 #define BCM54213PE_PHY_ID2              0x84a2
+#define BCM54XX_AUX_STATUS              0x19
+#define BCM54XX_AUX_STATUS_AN_COMPLETE  BIT(15)
+#define BCM54XX_AUX_STATUS_1000FD       (7U << 8)
+#define BCM54XX_AUX_STATUS_LINK         BIT(2)
 
 static inline uint32_t genet_reg_read(BCM2838GenetState *s, hwaddr offset)
 {
@@ -168,6 +178,18 @@ static void genet_raise_irq(BCM2838GenetState *s, unsigned int index,
     genet_update_irqs(s);
 }
 
+static void genet_raise_dma_irq(BCM2838GenetState *s, bool tx,
+                                unsigned int ring)
+{
+    if (ring == GENET_DMA_DEFAULT_RING) {
+        genet_raise_irq(s, 0, tx ? UMAC_IRQ_TXDMA_DONE :
+                                      UMAC_IRQ_RXDMA_DONE);
+    } else {
+        genet_raise_irq(s, 1, BIT(tx ? ring :
+                                      UMAC_IRQ1_RX_SHIFT + ring));
+    }
+}
+
 static bool genet_backend_link_up(BCM2838GenetState *s)
 {
     return s->nic && !qemu_get_queue(s->nic)->link_down;
@@ -223,6 +245,8 @@ static void genet_phy_reset(BCM2838GenetState *s)
                                 MII_STAT1000_FULL;
     s->phy_regs[MII_EXTSTAT] = MII_EXTSTAT_1000T_FD |
                                MII_EXTSTAT_1000T_HD;
+    s->phy_regs[BCM54XX_AUX_STATUS] =
+        BCM54XX_AUX_STATUS_AN_COMPLETE | BCM54XX_AUX_STATUS_1000FD;
 }
 
 static uint16_t genet_phy_read(BCM2838GenetState *s, unsigned int reg)
@@ -234,6 +258,12 @@ static uint16_t genet_phy_read(BCM2838GenetState *s, unsigned int reg)
             value |= MII_BMSR_LINK_ST | MII_BMSR_AN_COMP;
         } else {
             value &= ~(MII_BMSR_LINK_ST | MII_BMSR_AN_COMP);
+        }
+    } else if (reg == BCM54XX_AUX_STATUS) {
+        if (genet_phy_link_up(s)) {
+            value |= BCM54XX_AUX_STATUS_LINK;
+        } else {
+            value &= ~BCM54XX_AUX_STATUS_LINK;
         }
     }
 
@@ -259,6 +289,7 @@ static void genet_phy_write(BCM2838GenetState *s, unsigned int reg,
     case MII_PHYID2:
     case MII_STAT1000:
     case MII_EXTSTAT:
+    case BCM54XX_AUX_STATUS:
         break;
     default:
         /* Preserve vendor-specific selectors used by the BCM54xx driver. */
@@ -360,7 +391,9 @@ static void genet_tx_descriptor(BCM2838GenetState *s, unsigned int ring,
         s->tx_packet_active[ring] = true;
         s->tx_packet_len[ring] = 0;
         s->tx_packet_checksum[ring] = !!(length_status & DMA_TX_DO_CSUM);
-        skip = MIN(length, GENET_STATUS_BLOCK_SIZE);
+        if (genet_reg_read(s, GENET_TBUF_CTRL) & TBUF_64B_EN) {
+            skip = MIN(length, GENET_STATUS_BLOCK_SIZE);
+        }
     } else if (!s->tx_packet_active[ring]) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       TYPE_BCM2838_GENET ": TX descriptor without SOP\n");
@@ -439,7 +472,7 @@ static void genet_process_tx_ring(BCM2838GenetState *s, unsigned int ring)
     }
 
     if (completed) {
-        genet_raise_irq(s, 1, BIT(ring));
+        genet_raise_dma_irq(s, true, ring);
     }
 }
 
@@ -450,40 +483,74 @@ static void genet_kick_tx(BCM2838GenetState *s)
     }
 }
 
-static bool genet_can_receive(NetClientState *nc)
+static bool genet_rx_ring_ready(BCM2838GenetState *s, unsigned int ring_index)
 {
-    BCM2838GenetState *s = qemu_get_nic_opaque(nc);
-    hwaddr ring = GENET_RDMA_RING_BASE;
+    hwaddr ring = genet_ring_reg(GENET_RDMA_RING_BASE, ring_index, 0);
     uint16_t producer = genet_reg_read(s, ring +
                                       DMA_RING_CONS_PROD_INDEX);
     uint16_t consumer = genet_reg_read(s, ring +
                                       DMA_RING_PROD_CONS_INDEX);
-    unsigned int count = genet_ring_buffer_count(s, false, 0);
+    unsigned int count = genet_ring_buffer_count(s, false, ring_index);
     unsigned int descriptor;
 
-    if (!genet_phy_link_up(s) ||
-        !(genet_reg_read(s, GENET_UMAC_CMD) & UMAC_CMD_RX_EN) ||
-        !genet_dma_ring_enabled(s, false, 0) || !count ||
+    if (!genet_dma_ring_enabled(s, false, ring_index) || !count ||
         (uint16_t)(producer - consumer) >= count) {
         return false;
     }
 
-    descriptor = genet_ring_descriptor(s, false, 0, producer);
+    descriptor = genet_ring_descriptor(s, false, ring_index, producer);
     return descriptor < GENET_DMA_DESC_COUNT &&
            genet_descriptor_address(s, false, descriptor) != 0;
+}
+
+static int genet_select_rx_ring(BCM2838GenetState *s)
+{
+    /*
+     * Linux uses ring 0 as its default receive queue, while drivers using
+     * GENET's legacy descriptor queue (including OpenBSD) use ring 16.
+     */
+    if (genet_rx_ring_ready(s, 0)) {
+        return 0;
+    }
+    if (genet_rx_ring_ready(s, GENET_DMA_DEFAULT_RING)) {
+        return GENET_DMA_DEFAULT_RING;
+    }
+
+    for (unsigned int ring = 1; ring < GENET_DMA_DEFAULT_RING; ring++) {
+        if (genet_rx_ring_ready(s, ring)) {
+            return ring;
+        }
+    }
+
+    return -1;
+}
+
+static bool genet_can_receive(NetClientState *nc)
+{
+    BCM2838GenetState *s = qemu_get_nic_opaque(nc);
+
+    return genet_phy_link_up(s) &&
+           (genet_reg_read(s, GENET_UMAC_CMD) & UMAC_CMD_RX_EN) &&
+           genet_select_rx_ring(s) >= 0;
 }
 
 static ssize_t genet_receive(NetClientState *nc, const uint8_t *buf,
                              size_t size)
 {
     BCM2838GenetState *s = qemu_get_nic_opaque(nc);
-    hwaddr ring = GENET_RDMA_RING_BASE;
+    uint32_t rbuf_ctrl = genet_reg_read(s, GENET_RBUF_CTRL);
+    size_t status_size = rbuf_ctrl & RBUF_64B_EN ?
+                         GENET_STATUS_BLOCK_SIZE : 0;
+    size_t pad_size = rbuf_ctrl & RBUF_ALIGN_2B ? GENET_RX_PAD_SIZE : 0;
+    size_t prefix_size = status_size + pad_size;
+    int ring_index;
+    hwaddr ring;
     uint16_t producer;
     unsigned int descriptor;
     hwaddr desc_offset;
     uint64_t address;
     uint8_t packet[BCM2838_GENET_MAX_FRAME_SIZE] = { 0 };
-    size_t dma_length = size + GENET_RX_PREFIX_SIZE;
+    size_t dma_length = size + prefix_size;
     uint32_t flags = DMA_SOP | DMA_EOP;
     uint32_t length_status;
 
@@ -491,8 +558,13 @@ static ssize_t genet_receive(NetClientState *nc, const uint8_t *buf,
         return -1;
     }
 
+    ring_index = genet_select_rx_ring(s);
+    if (ring_index < 0) {
+        return -1;
+    }
+    ring = genet_ring_reg(GENET_RDMA_RING_BASE, ring_index, 0);
     producer = genet_reg_read(s, ring + DMA_RING_CONS_PROD_INDEX);
-    descriptor = genet_ring_descriptor(s, false, 0, producer);
+    descriptor = genet_ring_descriptor(s, false, ring_index, producer);
     desc_offset = GENET_RDMA_DESC_BASE +
                   descriptor * GENET_DMA_DESC_SIZE;
     address = genet_descriptor_address(s, false, descriptor);
@@ -510,8 +582,10 @@ static ssize_t genet_receive(NetClientState *nc, const uint8_t *buf,
     }
 
     length_status = (dma_length << DMA_BUFLENGTH_SHIFT) | flags;
-    stl_le_p(packet, length_status);
-    memcpy(packet + GENET_RX_PREFIX_SIZE, buf, size);
+    if (status_size) {
+        stl_le_p(packet, length_status);
+    }
+    memcpy(packet + prefix_size, buf, size);
 
     if (dma_memory_write(&s->dma_as, address, packet, dma_length,
                          MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
@@ -525,8 +599,8 @@ static ssize_t genet_receive(NetClientState *nc, const uint8_t *buf,
     producer++;
     genet_reg_write(s, ring + DMA_RING_CONS_PROD_INDEX, producer);
     genet_reg_write(s, ring + DMA_RING_READ_WRITE_PTR_LO,
-                    genet_ring_descriptor(s, false, 0, producer) * 3);
-    genet_raise_irq(s, 1, BIT(UMAC_IRQ1_RX_SHIFT));
+                    genet_ring_descriptor(s, false, ring_index, producer) * 3);
+    genet_raise_dma_irq(s, false, ring_index);
 
     return size;
 }
