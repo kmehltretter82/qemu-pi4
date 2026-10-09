@@ -283,6 +283,8 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
                              BCM2711_EMMC2_CAPAREG, &error_abort);
     object_property_set_bool(OBJECT(&s->emmc2), "pending-insert-quirk", true,
                              &error_abort);
+    object_property_set_link(OBJECT(&s->emmc2), "dma",
+                             OBJECT(&s_base->gpu_bus_mr), &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->emmc2), errp)) {
         return;
     }

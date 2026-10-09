@@ -2686,12 +2686,22 @@ static void test_thermal_temperature(void)
 
 static void test_sd_card_on_emmc2(void)
 {
+    QDict *response;
+
     g_assert_cmphex(readq(RASPI4_EMMC2_BASE + 0x40), ==,
                     RASPI4_EMMC2_CAPAREG);
     g_assert_true(qom_bus_has_sd_card(
         "/machine/soc/peripherals/emmc2/sd-bus"));
     g_assert_false(qom_bus_has_sd_card(
         "/machine/soc/peripherals/sdhci/sd-bus"));
+
+    response = qmp("{ 'execute': 'qom-get', 'arguments': {"
+                   "  'path': '/machine/soc/peripherals/emmc2',"
+                   "  'property': 'dma' } }");
+    g_assert(qdict_haskey(response, "return"));
+    g_assert_cmpstr(qdict_get_str(response, "return"), ==,
+                    "/machine/soc/peripherals/bcm2835-gpu[0]");
+    qobject_unref(response);
 }
 
 static void property_request_qtest(QTestState *qts, uint32_t tag,
