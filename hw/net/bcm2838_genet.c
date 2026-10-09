@@ -126,7 +126,13 @@
 #define BCM54213PE_PHY_ID2              0x84a2
 #define BCM54XX_AUX_STATUS              0x19
 #define BCM54XX_AUX_STATUS_AN_COMPLETE  BIT(15)
+#define BCM54XX_AUX_STATUS_HCD_MASK     (7U << 8)
 #define BCM54XX_AUX_STATUS_1000FD       (7U << 8)
+#define BCM54XX_AUX_STATUS_1000HD       (6U << 8)
+#define BCM54XX_AUX_STATUS_100FD        (5U << 8)
+#define BCM54XX_AUX_STATUS_100HD        (3U << 8)
+#define BCM54XX_AUX_STATUS_10FD         (2U << 8)
+#define BCM54XX_AUX_STATUS_10HD         (1U << 8)
 #define BCM54XX_AUX_STATUS_LINK         BIT(2)
 
 static inline uint32_t genet_reg_read(BCM2838GenetState *s, hwaddr offset)
@@ -202,12 +208,61 @@ static bool genet_backend_link_up(BCM2838GenetState *s)
     return s->nic && !qemu_get_queue(s->nic)->link_down;
 }
 
+static uint16_t genet_phy_hcd(BCM2838GenetState *s)
+{
+    uint16_t bmcr = s->phy_regs[MII_BMCR];
+    uint16_t anar = s->phy_regs[MII_ANAR];
+    uint16_t anlpar = s->phy_regs[MII_ANLPAR];
+    uint16_t ctrl1000 = s->phy_regs[MII_CTRL1000];
+    uint16_t stat1000 = s->phy_regs[MII_STAT1000];
+
+    if (!(bmcr & MII_BMCR_AUTOEN)) {
+        if (bmcr & MII_BMCR_SPEED1000) {
+            return bmcr & MII_BMCR_FD ? BCM54XX_AUX_STATUS_1000FD :
+                                        BCM54XX_AUX_STATUS_1000HD;
+        }
+        if (bmcr & MII_BMCR_SPEED100) {
+            return bmcr & MII_BMCR_FD ? BCM54XX_AUX_STATUS_100FD :
+                                        BCM54XX_AUX_STATUS_100HD;
+        }
+        return bmcr & MII_BMCR_FD ? BCM54XX_AUX_STATUS_10FD :
+                                    BCM54XX_AUX_STATUS_10HD;
+    }
+
+    if ((ctrl1000 & MII_CTRL1000_FULL) &&
+        (stat1000 & MII_STAT1000_FULL)) {
+        return BCM54XX_AUX_STATUS_1000FD;
+    }
+    if ((ctrl1000 & MII_CTRL1000_HALF) &&
+        (stat1000 & MII_STAT1000_HALF)) {
+        return BCM54XX_AUX_STATUS_1000HD;
+    }
+    if ((anar & MII_ANAR_TXFD) && (anlpar & MII_ANLPAR_TXFD)) {
+        return BCM54XX_AUX_STATUS_100FD;
+    }
+    if ((anar & MII_ANAR_TX) && (anlpar & MII_ANLPAR_TX)) {
+        return BCM54XX_AUX_STATUS_100HD;
+    }
+    if ((anar & MII_ANAR_10FD) && (anlpar & MII_ANLPAR_10FD)) {
+        return BCM54XX_AUX_STATUS_10FD;
+    }
+    if ((anar & MII_ANAR_10) && (anlpar & MII_ANLPAR_10)) {
+        return BCM54XX_AUX_STATUS_10HD;
+    }
+
+    return 0;
+}
+
 static bool genet_phy_link_up(BCM2838GenetState *s)
 {
     uint16_t bmcr = s->phy_regs[MII_BMCR];
 
-    return genet_backend_link_up(s) &&
-           !(bmcr & (MII_BMCR_PDOWN | MII_BMCR_ISOLATE));
+    if (!genet_backend_link_up(s) ||
+        (bmcr & (MII_BMCR_PDOWN | MII_BMCR_ISOLATE))) {
+        return false;
+    }
+
+    return !(bmcr & MII_BMCR_AUTOEN) || genet_phy_hcd(s);
 }
 
 static void genet_update_link_registers(BCM2838GenetState *s)
@@ -235,7 +290,7 @@ static void genet_phy_reset(BCM2838GenetState *s)
                             MII_BMCR_SPEED1000;
     s->phy_regs[MII_BMSR] = MII_BMSR_100TX_FD | MII_BMSR_100TX_HD |
                             MII_BMSR_10T_FD | MII_BMSR_10T_HD |
-                            MII_BMSR_EXTSTAT | MII_BMSR_AN_COMP |
+                            MII_BMSR_EXTSTAT |
                             MII_BMSR_AUTONEG | MII_BMSR_EXTCAP;
     s->phy_regs[MII_PHYID1] = BCM54213PE_PHY_ID1;
     s->phy_regs[MII_PHYID2] = BCM54213PE_PHY_ID2;
@@ -252,25 +307,36 @@ static void genet_phy_reset(BCM2838GenetState *s)
                                 MII_STAT1000_FULL;
     s->phy_regs[MII_EXTSTAT] = MII_EXTSTAT_1000T_FD |
                                MII_EXTSTAT_1000T_HD;
-    s->phy_regs[BCM54XX_AUX_STATUS] =
-        BCM54XX_AUX_STATUS_AN_COMPLETE | BCM54XX_AUX_STATUS_1000FD;
 }
 
 static uint16_t genet_phy_read(BCM2838GenetState *s, unsigned int reg)
 {
     uint16_t value = s->phy_regs[reg & MDIO_REG_MASK];
+    uint16_t bmcr = s->phy_regs[MII_BMCR];
+    bool link_up = genet_phy_link_up(s);
 
     if (reg == MII_BMSR) {
-        if (genet_phy_link_up(s)) {
-            value |= MII_BMSR_LINK_ST | MII_BMSR_AN_COMP;
-        } else {
-            value &= ~(MII_BMSR_LINK_ST | MII_BMSR_AN_COMP);
+        value &= ~(MII_BMSR_LINK_ST | MII_BMSR_AN_COMP);
+        if (link_up) {
+            value |= MII_BMSR_LINK_ST;
+            if (bmcr & MII_BMCR_AUTOEN) {
+                value |= MII_BMSR_AN_COMP;
+            }
         }
     } else if (reg == BCM54XX_AUX_STATUS) {
-        if (genet_phy_link_up(s)) {
-            value |= BCM54XX_AUX_STATUS_LINK;
+        value &= ~(BCM54XX_AUX_STATUS_AN_COMPLETE |
+                   BCM54XX_AUX_STATUS_HCD_MASK |
+                   BCM54XX_AUX_STATUS_LINK);
+        if (bmcr & MII_BMCR_AUTOEN) {
+            if (link_up) {
+                value |= BCM54XX_AUX_STATUS_AN_COMPLETE |
+                         genet_phy_hcd(s);
+            }
         } else {
-            value &= ~BCM54XX_AUX_STATUS_LINK;
+            value |= genet_phy_hcd(s);
+        }
+        if (link_up) {
+            value |= BCM54XX_AUX_STATUS_LINK;
         }
     }
 
@@ -291,9 +357,15 @@ static void genet_phy_write(BCM2838GenetState *s, unsigned int reg,
         }
         genet_update_link_registers(s);
         break;
+    case MII_ANAR:
+    case MII_CTRL1000:
+        s->phy_regs[reg] = value;
+        genet_update_link_registers(s);
+        break;
     case MII_BMSR:
     case MII_PHYID1:
     case MII_PHYID2:
+    case MII_ANLPAR:
     case MII_STAT1000:
     case MII_EXTSTAT:
     case BCM54XX_AUX_STATUS:

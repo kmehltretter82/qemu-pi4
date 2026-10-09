@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "hw/arm/raspberrypi-fw-defs.h"
 #include "hw/misc/bcm2835_mbox_defs.h"
+#include "hw/net/mii.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/usb/dwc2-regs.h"
@@ -252,8 +253,12 @@
 #define GENET_MDIO_BUSY               (1U << 29)
 #define GENET_MDIO_FAIL               (1U << 28)
 #define GENET_MDIO_READ               (2U << 26)
+#define GENET_MDIO_WRITE              (1U << 26)
 #define GENET_MDIO_DONE_IRQ           (1U << 23)
 #define GENET_MDIO_ERROR_IRQ          (1U << 24)
+#define BCM54XX_AUX_STATUS_AN_COMPLETE (1U << 15)
+#define BCM54XX_AUX_STATUS_HCD_MASK    (7U << 8)
+#define BCM54XX_AUX_STATUS_LINK        (1U << 2)
 
 #define RASPI4_PCIE_BASE             0xfd500000ULL
 #define RASPI4_PCIE_MDIO_ADDR        (RASPI4_PCIE_BASE + 0x1100)
@@ -3935,6 +3940,17 @@ static uint32_t genet_mdio_read(unsigned int phy, unsigned int reg)
     return readl(RASPI4_GENET_MDIO_CMD);
 }
 
+static void genet_mdio_write(unsigned int phy, unsigned int reg,
+                             uint16_t value)
+{
+    uint32_t command = GENET_MDIO_BUSY | GENET_MDIO_WRITE |
+                       (phy << 21) | (reg << 16) | value;
+
+    writel(RASPI4_GENET_MDIO_CMD, command);
+    command = readl(RASPI4_GENET_MDIO_CMD);
+    g_assert_false(command & (GENET_MDIO_BUSY | GENET_MDIO_FAIL));
+}
+
 static void test_genet_registers_and_mdio(void)
 {
     uint32_t command;
@@ -3965,6 +3981,50 @@ static void test_genet_registers_and_mdio(void)
     writel(RASPI4_GENET_INTRL2_0 + RASPI4_GENET_IRQ_CLEAR,
            GENET_MDIO_DONE_IRQ);
 
+    command = genet_mdio_read(1, 0x19);
+    g_assert_cmphex(command & 0x8704, ==, 0x8704);
+    writel(RASPI4_GENET_INTRL2_0 + RASPI4_GENET_IRQ_CLEAR,
+           GENET_MDIO_DONE_IRQ);
+
+    /* The auxiliary status reflects forced speed and duplex settings. */
+    genet_mdio_write(1, MII_BMCR, MII_BMCR_SPEED100 | MII_BMCR_FD);
+    command = genet_mdio_read(1, 0x19);
+    g_assert_cmphex(command & (BCM54XX_AUX_STATUS_AN_COMPLETE |
+                              BCM54XX_AUX_STATUS_HCD_MASK |
+                              BCM54XX_AUX_STATUS_LINK), ==, 0x0504);
+    command = genet_mdio_read(1, MII_BMSR);
+    g_assert_true(command & MII_BMSR_LINK_ST);
+    g_assert_false(command & MII_BMSR_AN_COMP);
+
+    genet_mdio_write(1, MII_BMCR, 0);
+    command = genet_mdio_read(1, 0x19);
+    g_assert_cmphex(command & (BCM54XX_AUX_STATUS_AN_COMPLETE |
+                              BCM54XX_AUX_STATUS_HCD_MASK |
+                              BCM54XX_AUX_STATUS_LINK), ==, 0x0104);
+
+    /* Auto-negotiation chooses the highest mode advertised by both ends. */
+    genet_mdio_write(1, MII_CTRL1000, 0);
+    genet_mdio_write(1, MII_ANAR, MII_ANAR_CSMACD | MII_ANAR_TXFD);
+    genet_mdio_write(1, MII_BMCR,
+                     MII_BMCR_AUTOEN | MII_BMCR_ANRESTART);
+    command = genet_mdio_read(1, 0x19);
+    g_assert_cmphex(command & (BCM54XX_AUX_STATUS_AN_COMPLETE |
+                              BCM54XX_AUX_STATUS_HCD_MASK |
+                              BCM54XX_AUX_STATUS_LINK), ==, 0x8504);
+
+    /* No common advertised mode means negotiation and link stay down. */
+    genet_mdio_write(1, MII_ANAR, MII_ANAR_CSMACD);
+    genet_mdio_write(1, MII_CTRL1000, MII_CTRL1000_HALF);
+    genet_mdio_write(1, MII_BMCR,
+                     MII_BMCR_AUTOEN | MII_BMCR_ANRESTART);
+    command = genet_mdio_read(1, MII_BMSR);
+    g_assert_cmphex(command & (MII_BMSR_LINK_ST | MII_BMSR_AN_COMP), ==, 0);
+    command = genet_mdio_read(1, 0x19);
+    g_assert_cmphex(command & (BCM54XX_AUX_STATUS_AN_COMPLETE |
+                              BCM54XX_AUX_STATUS_HCD_MASK |
+                              BCM54XX_AUX_STATUS_LINK), ==, 0);
+
+    genet_mdio_write(1, MII_BMCR, MII_BMCR_RESET);
     command = genet_mdio_read(1, 0x19);
     g_assert_cmphex(command & 0x8704, ==, 0x8704);
     writel(RASPI4_GENET_INTRL2_0 + RASPI4_GENET_IRQ_CLEAR,
