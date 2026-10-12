@@ -217,6 +217,9 @@ transitions from that sample.
 separate reference validation harness uses an ordinary nl80211 helper,
 real guest fixture modules, bidirectional TCP/UDP and explicit reconnect.
 
+The integration checkpoint and next Pi 400/Pi 500+ model tasks are in
+:doc:`raspi-wifi-handoff`.
+
 Attaching USB storage
 ---------------------
 
