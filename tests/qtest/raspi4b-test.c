@@ -62,6 +62,7 @@
 #define CYW43455_SDIO_CCCR_IORX    0x03
 #define CYW43455_SDIO_CCCR_INTEN   0x04
 #define CYW43455_SDIO_CCCR_INTPEND 0x05
+#define CYW43455_SDIO_CCCR_ABORT   0x06
 #define CYW43455_SDIO_CCCR_CIS     0x09
 #define CYW43455_SDIO_CIS_COMMON   0x1000
 #define CYW43455_SDIO_FBR_SIZE     0x100
@@ -3067,6 +3068,19 @@ static void cyw43455_sdio_function2_read_qtest(QTestState *qts,
     }
 }
 
+static void cyw43455_sdio_function2_read_all_qtest(QTestState *qts,
+                                                    uint8_t *data,
+                                                    size_t length)
+{
+    while (length) {
+        size_t chunk = MIN(length, 512);
+
+        cyw43455_sdio_function2_read_qtest(qts, data, chunk);
+        data += chunk;
+        length -= chunk;
+    }
+}
+
 static size_t cyw43455_sdio_build_iovar_request(uint8_t *frame,
                                                 size_t frame_size,
                                                 const char *iovar,
@@ -4302,20 +4316,16 @@ static void cyw43455_sdio_wait_for_frame(QTestState *qts)
     g_error("timed out waiting for a CYW43455 receive frame");
 }
 
-static void cyw43455_sdio_assert_data_response(const uint8_t *frame,
-                                                size_t stored_len,
-                                                const uint8_t *packet,
-                                                size_t packet_len,
-                                                uint8_t sequence,
-                                                uint8_t tx_max)
+static void cyw43455_sdio_assert_aligned_data_response(
+    const uint8_t *frame, size_t stored_len, const uint8_t *packet,
+    size_t packet_len, size_t alignment, uint8_t sequence, uint8_t tx_max)
 {
     size_t frame_len = CYW43455_SDPCM_HEADER_LEN +
                        CYW43455_BCDC_DATA_HEADER_LEN + packet_len;
     size_t payload_offset = CYW43455_SDPCM_HEADER_LEN +
                             CYW43455_BCDC_DATA_HEADER_LEN;
 
-    g_assert_cmpuint(stored_len, ==,
-                     QEMU_ALIGN_UP(frame_len, sizeof(uint32_t)));
+    g_assert_cmpuint(stored_len, ==, QEMU_ALIGN_UP(frame_len, alignment));
     g_assert_cmpuint(lduw_le_p(frame), ==, frame_len);
     g_assert_cmphex(lduw_le_p(frame + 2), ==, (uint16_t)~frame_len);
     g_assert_cmpuint(frame[4], ==, sequence);
@@ -4330,6 +4340,18 @@ static void cyw43455_sdio_assert_data_response(const uint8_t *frame,
     for (size_t i = frame_len; i < stored_len; i++) {
         g_assert_cmphex(frame[i], ==, 0);
     }
+}
+
+static void cyw43455_sdio_assert_data_response(const uint8_t *frame,
+                                                size_t stored_len,
+                                                const uint8_t *packet,
+                                                size_t packet_len,
+                                                uint8_t sequence,
+                                                uint8_t tx_max)
+{
+    cyw43455_sdio_assert_aligned_data_response(
+        frame, stored_len, packet, packet_len, sizeof(uint32_t), sequence,
+        tx_max);
 }
 
 static void cyw43455_sdio_exchange_control(QTestState *qts,
@@ -4452,6 +4474,113 @@ static void test_cyw43455_sdio_fragmented_tx(void)
 static void test_cyw43455_sdio_fragmented_tx_migration(void)
 {
     cyw43455_sdio_fragmented_tx(true);
+}
+
+static void test_cyw43455_sdio_partial_tx_reset(void)
+{
+    uint8_t discarded_packet[100] = { 0x02, 0, 0, 0, 0, 1 };
+    uint8_t packet[100] = { 0x02, 0, 0, 0, 0, 1 };
+    uint8_t discarded_frame[116], frame[116], received[100], credit[12];
+    GPollFD pollfd = { .events = G_IO_IN | G_IO_HUP | G_IO_ERR };
+    uint32_t wire_len;
+    int peer;
+    QTestState *qts = cyw43455_sdio_reference_setup(
+        &peer, "-global cyw43455-sdio.tx-credit-delay-ms=5");
+
+    pollfd.fd = peer;
+    memset(discarded_packet + 6, 0x5a, sizeof(discarded_packet) - 6);
+    memset(packet + 6, 0xa5, sizeof(packet) - 6);
+    cyw43455_sdio_build_data_request(
+        discarded_frame, sizeof(discarded_frame), discarded_packet,
+        sizeof(discarded_packet));
+    cyw43455_sdio_build_data_request(frame, sizeof(frame), packet,
+                                      sizeof(packet));
+
+    /* Function reset must discard a valid but incomplete SDPCM frame. */
+    cyw43455_sdio_function2_write_qtest(qts, discarded_frame, 64);
+    g_assert_cmpint(g_poll(&pollfd, 1, 0), ==, 0);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
+                        qts, true, true, 0, CYW43455_SDIO_CCCR_ABORT,
+                        BIT(3)) & 0xff, ==, 0);
+
+    cyw43455_sdio_select_qtest(qts);
+    cyw43455_sdio_enable_control_irq_qtest(qts);
+    cyw43455_sdio_cmd52_qtest(qts, true, true, 0,
+                             CYW43455_SDIO_CCCR_IOEX, BIT(1) | BIT(2));
+    cyw43455_sdio_function2_write_qtest(qts, frame, sizeof(frame));
+    cyw43455_sdio_recv_all(peer, &wire_len, sizeof(wire_len));
+    g_assert_cmpuint(ntohl(wire_len), ==, sizeof(packet));
+    cyw43455_sdio_recv_all(peer, received, sizeof(received));
+    g_assert_cmpmem(received, sizeof(received), packet, sizeof(packet));
+    g_assert_cmpint(g_poll(&pollfd, 1, 0), ==, 0);
+
+    qtest_clock_step(qts, 5 * SCALE_MS);
+    cyw43455_sdio_wait_for_frame(qts);
+    cyw43455_sdio_function2_read_qtest(qts, credit, sizeof(credit));
+    cyw43455_sdio_assert_credit_update(
+        credit, sizeof(credit), 1, CYW43455_DEFAULT_CREDIT_WINDOW);
+    qtest_quit(qts);
+    close(peer);
+}
+
+static void test_cyw43455_sdio_irq_mask_ack_order(void)
+{
+    uint8_t control[48];
+    size_t len;
+    int peer;
+    QTestState *qts = cyw43455_sdio_reference_setup(&peer, "");
+
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_HOSTINTMASK, 0);
+    len = cyw43455_sdio_build_cur_etheraddr_request(
+        control, sizeof(control));
+    cyw43455_sdio_function2_write_qtest(qts, control, len);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==,
+                    CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
+                        qts, false, false, 0,
+                        CYW43455_SDIO_CCCR_INTPEND, 0) & 0xff, ==, 0);
+    g_assert_cmphex(qtest_readw(qts, RASPI4_EMMC1_BASE + SDHC_NORINTSTS) &
+                    SDHC_NIS_CARDINT, ==, 0);
+
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_HOSTINTMASK, CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
+                        qts, false, false, 0,
+                        CYW43455_SDIO_CCCR_INTPEND, 0) & 0xff, ==, BIT(1));
+    g_assert_cmphex(qtest_readw(qts, RASPI4_EMMC1_BASE + SDHC_NORINTSTS) &
+                    SDHC_NIS_CARDINT, ==, SDHC_NIS_CARDINT);
+
+    /* Reading the FIFO does not acknowledge the level interrupt. */
+    cyw43455_sdio_function2_read_qtest(qts, control, len);
+    cyw43455_sdio_assert_cur_etheraddr_response(
+        control, len, cyw43455_sdio_default_test_mac, 1);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==,
+                    CYW43455_SDIO_FRAME_IND);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_HOSTINTMASK, 0);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
+                        qts, false, false, 0,
+                        CYW43455_SDIO_CCCR_INTPEND, 0) & 0xff, ==, 0);
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_HOSTINTMASK, CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
+                        qts, false, false, 0,
+                        CYW43455_SDIO_CCCR_INTPEND, 0) & 0xff, ==, BIT(1));
+
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==, 0);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
+                        qts, false, false, 0,
+                        CYW43455_SDIO_CCCR_INTPEND, 0) & 0xff, ==, 0);
+    g_assert_cmphex(qtest_readw(qts, RASPI4_EMMC1_BASE + SDHC_NORINTSTS) &
+                    SDHC_NIS_CARDINT, ==, 0);
+    qtest_quit(qts);
+    close(peer);
 }
 
 static void cyw43455_sdio_credit_pressure(bool migrate)
@@ -4637,6 +4766,128 @@ static void test_cyw43455_sdio_rx_glom(void)
 static void test_cyw43455_sdio_rx_glom_migration(void)
 {
     cyw43455_sdio_rx_glom(true);
+}
+
+static void cyw43455_sdio_rx_glom_boundary(unsigned int group_count,
+                                            unsigned int alignment)
+{
+    uint8_t packets[7][128] = { };
+    size_t packet_lengths[7], stored_lengths[7];
+    uint8_t control[128], descriptor[32] = { }, super[2048] = { };
+    g_autofree char *options = g_strdup_printf(
+        "-global cyw43455-sdio.rx-glom-max-frames=%u "
+        "-global cyw43455-sdio.rx-glom-delay-ms=25", group_count);
+    uint32_t alignment_le = cpu_to_le32(alignment);
+    size_t descriptor_len = CYW43455_SDPCM_HEADER_LEN + 2 * group_count;
+    size_t head_len = QEMU_ALIGN_UP(CYW43455_SDPCM_HEADER_LEN, alignment);
+    size_t super_len = head_len;
+    size_t super_stored_len;
+    size_t len, offset;
+    const uint8_t descriptor_sequence = 2;
+    const uint8_t super_sequence = descriptor_sequence + 1;
+    const uint8_t tx_max = 1 + CYW43455_DEFAULT_CREDIT_WINDOW;
+    int peer;
+    QTestState *qts;
+
+    g_assert_cmpuint(group_count, >=, 2);
+    g_assert_cmpuint(group_count, <=, G_N_ELEMENTS(packets));
+    qts = cyw43455_sdio_reference_setup(&peer, options);
+
+    len = cyw43455_sdio_build_set_iovar_request(
+        control, sizeof(control), "bus:txglomalign", &alignment_le,
+        sizeof(alignment_le), 0, 1);
+    cyw43455_sdio_exchange_control(qts, control, len);
+    len = cyw43455_sdio_build_iovar_request(
+        control, sizeof(control), "arpoe", 1, 2);
+    cyw43455_sdio_exchange_control(qts, control, len);
+
+    for (unsigned int i = 0; i < group_count; i++) {
+        packet_lengths[i] = 60 + group_count + 3 * i;
+        memset(packets[i], 0x40 + i, packet_lengths[i]);
+        memcpy(packets[i], cyw43455_sdio_default_test_mac,
+               sizeof(cyw43455_sdio_default_test_mac));
+        packets[i][packet_lengths[i] - 1] = i;
+        stored_lengths[i] = QEMU_ALIGN_UP(
+            CYW43455_SDPCM_HEADER_LEN + CYW43455_BCDC_DATA_HEADER_LEN +
+            packet_lengths[i], alignment);
+        super_len += stored_lengths[i];
+        cyw43455_sdio_send_packet(peer, packets[i], packet_lengths[i]);
+    }
+    super_stored_len = QEMU_ALIGN_UP(super_len, 512);
+    g_assert_cmpuint(super_stored_len, <=, sizeof(super));
+
+    cyw43455_sdio_wait_for_frame(qts);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
+                        qts, false, false, 0,
+                        CYW43455_SDIO_CCCR_INTPEND, 0) & 0xff, ==, BIT(1));
+    g_assert_cmphex(qtest_readw(qts, RASPI4_EMMC1_BASE + SDHC_NORINTSTS) &
+                    SDHC_NIS_CARDINT, ==, SDHC_NIS_CARDINT);
+
+    /* The descriptor is consumed before acknowledging its level IRQ. */
+    cyw43455_sdio_function2_read_qtest(
+        qts, descriptor, sizeof(descriptor));
+    g_assert_cmpuint(lduw_le_p(descriptor), ==, descriptor_len);
+    g_assert_cmphex(lduw_le_p(descriptor + 2), ==,
+                    (uint16_t)~descriptor_len);
+    g_assert_cmpuint(descriptor[4], ==, descriptor_sequence);
+    g_assert_cmphex(descriptor[5], ==, 0x83);
+    g_assert_cmpuint(descriptor[7], ==, CYW43455_SDPCM_HEADER_LEN);
+    g_assert_cmpuint(descriptor[9], ==, tx_max);
+    for (unsigned int i = 0; i < group_count; i++) {
+        size_t described_len = stored_lengths[i] + (i ? 0 : head_len);
+
+        g_assert_cmpuint(lduw_le_p(
+                            descriptor + CYW43455_SDPCM_HEADER_LEN + 2 * i),
+                        ==, described_len);
+    }
+    for (size_t i = descriptor_len; i < sizeof(descriptor); i++) {
+        g_assert_cmphex(descriptor[i], ==, 0);
+    }
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==,
+                    CYW43455_SDIO_FRAME_IND);
+
+    cyw43455_sdio_function2_read_all_qtest(
+        qts, super, super_stored_len);
+    g_assert_cmpuint(lduw_le_p(super), ==, super_len);
+    g_assert_cmphex(lduw_le_p(super + 2), ==, (uint16_t)~super_len);
+    g_assert_cmpuint(super[4], ==, super_sequence);
+    g_assert_cmpuint(super[5], ==, 3);
+    g_assert_cmpuint(super[7], ==, head_len);
+    g_assert_cmpuint(super[9], ==, tx_max);
+    offset = head_len;
+    for (unsigned int i = 0; i < group_count; i++) {
+        cyw43455_sdio_assert_aligned_data_response(
+            super + offset, stored_lengths[i], packets[i], packet_lengths[i],
+            alignment, super_sequence + i, tx_max);
+        offset += stored_lengths[i];
+    }
+    g_assert_cmpuint(offset, ==, super_len);
+    for (size_t i = super_len; i < super_stored_len; i++) {
+        g_assert_cmphex(super[i], ==, 0);
+    }
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==,
+                    CYW43455_SDIO_FRAME_IND);
+
+    cyw43455_sdio_backplane_writel_qtest(
+        qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS), ==, 0);
+    g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
+                        qts, false, false, 0,
+                        CYW43455_SDIO_CCCR_INTPEND, 0) & 0xff, ==, 0);
+    g_assert_cmphex(qtest_readw(qts, RASPI4_EMMC1_BASE + SDHC_NORINTSTS) &
+                    SDHC_NIS_CARDINT, ==, 0);
+    qtest_quit(qts);
+    close(peer);
+}
+
+static void test_cyw43455_sdio_rx_glom_boundaries(void)
+{
+    for (unsigned int group_count = 2; group_count <= 7; group_count++) {
+        cyw43455_sdio_rx_glom_boundary(group_count, 1U << group_count);
+    }
 }
 
 static void cyw43455_sdio_reference_connection(bool migrate)
@@ -9357,10 +9608,16 @@ int main(int argc, char **argv)
                      test_cyw43455_sdio_fragmented_tx);
     raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_fragmented_tx_migration",
                      test_cyw43455_sdio_fragmented_tx_migration);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_partial_tx_reset",
+                     test_cyw43455_sdio_partial_tx_reset);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_irq_mask_ack_order",
+                     test_cyw43455_sdio_irq_mask_ack_order);
     raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_rx_glom",
                      test_cyw43455_sdio_rx_glom);
     raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_rx_glom_migration",
                      test_cyw43455_sdio_rx_glom_migration);
+    raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_rx_glom_boundaries",
+                     test_cyw43455_sdio_rx_glom_boundaries);
     raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_credit_pressure_migration",
                      test_cyw43455_sdio_credit_pressure_migration);
     raspi4b_add_test("/raspi4b/sd/cyw43455_sdio_reference_connection",
