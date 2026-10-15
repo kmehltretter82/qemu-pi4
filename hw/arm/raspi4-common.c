@@ -23,6 +23,7 @@
 #include "qemu/error-report.h"
 #include "hw/core/boards.h"
 #include "hw/core/loader.h"
+#include "net/net.h"
 #include "qom/object.h"
 
 #define SMPBOOT_ADDR    0x300
@@ -95,8 +96,19 @@ static void setup_boot(MachineState *machine, ARMCPU *cpu, size_t ram_size)
     arm_load_kernel(cpu, machine, &s->binfo);
 }
 
+static bool raspi4_get_sdio_wifi(Object *obj, Error **errp)
+{
+    return RASPI4_BASE_MACHINE(obj)->sdio_wifi;
+}
+
+static void raspi4_set_sdio_wifi(Object *obj, bool value, Error **errp)
+{
+    RASPI4_BASE_MACHINE(obj)->sdio_wifi = value;
+}
+
 void raspi4_common_machine_init(MachineState *machine, BCM2838State *soc)
 {
+    Raspi4BaseMachineState *s = RASPI4_BASE_MACHINE(machine);
     Raspi4BaseMachineClass *mc = RASPI4_BASE_MACHINE_GET_CLASS(machine);
     uint32_t board_rev = mc->board_rev;
     uint64_t ram_size = raspi4_board_ram_size(board_rev);
@@ -123,6 +135,18 @@ void raspi4_common_machine_init(MachineState *machine, BCM2838State *soc)
     object_property_set_str(OBJECT(soc), "command-line",
                             machine->kernel_cmdline, &error_abort);
     qdev_realize(DEVICE(soc), NULL, &error_fatal);
+
+    if (s->sdio_wifi) {
+        bus = qdev_get_child_bus(
+            DEVICE(&soc->peripherals.parent_obj.sdhci), "sd-bus");
+        if (bus == NULL) {
+            error_report("No SDIO Wi-Fi bus found in SOC object");
+            exit(1);
+        }
+        carddev = qdev_new(TYPE_CYW43455_SDIO);
+        qemu_configure_nic_device(carddev, false, NULL);
+        qdev_realize_and_unref(carddev, bus, &error_fatal);
+    }
 
     di = drive_get(IF_SD, 0, 0);
     blk = di ? blk_by_legacy_dinfo(di) : NULL;
@@ -162,11 +186,28 @@ void raspi4_common_machine_class_init(MachineClass *mc, uint32_t board_rev,
     mc->default_ram_id = "ram";
 }
 
+static void raspi4_base_machine_init(Object *obj)
+{
+    RASPI4_BASE_MACHINE(obj)->sdio_wifi = false;
+}
+
+static void raspi4_base_machine_class_init(ObjectClass *oc, const void *data)
+{
+    object_class_property_add_bool(oc, "sdio-wifi",
+                                   raspi4_get_sdio_wifi,
+                                   raspi4_set_sdio_wifi);
+    object_class_property_set_description(
+        oc, "sdio-wifi",
+        "attach the experimental CYW43455-compatible SDIO endpoint");
+}
+
 static const TypeInfo raspi4_base_machine_type = {
     .name           = TYPE_RASPI4_BASE_MACHINE,
     .parent         = TYPE_MACHINE,
     .instance_size  = sizeof(Raspi4BaseMachineState),
     .class_size     = sizeof(Raspi4BaseMachineClass),
+    .instance_init  = raspi4_base_machine_init,
+    .class_init     = raspi4_base_machine_class_init,
     .abstract       = true,
 };
 

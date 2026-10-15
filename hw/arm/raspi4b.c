@@ -97,6 +97,20 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
         }
     }
 
+    if (s_base->sdio_wifi) {
+        int offset = fdt_node_offset_by_compatible(fdt, -1,
+                                                   "brcm,bcm2835-sdhci");
+
+        /* The virtual endpoint is always powered and needs no reset GPIO. */
+        if (offset >= 0 && fdt_getprop(fdt, offset, "mmc-pwrseq", NULL)) {
+            if (fdt_delprop(fdt, offset, "mmc-pwrseq") != 0) {
+                error_report(
+                    "bcm2711 dtb: could not bypass Wi-Fi power sequence");
+                exit(1);
+            }
+        }
+    }
+
     node_paths = qemu_fdt_node_path(fdt, NULL, "brcm,bcm2711-genet-v5",
                                     &error_fatal);
     for (int i = 0; node_paths && node_paths[i]; i++) {

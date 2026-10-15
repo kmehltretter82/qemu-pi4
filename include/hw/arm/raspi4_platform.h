@@ -31,6 +31,7 @@ struct Raspi4BaseMachineState {
     /*< public >*/
     struct arm_boot_info binfo;
     BCM2838State soc;
+    bool sdio_wifi;
 };
 
 struct Raspi4BaseMachineClass {

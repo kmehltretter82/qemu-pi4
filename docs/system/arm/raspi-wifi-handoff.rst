@@ -1,0 +1,136 @@
+Pi 400 and Pi 500+ Wi-Fi development handoff
+============================================
+
+Checkpoint: 2026-10-12. This is AI-assisted work for Karl's downstream
+forks, not a QEMU upstream submission.
+
+Repositories and tested state
+-----------------------------
+
+Pi 400 development now belongs in
+https://github.com/kmehltretter82/qemu-pi4 on branch
+``pi400-wifi-integration-20261012``. The integration imports the earlier
+Pi 400 SDIO model onto main ``c1325f438746428317bbd6b2e9c2aee702147d78``;
+it retains that main's display, board and storage changes. Unrelated
+ExactCPU experiments were not imported. The endpoint stays disabled by
+default. See :doc:`raspi` for its options and supported control profile.
+
+Tested code commit: ``769485bc045e5270a0930a34dc6c2b9e2008339c``.
+The documentation commit following it does not change the tested code.
+Fresh Linux-host results:
+
+* Pi 4 qtests: 73/73; Pi 400 board: 5/5; display: 27/27. No skips.
+* One Linux PREEMPT_RT report-mode boot: 20/20 markers and 200/200 stream
+  records, ordered without duplicates. All 226 netconsole UDP datagrams
+  match the recorded Ethernet pcap byte-for-byte and in order.
+* Linux attached brcmfmac through ``fe300000.mmc`` using PIO. Lockdep
+  remained active; no measurement diagnostics or TX errors/drops occurred.
+
+That boot used the compatibility association profile, a 41-position SDPCM
+credit window and 1 ms delay. It skipped the old stress fixtures. It is
+integration coverage, not a new BASE/prototype or retry-policy comparison.
+
+Pi 500+ development belongs in
+https://github.com/kmehltretter82/qemu-pi5, branch
+``pi5-dma-tests-20261010``, pinned at
+``68c5213ce84dc1f224c191a30ae088976dba421e``. That fork has storage/DMA
+tests but does not yet implement the Wi-Fi endpoint. Do not copy the
+Pi 400 board wiring into it unchanged.
+
+Reproduce before extending the model
+------------------------------------
+
+Use a fresh clone rather than copying the Hetzner integration repository:
+the local repository borrows objects from an older checkout. With the
+normal QEMU build dependencies installed, build from the clone's root::
+
+  mkdir build-wifi
+  cd build-wifi
+  ../configure --target-list=aarch64-softmmu --enable-slirp --disable-docs
+  ninja qemu-system-aarch64 tests/qtest/raspi4b-test \
+      tests/qtest/raspi400-test tests/qtest/bcm2711-display-test
+  export QTEST_QEMU_BINARY="$PWD/qemu-system-aarch64"
+  tests/qtest/raspi4b-test
+  tests/qtest/raspi400-test
+  tests/qtest/bcm2711-display-test
+
+These commands were exercised on Linux with an offline dependency setup;
+the fresh macOS build still needs verification. Preserve its compiler,
+configuration, source identity and raw test output. The archived Linux
+smoke runner has fixed Hetzner paths and a binary hash. Adapt a copy for
+the Mac, recording the new paths and hash; do not edit the archived runner
+or assume its Linux binary is portable.
+
+Next Pi 400 milestone
+---------------------
+
+Add a small, driver-visible 5 GHz profile based on the successful hardware
+channel-36/20-MHz capture. Keep band lists, chanspecs, scan/BSS replies,
+rates and information elements consistent. Unsupported configurations
+should fail explicitly. A property naming a synthetic peer's channel does
+not establish that Linux can operate this endpoint as an AP.
+
+Then implement firmware flow-control signaling from captured modes 1/2:
+negotiation, message/TLV layout, per-peer credits and TX status. SDPCM
+transport sequence credits already modeled here are a different protocol.
+The short physical mode-2 runs show credit returns but no exhaustion, so
+they cannot supply an invented starvation/recovery rule. Use a separate
+capture to validate behavior after developing against the first one.
+
+The physical Pi 400 PMF-disabled AP workaround is useful evidence for an
+investigation, not a firmware fix. The current endpoint accepts selected
+control values but does not execute firmware, WPA handshakes or PMF. Add
+AP/PMF state tests only for a documented driver-visible contract; do not
+claim that synthetic association reproduces the hardware failure.
+
+Next Pi 500+ milestone
+----------------------
+
+Add a second BCM2712 SDHCI host and reuse the common endpoint/SD-bus card
+interrupt plumbing. Preserve the existing storage host:
+
+* Storage SDIO1: registers ``0x1000fff000``, configuration
+  ``0x1000fff400``, SPI 273 (GIC INTID 305).
+* Wi-Fi SDIO2: registers ``0x1001100000``, configuration
+  ``0x1001100400``, SPI 274 (GIC INTID 306).
+
+The SDIO2 values come from the preserved BCM2712 Linux device tree. The
+Pi 5 fork's SDHCI bus currently lacks the card-interrupt callback used by
+this endpoint. Import the common implementation and its dependencies as
+one reviewed change, then add board state, realization, DT wiring and an
+opt-in property. Keep the SD card on SDIO1. Capture the Pi 500+ chip,
+revision, SDIO IDs and selected firmware; its ADMA64 host alone does not
+establish that the Pi 400 endpoint identity is accurate for that board.
+
+First tests should cover separate host registers/IRQs, CMD5/3/7 discovery,
+CMD52 function setup and CMD53 byte/block transfers. Then exercise SDIO
+ADMA64 in both directions with descriptor tables and buffers above 4 GiB,
+guard bytes and poisoned low-address aliases. Include fragmented F2
+control/data traffic, IRQ masking/acknowledgement and reset with pending
+traffic. Retain the storage ADMA and NVMe regression tests. Only then
+attempt a bounded Linux boot through ``sdhci-brcmstb`` on SDIO2, requiring
+observed ADMA64 transfers rather than accepting a PIO fallback as DMA coverage.
+
+Hardware coordination and acceptance
+------------------------------------
+
+The Mac agent owns both boards. Finish the current Wi-Fi mechanism pair,
+restoration/archive and board release, then the queued DMA Stage 1 work,
+before scheduling new model-calibration boots. Offline QEMU work can
+proceed while those campaigns own the boards. Keep wired management and
+record the actual Wi-Fi topology, band, PMF and firmware configuration.
+
+Capture the driver/SDIO boundary as well as numbered receiver traffic.
+An empty ordinary DUT pcap does not prove netpoll sent no packets. Match
+hardware and guest kernel/configuration, host mode, credit protocol and
+workload before comparing behavior. Every new model feature needs a
+focused protocol regression and a bounded real-driver test.
+
+TCG validates modeled transactions and software paths; it does not prove
+physical cache coherence, RF loss, firmware scheduling or RT latency.
+Keep the physical packet-ordering/AP-loss findings and the netpoll retry
+design question open independently of model delivery passes.
+
+Full paths to the sealed inputs, raw results, hardware evidence and next
+tasks are in the Hetzner handoff:
+``/home/karl/linux-work/dmadebug/hwtest/qemu-pi4-wifi-integration-20261012/HANDOFF.txt``.

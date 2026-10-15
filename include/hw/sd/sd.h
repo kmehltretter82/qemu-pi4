@@ -90,6 +90,9 @@ DECLARE_INSTANCE_CHECKER(SDState, SD_CARD_SPI, TYPE_SD_CARD_SPI)
 #define TYPE_EMMC "emmc"
 DECLARE_INSTANCE_CHECKER(SDState, EMMC, TYPE_EMMC)
 
+/* Experimental SDIO endpoint used by the Raspberry Pi 4/400 model. */
+#define TYPE_CYW43455_SDIO "cyw43455-sdio"
+
 struct SDCardClass {
     /*< private >*/
     DeviceClass parent_class;
@@ -158,10 +161,11 @@ struct SDBusClass {
     /*< public >*/
 
     /* These methods are called by the SD device to notify the controller
-     * when the card insertion or readonly status changes
+     * when card-controlled signals change.
      */
     void (*set_inserted)(DeviceState *dev, bool inserted);
     void (*set_readonly)(DeviceState *dev, bool readonly);
+    void (*set_card_irq)(DeviceState *dev, bool level);
 };
 
 /* Functions to be used by qdevified callers (working via
@@ -234,5 +238,6 @@ void sdbus_reparent_card(SDBus *from, SDBus *to);
 /* Functions to be used by SD devices to report back to qdevified controllers */
 void sdbus_set_inserted(SDBus *sd, bool inserted);
 void sdbus_set_readonly(SDBus *sd, bool inserted);
+void sdbus_set_card_irq(SDBus *sd, bool level);
 
 #endif /* HW_SD_H */

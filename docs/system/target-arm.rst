@@ -102,6 +102,7 @@ Board-specific documentation
    arm/raspi-gicv2-lab
    arm/raspi-upstream
    arm/raspi-upstream-criteria
+   arm/raspi-wifi-handoff
    arm/collie
    arm/sx1
    arm/stellaris
