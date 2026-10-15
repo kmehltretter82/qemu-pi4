@@ -148,17 +148,20 @@ controller's ``mmc-pwrseq`` reference from the guest DT. It reports Broadcom
 ID ``02d0:a9a6`` on three SDIO functions, matching the observed BCM4345/9.
 Function three is enumeration-only. CMD5, CMD3, CMD7, CMD13, CMD52 and CMD53
 support Linux discovery; function one supplies a synthetic backplane, EROM,
-core reset registers and CR4 RAM geometry. Uploaded firmware is not executed.
-A bounded SDPCM/BDC responder supports the current driver control profile.
+core reset registers and 640 KiB of CR4 RAM. Firmware uploads are retained for
+driver readback at the BCM4345 TCM base ``0x198000`` but are not executed. A
+bounded SDPCM/BDC responder supports the current driver control profile.
 
 Matching Pi 400 firmware, NVRAM and CLM files are still needed for Linux
 ``brcmfmac`` to attach. Function two transports Ethernet in both directions,
 including host transmit gloms, runtime MAC and multicast filtering, and
 bounded ARP/ND offload. A TX frame split across block and byte CMD53 writes
 is assembled before forwarding. Linux uses its actual driver and SDIO
-interrupt path. Partial TX frames, control replies, RX contents, credit
-deadlines and pending link events
-migrate with the machine.
+interrupt path. The eMMC1 buffer-ready signal drives BCM2711 DMA DREQ 11, as
+used by the stock device tree, and is reconstructed from SDHCI state after
+migration. The synthetic firmware retains the driver's regulatory-country
+setting. Partial TX frames, control replies, RX contents, credit deadlines and
+pending link events migrate with the machine.
 
 The default compatibility profile synthesizes association on the first
 post-open promiscuous-filter update. Existing netpoll initramfs fixtures use

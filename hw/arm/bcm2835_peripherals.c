@@ -335,6 +335,8 @@ void bcm_soc_peripherals_common_realize(DeviceState *dev, Error **errp)
 
     memory_region_add_subregion(&s->peri_mr, EMMC1_OFFSET,
                 sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->sdhci), 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->sdhci), "dreq", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->dma), "dreq", 11));
 
     /* SDHOST */
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->sdhost), errp)) {

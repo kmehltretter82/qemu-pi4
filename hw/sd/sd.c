@@ -317,6 +317,8 @@ struct SDState {
 #define CYW43455_ARMCR4_BANKIDX          0x0040
 #define CYW43455_ARMCR4_BANKINFO         0x0044
 #define CYW43455_ARMCR4_BANK_COUNT       3
+#define CYW43455_ARMCR4_RAM_BASE         0x00198000
+#define CYW43455_ARMCR4_RAM_SIZE         (640 * KiB)
 
 #define CYW43455_SDIO_CORE_INDEX         4
 #define CYW43455_SDIO_INTSTATUS          0x0020
@@ -342,6 +344,8 @@ struct SDState {
 #define CYW43455_BCDC_PROTO_VER          2
 #define CYW43455_BCDC_DCMD_ERROR         BIT(0)
 #define CYW43455_BCDC_DCMD_SET           BIT(1)
+#define CYW43455_COUNTRY_BUF_SIZE        4
+#define CYW43455_COUNTRY_DATA_SIZE       (3 * CYW43455_COUNTRY_BUF_SIZE)
 #define CYW43455_BCME_BADARG             (-2)
 #define CYW43455_BCME_BUSY               (-16)
 #define CYW43455_BCME_UNSUPPORTED        (-23)
@@ -605,6 +609,7 @@ struct CYW43455SDIOState {
     uint32_t wrapper_ioctl[ARRAY_SIZE(cyw43455_sdio_cores)];
     uint32_t wrapper_reset[ARRAY_SIZE(cyw43455_sdio_cores)];
     uint32_t armcr4_bankidx;
+    uint8_t armcr4_ram[CYW43455_ARMCR4_RAM_SIZE];
     uint32_t sdio_intstatus;
     uint32_t sdio_hostintmask;
     uint32_t sdio_tosbmailbox;
@@ -661,6 +666,9 @@ struct CYW43455SDIOState {
     uint32_t nd_hostip_count;
     uint32_t pm2_sleep_ret;
     uint32_t power_mode;
+    uint8_t country_abbrev[CYW43455_COUNTRY_BUF_SIZE];
+    uint32_t country_rev;
+    uint8_t country_code[CYW43455_COUNTRY_BUF_SIZE];
     int32_t obss_coex;
     uint32_t qtxpower;
     uint32_t mfp_mode;
@@ -1619,6 +1627,37 @@ static bool cyw43455_sdio_supported_set_iovar(const char *name)
     return false;
 }
 
+static void cyw43455_sdio_reset_country(CYW43455SDIOState *s)
+{
+    memset(s->country_abbrev, 0, sizeof(s->country_abbrev));
+    memcpy(s->country_abbrev, "00", 2);
+    s->country_rev = 0;
+    memset(s->country_code, 0, sizeof(s->country_code));
+    memcpy(s->country_code, "00", 2);
+}
+
+static bool cyw43455_sdio_country_valid(const uint8_t *abbrev,
+                                        const uint8_t *code)
+{
+    unsigned int i;
+
+    if (!abbrev[0] || !abbrev[1] || abbrev[2] || abbrev[3] ||
+        !code[0] || !code[1] || code[3]) {
+        return false;
+    }
+    for (i = 0; i < 2; i++) {
+        if (!g_ascii_isupper(abbrev[i]) && !g_ascii_isdigit(abbrev[i])) {
+            return false;
+        }
+    }
+    for (i = 0; i < 3 && code[i]; i++) {
+        if (!g_ascii_isupper(code[i]) && !g_ascii_isdigit(code[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void cyw43455_sdio_pfn_clear(CYW43455SDIOState *s)
 {
     memset(s->pfn_channels, 0, sizeof(s->pfn_channels));
@@ -1811,6 +1850,21 @@ static int32_t cyw43455_sdio_set_iovar(CYW43455SDIOState *s,
     }
     if (!strcmp(name, "wpaie")) {
         return data_len == 0 ? 0 : CYW43455_BCME_UNSUPPORTED;
+    }
+    if (!strcmp(name, "country")) {
+        if (data_len != CYW43455_COUNTRY_DATA_SIZE) {
+            return CYW43455_BCME_BADLEN;
+        }
+        if (!cyw43455_sdio_country_valid(
+                data, data + 2 * CYW43455_COUNTRY_BUF_SIZE)) {
+            return CYW43455_BCME_BADARG;
+        }
+        memcpy(s->country_abbrev, data, sizeof(s->country_abbrev));
+        s->country_rev = ldl_le_p(data + CYW43455_COUNTRY_BUF_SIZE);
+        memcpy(s->country_code,
+               data + 2 * CYW43455_COUNTRY_BUF_SIZE,
+               sizeof(s->country_code));
+        return 0;
     }
 
     if (!strcmp(name, "pfn") || !strcmp(name, "pfnclear") ||
@@ -2276,6 +2330,14 @@ static int32_t cyw43455_sdio_control_reply(CYW43455SDIOState *s,
         } else if (!strcmp(iovar, "cur_etheraddr")) {
             memcpy(output, s->current_mac,
                    MIN(sizeof(s->current_mac), output_len));
+        } else if (!strcmp(iovar, "country")) {
+            if (output_len < CYW43455_COUNTRY_DATA_SIZE) {
+                return CYW43455_BCME_BADLEN;
+            }
+            memcpy(output, s->country_abbrev, sizeof(s->country_abbrev));
+            stl_le_p(output + CYW43455_COUNTRY_BUF_SIZE, s->country_rev);
+            memcpy(output + 2 * CYW43455_COUNTRY_BUF_SIZE,
+                   s->country_code, sizeof(s->country_code));
         } else if (!strcmp(iovar, "ver")) {
             cyw43455_sdio_store_string(output, output_len,
                                        "QEMU CYW43455 synthetic 1.0\n");
@@ -2803,6 +2865,12 @@ static uint32_t cyw43455_sdio_backplane_readl(CYW43455SDIOState *s,
     uint32_t sdio_offset;
 
     address &= ~3U;
+    if (address >= CYW43455_ARMCR4_RAM_BASE &&
+        address - CYW43455_ARMCR4_RAM_BASE <=
+        CYW43455_ARMCR4_RAM_SIZE - sizeof(uint32_t)) {
+        return ldl_le_p(s->armcr4_ram +
+                        address - CYW43455_ARMCR4_RAM_BASE);
+    }
     if (address == CYW43455_ENUM_BASE) {
         return CYW43455_CHIP_ID;
     }
@@ -2867,6 +2935,13 @@ static void cyw43455_sdio_backplane_writel(CYW43455SDIOState *s,
     uint32_t sdio_offset;
 
     address &= ~3U;
+    if (address >= CYW43455_ARMCR4_RAM_BASE &&
+        address - CYW43455_ARMCR4_RAM_BASE <=
+        CYW43455_ARMCR4_RAM_SIZE - sizeof(uint32_t)) {
+        stl_le_p(s->armcr4_ram + address - CYW43455_ARMCR4_RAM_BASE,
+                 value);
+        return;
+    }
     for (i = 0; i < ARRAY_SIZE(cyw43455_sdio_cores); i++) {
         if (address == cyw43455_sdio_cores[i].wrapper +
                        CYW43455_BCMA_IOCTL) {
@@ -3050,6 +3125,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     memset(s->wrapper_ioctl, 0, sizeof(s->wrapper_ioctl));
     memset(s->wrapper_reset, 0, sizeof(s->wrapper_reset));
     s->armcr4_bankidx = 0;
+    memset(s->armcr4_ram, 0, sizeof(s->armcr4_ram));
     s->sdio_intstatus = 0;
     s->sdio_hostintmask = 0;
     s->sdio_tosbmailbox = 0;
@@ -3101,6 +3177,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->nd_hostip_count = 0;
     s->pm2_sleep_ret = 0;
     s->power_mode = CYW43455_PM_OFF;
+    cyw43455_sdio_reset_country(s);
     s->obss_coex = CYW43455_OBSS_COEX_OFF;
     s->qtxpower = CYW43455_QTXPOWER_DEFAULT_QDBM;
     s->mfp_mode = CYW43455_MFP_NONE;
@@ -4011,6 +4088,9 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         s->rx_glom_ready = false;
         s->rx_glom_super_pending = false;
     }
+    if (version_id < 30) {
+        cyw43455_sdio_reset_country(s);
+    }
     if (s->rx_glom_align < 4 || s->rx_glom_align > 128 ||
         (s->rx_glom_align & (s->rx_glom_align - 1)) ||
         s->rx_glom_count > s->rx_glom_max_frames ||
@@ -4083,6 +4163,8 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         (s->qtxpower & ~(CYW43455_QTXPOWER_OVERRIDE |
                          CYW43455_QTXPOWER_MAX_QDBM)) ||
         s->mfp_mode > CYW43455_MFP_REQUIRED ||
+        !cyw43455_sdio_country_valid(s->country_abbrev,
+                                     s->country_code) ||
         s->survey_duration_ms > 60000 ||
         (s->survey_active && !s->survey_duration_ms)) {
         return -EINVAL;
@@ -4095,7 +4177,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 28,
+    .version_id = 30,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -4113,6 +4195,13 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_UINT32_ARRAY_V(wrapper_reset, CYW43455SDIOState,
                                ARRAY_SIZE(cyw43455_sdio_cores), 2),
         VMSTATE_UINT32_V(armcr4_bankidx, CYW43455SDIOState, 2),
+        VMSTATE_UINT8_ARRAY_V(armcr4_ram, CYW43455SDIOState,
+                              CYW43455_ARMCR4_RAM_SIZE, 29),
+        VMSTATE_UINT8_ARRAY_V(country_abbrev, CYW43455SDIOState,
+                              CYW43455_COUNTRY_BUF_SIZE, 30),
+        VMSTATE_UINT32_V(country_rev, CYW43455SDIOState, 30),
+        VMSTATE_UINT8_ARRAY_V(country_code, CYW43455SDIOState,
+                              CYW43455_COUNTRY_BUF_SIZE, 30),
         VMSTATE_UINT32_V(sdio_intstatus, CYW43455SDIOState, 3),
         VMSTATE_UINT32_V(sdio_hostintmask, CYW43455SDIOState, 3),
         VMSTATE_UINT32_V(sdio_tosbmailbox, CYW43455SDIOState, 3),

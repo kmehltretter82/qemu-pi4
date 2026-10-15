@@ -39,6 +39,7 @@
 #define RASPI4_EMMC2_BASE      0xfe340000
 #define RASPI4_EMMC2_CAPAREG   0x0000a52545ee6432ULL
 #define RASPI4_EMMC1_BASE      0xfe300000
+#define RASPI4_EMMC1_GPU_BDATA 0x7e300020
 
 #define SDIO_CMD_IO_SEND_OP_COND  5
 #define SDIO_CMD_IO_RW_DIRECT    52
@@ -85,6 +86,8 @@
 #define CYW43455_SDIO_EROM_BASE    0x18110000
 #define CYW43455_SDIO_CR4_BASE     0x18002000
 #define CYW43455_SDIO_CR4_WRAPPER  0x18102000
+#define CYW43455_SDIO_CR4_RAM_BASE 0x00198000
+#define CYW43455_SDIO_CR4_RAM_SIZE (640 * KiB)
 #define CYW43455_SDIO_CORE_BASE    0x18004000
 #define CYW43455_SDIO_INTSTATUS    (CYW43455_SDIO_CORE_BASE + 0x20)
 #define CYW43455_SDIO_HOSTINTMASK  (CYW43455_SDIO_CORE_BASE + 0x24)
@@ -274,9 +277,14 @@
 #define RASPI4_DMA_TXFR_LEN        (RASPI4_DMA5_BASE + 0x14)
 #define DMA_ACTIVE                 (1U << 0)
 #define DMA_END                    (1U << 1)
+#define DMA_DREQ                   (1U << 3)
 #define DMA_ISPAUSED               (1U << 4)
+#define DMA_D_DREQ                 (1U << 6)
 #define DMA_S_INC                  (1U << 8)
+#define DMA_S_DREQ                 (1U << 10)
 #define DMA_D_INC                  (1U << 4)
+#define DMA_PERMAP(_n)             ((_n) << 16)
+#define DMA_RESET                  (1U << 31)
 
 #define RASPI4_DWC2_BASE          0xfe980000
 #define RASPI4_DWC2_REG(_reg)     (RASPI4_DWC2_BASE + (_reg))
@@ -4252,7 +4260,268 @@ static void test_cyw43455_sdio_endpoint(void)
         global_qtest, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
 }
 
+static void test_cyw43455_sdio_cr4_ram(void)
+{
+    static const struct {
+        uint32_t address;
+        uint32_t value;
+    } samples[] = {
+        { CYW43455_SDIO_CR4_RAM_BASE, 0x44332211 },
+        { CYW43455_SDIO_CR4_RAM_BASE + 0x7ffc, 0x88776655 },
+        { CYW43455_SDIO_CR4_RAM_BASE + 0x8000, 0xccbbaa99 },
+        { CYW43455_SDIO_CR4_RAM_BASE + CYW43455_SDIO_CR4_RAM_SIZE -
+          sizeof(uint32_t), 0xdecafbad },
+    };
+    unsigned int i;
+
+    cyw43455_sdio_select_qtest(global_qtest);
+    for (i = 0; i < ARRAY_SIZE(samples); i++) {
+        g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                            global_qtest, samples[i].address), ==, 0);
+        cyw43455_sdio_backplane_writel_qtest(
+            global_qtest, samples[i].address, samples[i].value);
+        g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                            global_qtest, samples[i].address), ==,
+                        samples[i].value);
+    }
+
+    cyw43455_sdio_backplane_writel_qtest(
+        global_qtest, CYW43455_SDIO_CR4_RAM_BASE - sizeof(uint32_t),
+        0x12345678);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest,
+                        CYW43455_SDIO_CR4_RAM_BASE - sizeof(uint32_t)), ==,
+                    0);
+    cyw43455_sdio_backplane_writel_qtest(
+        global_qtest,
+        CYW43455_SDIO_CR4_RAM_BASE + CYW43455_SDIO_CR4_RAM_SIZE,
+        0x12345678);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        global_qtest,
+                        CYW43455_SDIO_CR4_RAM_BASE +
+                        CYW43455_SDIO_CR4_RAM_SIZE), ==, 0);
+
+    qtest_system_reset(global_qtest);
+    cyw43455_sdio_select_qtest(global_qtest);
+    for (i = 0; i < ARRAY_SIZE(samples); i++) {
+        g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                            global_qtest, samples[i].address), ==, 0);
+    }
+}
+
+static void test_cyw43455_sdio_dma(void)
+{
+    enum {
+        DMA_CB = 0x10000,
+        DMA_SOURCE = 0x20000,
+        DMA_DESTINATION = 0x30000,
+        TRANSFER_SIZE = 2048,
+        SDIO_BLOCK_SIZE = 64,
+        SDIO_BLOCK_COUNT = TRANSFER_SIZE / SDIO_BLOCK_SIZE,
+    };
+    uint8_t expected[TRANSFER_SIZE];
+    uint8_t actual[TRANSFER_SIZE];
+    uint32_t argument;
+    uint32_t sdio_address;
+    unsigned int i;
+
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = (i * 37) ^ (i >> 3);
+    }
+    memset(actual, 0, sizeof(actual));
+
+    cyw43455_sdio_select_qtest(global_qtest);
+    cyw43455_sdio_set_backplane_window_qtest(
+        global_qtest, CYW43455_SDIO_CR4_RAM_BASE);
+    sdio_address = CYW43455_SDIO_SB_ACCESS |
+                   (CYW43455_SDIO_CR4_RAM_BASE &
+                    CYW43455_SDIO_SB_OFFSET);
+    argument = SDIO_CMD53_WRITE | (1U << SDIO_CMD_FUNC_SHIFT) |
+               SDIO_CMD53_BLOCK_MODE | SDIO_CMD53_INCREMENT |
+               (sdio_address << SDIO_CMD_ADDR_SHIFT) | SDIO_BLOCK_COUNT;
+    sdhci_cmd_regs(global_qtest, RASPI4_EMMC1_BASE, SDIO_BLOCK_SIZE,
+                   SDIO_BLOCK_COUNT, argument,
+                   SDHC_TRNS_BLK_CNT_EN | SDHC_TRNS_MULTI,
+                   (SDIO_CMD_IO_RW_EXTENDED << 8) |
+                   SDHC_CMD_DATA_PRESENT | SDHC_CMD_RESPONSE);
+
+    memwrite(DMA_SOURCE, expected, sizeof(expected));
+    writel(DMA_CB, DMA_S_INC | DMA_D_DREQ | DMA_PERMAP(11));
+    writel(DMA_CB + 4, DMA_SOURCE);
+    writel(DMA_CB + 8, RASPI4_EMMC1_GPU_BDATA);
+    writel(DMA_CB + 12, TRANSFER_SIZE);
+    writel(DMA_CB + 16, 0);
+    writel(DMA_CB + 20, 0);
+    writel(RASPI4_DMA_CS, DMA_RESET);
+    writel(RASPI4_DMA_ADDR, DMA_CB);
+    writel(RASPI4_DMA_CS, DMA_ACTIVE);
+    g_assert_cmphex(readl(RASPI4_DMA_TXFR_LEN), ==, TRANSFER_SIZE / 2);
+    qtest_clock_step(global_qtest, 1000);
+    g_assert_cmphex(readl(RASPI4_DMA_CS) & (DMA_ACTIVE | DMA_END), ==,
+                    DMA_END);
+
+    cyw43455_sdio_set_backplane_window_qtest(
+        global_qtest, CYW43455_SDIO_CR4_RAM_BASE);
+    argument = (1U << SDIO_CMD_FUNC_SHIFT) | SDIO_CMD53_BLOCK_MODE |
+               SDIO_CMD53_INCREMENT |
+               (sdio_address << SDIO_CMD_ADDR_SHIFT) | SDIO_BLOCK_COUNT;
+    sdhci_cmd_regs(global_qtest, RASPI4_EMMC1_BASE, SDIO_BLOCK_SIZE,
+                   SDIO_BLOCK_COUNT, argument,
+                   SDHC_TRNS_BLK_CNT_EN | SDHC_TRNS_MULTI | SDHC_TRNS_READ,
+                   (SDIO_CMD_IO_RW_EXTENDED << 8) |
+                   SDHC_CMD_DATA_PRESENT | SDHC_CMD_RESPONSE);
+
+    memwrite(DMA_DESTINATION, actual, sizeof(actual));
+    writel(DMA_CB, DMA_D_INC | DMA_S_DREQ | DMA_PERMAP(11));
+    writel(DMA_CB + 4, RASPI4_EMMC1_GPU_BDATA);
+    writel(DMA_CB + 8, DMA_DESTINATION);
+    writel(DMA_CB + 12, TRANSFER_SIZE);
+    writel(DMA_CB + 16, 0);
+    writel(DMA_CB + 20, 0);
+    writel(RASPI4_DMA_CS, DMA_RESET);
+    writel(RASPI4_DMA_ADDR, DMA_CB);
+    writel(RASPI4_DMA_CS, DMA_ACTIVE);
+    g_assert_cmphex(readl(RASPI4_DMA_TXFR_LEN), ==, TRANSFER_SIZE / 2);
+    qtest_clock_step(global_qtest, 1000);
+    g_assert_cmphex(readl(RASPI4_DMA_CS) & (DMA_ACTIVE | DMA_END), ==,
+                    DMA_END);
+    memread(DMA_DESTINATION, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+}
+
 #ifndef _WIN32
+static void cyw43455_sdio_wait_for_frame(QTestState *qts);
+
+static void test_cyw43455_sdio_dma_migration(void)
+{
+    static const uint8_t default_country[12] = {
+        '0', '0', 0, 0, 0, 0, 0, 0, '0', '0', 0, 0,
+    };
+    static const uint8_t migrated_country[12] = {
+        'D', 'E', 0, 0, 1, 0, 0, 0, 'D', 'E', 0, 0,
+    };
+    enum {
+        DMA_CB = 0x10000,
+        DMA_DESTINATION = 0x30000,
+    };
+    const uint32_t ram_address = CYW43455_SDIO_CR4_RAM_BASE + 0x1000;
+    const uint32_t expected = 0xdecafbad;
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *state_path = NULL;
+    g_autofree char *uri = NULL;
+    g_autoptr(GString) cmd_line =
+        g_string_new("-machine raspi4b,sdio-wifi=on");
+    QTestState *source = global_qtest;
+    QTestState *destination;
+    uint8_t control_frame[64];
+    uint32_t argument;
+    uint32_t sdio_address;
+    size_t control_len;
+    int net_sockets[2];
+    int ret;
+
+    cyw43455_sdio_select_qtest(source);
+    cyw43455_sdio_enable_control_irq_qtest(source);
+
+    control_len = cyw43455_sdio_build_iovar_request(
+        control_frame, sizeof(control_frame), "country", 0, 1);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    cyw43455_sdio_assert_iovar_value_response(
+        control_frame, control_len, 0, 1, default_country,
+        sizeof(default_country));
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    control_len = cyw43455_sdio_build_set_iovar_request(
+        control_frame, sizeof(control_frame), "country", migrated_country,
+        sizeof(migrated_country), 1, 2);
+    cyw43455_sdio_function2_write_qtest(source, control_frame, control_len);
+    cyw43455_sdio_wait_for_frame(source);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(source, control_frame, control_len);
+    cyw43455_sdio_assert_set_iovar_response(
+        control_frame, control_len, "country", sizeof(migrated_country),
+        1, 2);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    cyw43455_sdio_backplane_writel_qtest(source, ram_address, expected);
+    cyw43455_sdio_set_backplane_window_qtest(source, ram_address);
+    sdio_address = CYW43455_SDIO_SB_ACCESS |
+                   (ram_address & CYW43455_SDIO_SB_OFFSET);
+    argument = (1U << SDIO_CMD_FUNC_SHIFT) | SDIO_CMD53_INCREMENT |
+               (sdio_address << SDIO_CMD_ADDR_SHIFT) | sizeof(expected);
+    sdhci_cmd_regs(source, RASPI4_EMMC1_BASE, sizeof(expected), 1, argument,
+                   SDHC_TRNS_BLK_CNT_EN | SDHC_TRNS_READ,
+                   (SDIO_CMD_IO_RW_EXTENDED << 8) |
+                   SDHC_CMD_DATA_PRESENT | SDHC_CMD_RESPONSE);
+
+    qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
+    tmpdir = g_dir_make_tmp("raspi4b-cyw43455-dma-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    state_path = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("file:%s", state_path);
+    qtest_qmp_assert_success(source,
+        "{ 'execute': 'migrate', 'arguments': { 'uri': %s } }", uri);
+    raspi4b_wait_for_migration(source);
+
+    if (pcie_has_edu) {
+        g_string_append(cmd_line,
+                        " -device edu,id=edu0,bus=pcie.1,addr=1,"
+                        "dma_mask=0xffffffffffffffff");
+    }
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, net_sockets);
+    g_assert_cmpint(ret, !=, -1);
+    g_string_append_printf(cmd_line, " -nic socket,fd=%d,model=genet",
+                           net_sockets[1]);
+    g_string_append(cmd_line, " -incoming defer");
+    destination = qtest_init(cmd_line->str);
+    close(net_sockets[1]);
+    qtest_qmp_assert_success(destination,
+        "{ 'execute': 'migrate-incoming', 'arguments': { "
+        "'uri': %s, 'exit-on-error': false } }", uri);
+    raspi4b_wait_for_migration(destination);
+
+    qtest_writel(destination, DMA_DESTINATION, 0);
+    qtest_writel(destination, DMA_CB,
+                 DMA_D_INC | DMA_S_DREQ | DMA_PERMAP(11));
+    qtest_writel(destination, DMA_CB + 4, RASPI4_EMMC1_GPU_BDATA);
+    qtest_writel(destination, DMA_CB + 8, DMA_DESTINATION);
+    qtest_writel(destination, DMA_CB + 12, sizeof(expected));
+    qtest_writel(destination, DMA_CB + 16, 0);
+    qtest_writel(destination, DMA_CB + 20, 0);
+    qtest_writel(destination, RASPI4_DMA_CS, DMA_RESET);
+    qtest_writel(destination, RASPI4_DMA_ADDR, DMA_CB);
+    qtest_writel(destination, RASPI4_DMA_CS, DMA_ACTIVE);
+    g_assert_cmphex(qtest_readl(destination, DMA_DESTINATION), ==, expected);
+    g_assert_cmphex(qtest_readl(destination, RASPI4_DMA_CS) &
+                    (DMA_ACTIVE | DMA_END | DMA_DREQ), ==, DMA_END);
+
+    control_len = cyw43455_sdio_build_iovar_request(
+        control_frame, sizeof(control_frame), "country", 2, 3);
+    cyw43455_sdio_function2_write_qtest(destination, control_frame,
+                                        control_len);
+    cyw43455_sdio_wait_for_frame(destination);
+    memset(control_frame, 0, sizeof(control_frame));
+    cyw43455_sdio_function2_read_qtest(destination, control_frame,
+                                       control_len);
+    cyw43455_sdio_assert_iovar_value_response(
+        control_frame, control_len, 2, 3, migrated_country,
+        sizeof(migrated_country));
+    cyw43455_sdio_backplane_writel_qtest(
+        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    qtest_quit(destination);
+    close(net_sockets[0]);
+    g_assert_cmpint(g_unlink(state_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
 static void cyw43455_sdio_send_all(int socket_fd, const void *buffer,
                                    size_t size)
 {
@@ -7716,6 +7985,8 @@ static void test_cyw43455_sdio_migration(void)
                     ==, 0x3c);
     cyw43455_sdio_backplane_writel_qtest(
         source, CYW43455_SDIO_CR4_WRAPPER + 0x408, 0x23);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_CR4_RAM_BASE + 0x7ffc, 0xdecafbad);
     cyw43455_sdio_enable_control_irq_qtest(source);
 
     /* Complete synthetic startup so a later filter update can associate. */
@@ -7909,6 +8180,10 @@ static void test_cyw43455_sdio_migration(void)
                         destination,
                         CYW43455_SDIO_CR4_WRAPPER + 0x408),
                     ==, 0x23);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        destination,
+                        CYW43455_SDIO_CR4_RAM_BASE + 0x7ffc), ==,
+                    0xdecafbad);
     g_assert_cmphex(cyw43455_sdio_cmd52_qtest(
                         destination, false, false, 0,
                         CYW43455_SDIO_CCCR_INTPEND, 0) & 0xff,
@@ -9808,6 +10083,12 @@ int main(int argc, char **argv)
                                "tx-credit-delay-ms=25"
                                " -global cyw43455-sdio."
                                "tx-credit-window=5");
+    raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio_cr4_ram",
+                               test_cyw43455_sdio_cr4_ram,
+                               " -machine sdio-wifi=on");
+    raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio_dma",
+                               test_cyw43455_sdio_dma,
+                               " -machine sdio-wifi=on");
     raspi4b_add_test_with_args("/raspi4b/sd/cyw43455_sdio_wlc_version",
                                test_cyw43455_sdio_wlc_version,
                                " -machine sdio-wifi=on");
@@ -9817,6 +10098,10 @@ int main(int argc, char **argv)
         " -machine sdio-wifi=on"
         " -global cyw43455-sdio.ap-chanspec=0x190b");
 #ifndef _WIN32
+    raspi4b_add_test_with_args(
+        "/raspi4b/sd/cyw43455_sdio_dma_migration",
+        test_cyw43455_sdio_dma_migration,
+        " -machine sdio-wifi=on");
     raspi4b_add_test_with_args(
         "/raspi4b/sd/cyw43455_sdio_power_save_migration",
         test_cyw43455_sdio_power_save_migration,

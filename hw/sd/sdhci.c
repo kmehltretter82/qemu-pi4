@@ -224,6 +224,8 @@ static bool sdhci_update_irq(SDHCIState *s)
     bool pending = sdhci_slotint(s);
 
     qemu_set_irq(s->irq, pending);
+    qemu_set_irq(s->dreq, s->prnsts &
+                 (SDHC_SPACE_AVAILABLE | SDHC_DATA_AVAILABLE));
 
     return pending;
 }
@@ -1431,6 +1433,7 @@ static void sdhci_init_readonly_registers(SDHCIState *s, Error **errp)
 void sdhci_initfn(SDHCIState *s)
 {
     qbus_init(&s->sdbus, sizeof(s->sdbus), TYPE_SDHCI_BUS, DEVICE(s), "sd-bus");
+    qdev_init_gpio_out_named(DEVICE(s), &s->dreq, "dreq", 1);
 
     s->insert_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                    sdhci_raise_insertion_irq, s);
@@ -1496,10 +1499,19 @@ static const VMStateDescription sdhci_pending_insert_vmstate = {
     },
 };
 
+static int sdhci_post_load(void *opaque, int version_id)
+{
+    SDHCIState *s = opaque;
+
+    sdhci_update_irq(s);
+    return 0;
+}
+
 const VMStateDescription sdhci_vmstate = {
     .name = "sdhci",
     .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = sdhci_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(sdmasysad, SDHCIState),
         VMSTATE_UINT16(blksize, SDHCIState),
