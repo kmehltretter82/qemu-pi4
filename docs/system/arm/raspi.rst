@@ -11,6 +11,11 @@ Raspberry Pi 4 family
   Raspberry Pi 400 revision 1.0 (board revision ``0xc03130``), with 4 GiB of
   RAM. This model requires a 64-bit host.
 
+On a 64-bit host, the Pi 4B's default 64 MiB VideoCore allocation leaves
+960 MiB of ARM-visible RAM below 1 GiB and a second 1 GiB range from
+``0x40000000`` through ``0x7fffffff``.  Thus Linux sees 1984 MiB of the
+board's fixed 2 GiB rather than silently losing the upper range.
+
 The Pi 400's ARM-visible memory has a VideoCore carveout below 1 GiB and the
 BCM2711 peripheral window at ``0xfc000000``. With the default 64 MiB VideoCore
 allocation, Linux is therefore presented with 3968 MiB in two ranges rather

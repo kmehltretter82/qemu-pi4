@@ -29,12 +29,15 @@
 
 #if HOST_LONG_BITS == 32
 #define RASPI4B_BOARD_REVISION 0xa03111
+#define RASPI4B_RAM_SIZE       (1ULL * GiB)
 #else
 #define RASPI4B_BOARD_REVISION 0xb03115
+#define RASPI4B_RAM_SIZE       (2ULL * GiB)
 #endif
 
 #define RASPI4_VCRAM_BASE      0x3c000000
-#define RASPI4_GPU_RAM_ALIAS   0x40000000
+#define RASPI4_UPPER_RAM_BASE  0x40000000
+#define RASPI4_GPU_RAM_ALIAS   RASPI4_UPPER_RAM_BASE
 #define RASPI4_POWER_USB_HCD_ID 3
 #define RASPI4_EMMC2_BASE      0xfe340000
 #define RASPI4_EMMC2_CAPAREG   0x0000a52545ee6432ULL
@@ -2431,6 +2434,34 @@ static void test_cpu_configuration(void)
     g_assert(qdict_haskey(response, "return"));
     g_assert_cmpint(qdict_get_int(response, "return"), ==, 54000000);
     qobject_unref(response);
+}
+
+static void test_memory_layout(void)
+{
+    g_autoptr(QDict) response = qtest_qmp(
+        global_qtest, "{ 'execute': 'query-memory-size-summary' }");
+    QDict *summary = qdict_get_qdict(response, "return");
+
+    g_assert_cmpint(qdict_get_int(summary, "base-memory"), ==,
+                    RASPI4B_RAM_SIZE);
+
+#if HOST_LONG_BITS == 64
+    /*
+     * With the default carveout, the boot DT exposes 960 MiB below the
+     * VideoCore window and the remaining 1 GiB above it.  Distinct values at
+     * all three edges prove that the upper range is backed by RAM rather than
+     * an alias of the low range.  The functional Linux test checks the DT.
+     */
+    writel(RASPI4_VCRAM_BASE - sizeof(uint32_t), 0x01234567);
+    writel(RASPI4_UPPER_RAM_BASE, 0x89abcdef);
+    writel(RASPI4B_RAM_SIZE - sizeof(uint32_t), 0x51454d55);
+
+    g_assert_cmphex(readl(RASPI4_VCRAM_BASE - sizeof(uint32_t)), ==,
+                    0x01234567);
+    g_assert_cmphex(readl(RASPI4_UPPER_RAM_BASE), ==, 0x89abcdef);
+    g_assert_cmphex(readl(RASPI4B_RAM_SIZE - sizeof(uint32_t)), ==,
+                    0x51454d55);
+#endif
 }
 
 static void assert_no_reset_event(void)
@@ -10372,6 +10403,7 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/gic400/masked_hppir_and_apr",
                      test_gic400_masked_hppir_and_apr);
     raspi4b_add_test("/raspi4b/cpu/configuration", test_cpu_configuration);
+    raspi4b_add_test("/raspi4b/memory/layout", test_memory_layout);
     raspi4b_add_test("/raspi4b/powermgt/watchdog", test_powermgt_watchdog);
     raspi4b_add_test("/raspi4b/interrupts/system_timer",
                      test_system_timer_interrupts);
