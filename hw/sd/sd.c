@@ -558,6 +558,7 @@ struct SDState {
 #define CYW43455_ESCAN_RESULT_MAX_LEN    \
     (CYW43455_ESCAN_RESULT_FIXED_LEN + CYW43455_BSS_INFO_LEN + \
      CYW43455_BSS_INFO_IE_MAX_BYTES)
+#define CYW43455_ESCAN_EVENT_DELAY_MS_DEFAULT 10
 
 enum {
     CYW43455_ESCAN_EVENT_NONE,
@@ -660,7 +661,10 @@ struct CYW43455SDIOState {
     bool link_event_up;
     bool firmware_connected;
     bool backend_link_events_armed;
+    QEMUTimer *escan_timer;
+    uint32_t escan_event_delay_ms;
     uint8_t escan_event_phase;
+    bool escan_event_ready;
     uint16_t escan_sync_id;
     uint32_t ap_chanspec;
     uint32_t chanspec;
@@ -1034,6 +1038,33 @@ static void cyw43455_sdio_emit_link_event(CYW43455SDIOState *s)
                                    s->f2_rx_frame[9]);
 }
 
+static void cyw43455_sdio_advance_rx(CYW43455SDIOState *s);
+
+static void cyw43455_sdio_schedule_escan_event(CYW43455SDIOState *s)
+{
+    bool partial = s->escan_event_phase == CYW43455_ESCAN_EVENT_PARTIAL;
+
+    assert(s->escan_event_phase != CYW43455_ESCAN_EVENT_NONE);
+    s->escan_event_ready = !s->escan_event_delay_ms;
+    trace_cyw43455_sdio_escan_scheduled(s->escan_sync_id, partial,
+                                        s->escan_event_delay_ms);
+    if (!s->escan_event_ready) {
+        timer_mod(s->escan_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+                  s->escan_event_delay_ms);
+    }
+}
+
+static void cyw43455_sdio_escan_timeout(void *opaque)
+{
+    CYW43455SDIOState *s = opaque;
+
+    if (s->escan_event_phase) {
+        s->escan_event_ready = true;
+        cyw43455_sdio_advance_rx(s);
+    }
+}
+
 static void cyw43455_sdio_emit_escan_event(CYW43455SDIOState *s)
 {
     uint8_t result[CYW43455_ESCAN_RESULT_MAX_LEN] = { };
@@ -1042,6 +1073,9 @@ static void cyw43455_sdio_emit_escan_event(CYW43455SDIOState *s)
     uint32_t status = CYW43455_EVENT_STATUS_SUCCESS;
 
     assert(s->escan_event_phase != CYW43455_ESCAN_EVENT_NONE);
+    assert(s->escan_event_ready);
+    timer_del(s->escan_timer);
+    s->escan_event_ready = false;
     if (partial) {
         uint32_t bss_len = cyw43455_sdio_bss_info_len(s, true);
 
@@ -1106,7 +1140,12 @@ static void cyw43455_sdio_advance_rx(CYW43455SDIOState *s)
     }
 
     if (s->escan_event_phase) {
-        cyw43455_sdio_emit_escan_event(s);
+        if (!s->escan_event_ready && !timer_pending(s->escan_timer)) {
+            cyw43455_sdio_schedule_escan_event(s);
+        }
+        if (s->escan_event_ready) {
+            cyw43455_sdio_emit_escan_event(s);
+        }
         return;
     }
 
@@ -3261,6 +3300,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
 
     timer_del(s->tx_credit_timer);
     timer_del(s->rx_glom_timer);
+    timer_del(s->escan_timer);
     cyw43455_sdio_init_registers(s);
     memset(s->wrapper_ioctl, 0, sizeof(s->wrapper_ioctl));
     memset(s->wrapper_reset, 0, sizeof(s->wrapper_reset));
@@ -3300,6 +3340,7 @@ static void cyw43455_sdio_reset_state(CYW43455SDIOState *s)
     s->association_requested = false;
     s->link_ssid_pending = false;
     s->escan_event_phase = CYW43455_ESCAN_EVENT_NONE;
+    s->escan_event_ready = false;
     s->escan_sync_id = 0;
     s->chanspec = s->ap_chanspec;
     s->survey_duration_ms = 0;
@@ -4088,6 +4129,10 @@ static void cyw43455_sdio_realize(DeviceState *device, Error **errp)
                    "rx-glom-delay-ms must be 0..1000", CYW43455_RX_GLOM_MAX);
         return;
     }
+    if (s->escan_event_delay_ms > 1000) {
+        error_setg(errp, "escan-event-delay-ms must be 0..1000");
+        return;
+    }
     if (!cyw43455_sdio_chanspec_info(s->ap_chanspec, &control_channel,
                                      &bandwidth_mhz)) {
         error_setg(errp, "unsupported AP chanspec 0x%04x",
@@ -4099,6 +4144,8 @@ static void cyw43455_sdio_realize(DeviceState *device, Error **errp)
                                       cyw43455_sdio_emit_tx_credit, s);
     s->rx_glom_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                     cyw43455_sdio_rx_glom_timeout, s);
+    s->escan_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                  cyw43455_sdio_escan_timeout, s);
 
     if (!memcmp(&s->conf.macaddr, &zero_mac, sizeof(zero_mac))) {
         memcpy(s->conf.macaddr.a, cyw43455_sdio_default_mac,
@@ -4128,6 +4175,8 @@ static void cyw43455_sdio_unrealize(DeviceState *device)
     s->tx_credit_timer = NULL;
     timer_free(s->rx_glom_timer);
     s->rx_glom_timer = NULL;
+    timer_free(s->escan_timer);
+    s->escan_timer = NULL;
     qemu_del_nic(s->nic);
     s->nic = NULL;
 }
@@ -4237,6 +4286,10 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
         s->roam_trigger_5g = s->roam_trigger;
         s->roam_delta_5g = s->roam_delta;
     }
+    if (version_id < 32) {
+        s->escan_event_ready = s->escan_event_phase !=
+                               CYW43455_ESCAN_EVENT_NONE;
+    }
     if (s->rx_glom_align < 4 || s->rx_glom_align > 128 ||
         (s->rx_glom_align & (s->rx_glom_align - 1)) ||
         s->rx_glom_count > s->rx_glom_max_frames ||
@@ -4271,7 +4324,8 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
     if (s->nd_hostip_count > CYW43455_ND_HOSTIP_MAX) {
         return -EINVAL;
     }
-    if (s->escan_event_phase > CYW43455_ESCAN_EVENT_COMPLETE) {
+    if (s->escan_event_phase > CYW43455_ESCAN_EVENT_COMPLETE ||
+        (!s->escan_event_phase && s->escan_event_ready)) {
         return -EINVAL;
     }
     if (s->pfn_channel_count > CYW43455_PNO_MAX_CHANNELS ||
@@ -4322,7 +4376,7 @@ static int cyw43455_sdio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription cyw43455_sdio_vmstate = {
     .name = TYPE_CYW43455_SDIO,
-    .version_id = 31,
+    .version_id = 32,
     .minimum_version_id = 1,
     .post_load = cyw43455_sdio_post_load,
     .fields = (const VMStateField[]) {
@@ -4450,6 +4504,8 @@ static const VMStateDescription cyw43455_sdio_vmstate = {
         VMSTATE_TIMER_PTR_V(rx_glom_timer, CYW43455SDIOState, 28),
         VMSTATE_INT32_V(roam_trigger_5g, CYW43455SDIOState, 31),
         VMSTATE_INT32_V(roam_delta_5g, CYW43455SDIOState, 31),
+        VMSTATE_BOOL_V(escan_event_ready, CYW43455SDIOState, 32),
+        VMSTATE_TIMER_PTR_V(escan_timer, CYW43455SDIOState, 32),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -7517,6 +7573,9 @@ static const Property cyw43455_sdio_properties[] = {
                       rx_glom_max_frames, 1),
     DEFINE_PROP_UINT32("rx-glom-delay-ms", CYW43455SDIOState,
                        rx_glom_delay_ms, 1),
+    DEFINE_PROP_UINT32("escan-event-delay-ms", CYW43455SDIOState,
+                       escan_event_delay_ms,
+                       CYW43455_ESCAN_EVENT_DELAY_MS_DEFAULT),
     DEFINE_PROP_UINT32("ap-chanspec", CYW43455SDIOState,
                        ap_chanspec, CYW43455_CHANSPEC_2G_CH1_20MHZ),
 };

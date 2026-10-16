@@ -161,7 +161,8 @@ interrupt path. The eMMC1 buffer-ready signal drives BCM2711 DMA DREQ 11, as
 used by the stock device tree, and is reconstructed from SDHCI state after
 migration. The synthetic firmware retains the driver's regulatory-country
 setting. Partial TX frames, control replies, RX contents, credit deadlines and
-pending link events migrate with the machine.
+pending link events migrate with the machine. Pending scan-result deadlines
+also migrate.
 
 The default compatibility profile synthesizes association on the first
 post-open promiscuous-filter update. Existing netpoll initramfs fixtures use
@@ -197,6 +198,13 @@ rates and scan information element use the 5 GHz OFDM rate set and omit the
 configurations are deliberately rejected; they have not been calibrated.
 The property selects the synthetic peer seen by a station guest.  It does not
 turn QEMU into an access point or establish AP-mode support.
+
+Scan results are asynchronous. ``escan-event-delay-ms`` accepts 0..1000 and
+defaults to 10 ms. Its timer starts only after the guest has consumed and
+acknowledged the preceding control reply or scan-result frame. This preserves
+firmware-command ordering even on a slow TCG host; zero retains immediate
+delivery for protocol fixtures that request it explicitly. The delay is a
+deterministic transport setting, not calibrated RF scan latency.
 
 The Pi 400 reference capture on 2026-10-09 used firmware 7.84.17.1 and the
 vendor 6.18.39 kernel. All 294 observed control replies advertised a TX

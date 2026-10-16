@@ -237,6 +237,7 @@
 #define CYW43455_ESCAN_REQ_VERSION_V2 2
 #define CYW43455_ESCAN_RESULT_VERSION 1
 #define CYW43455_ESCAN_ACTION_START 1
+#define CYW43455_ESCAN_EVENT_DELAY_MS 10
 #define CYW43455_ESCAN_HEADER_LEN  8
 #define CYW43455_SCAN_PARAMS_V1_FIXED_LEN 64
 #define CYW43455_SCAN_PARAMS_V2_FIXED_LEN 72
@@ -6407,6 +6408,14 @@ static void test_cyw43455_sdio_5ghz_profile(void)
 
     event_len = cyw43455_sdio_escan_event_stored_len(
         CYW43455_CHANSPEC_5G_CH36_20MHZ, true);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+    qtest_clock_step(qts, (CYW43455_ESCAN_EVENT_DELAY_MS - 1) * SCALE_MS);
+    g_assert_cmphex(cyw43455_sdio_backplane_readl_qtest(
+                        qts, CYW43455_SDIO_INTSTATUS),
+                    ==, 0);
+    qtest_clock_step(qts, SCALE_MS);
     cyw43455_sdio_wait_for_frame(qts);
     memset(event_frame, 0, sizeof(event_frame));
     cyw43455_sdio_function2_read_qtest(qts, event_frame, event_len);
@@ -6417,6 +6426,7 @@ static void test_cyw43455_sdio_5ghz_profile(void)
         CYW43455_CHANSPEC_5G_CH36_20MHZ, 36);
     cyw43455_sdio_backplane_writel_qtest(
         qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    qtest_clock_step(qts, CYW43455_ESCAN_EVENT_DELAY_MS * SCALE_MS);
     cyw43455_sdio_wait_for_frame(qts);
     memset(event_frame, 0, CYW43455_EVENT_FRAME_LEN);
     cyw43455_sdio_function2_read_qtest(qts, event_frame,
@@ -6443,6 +6453,7 @@ static void test_cyw43455_sdio_5ghz_profile(void)
         CYW43455_ESCAN_V2_REQUEST_LEN, 6, 5);
     cyw43455_sdio_backplane_writel_qtest(
         qts, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    qtest_clock_step(qts, CYW43455_ESCAN_EVENT_DELAY_MS * SCALE_MS);
     cyw43455_sdio_wait_for_frame(qts);
     memset(event_frame, 0, CYW43455_EVENT_FRAME_LEN);
     cyw43455_sdio_function2_read_qtest(qts, event_frame,
@@ -7944,9 +7955,23 @@ static void test_cyw43455_sdio_scan_migration(void)
         CYW43455_ESCAN_V2_REQUEST_LEN, 1, 2);
     cyw43455_sdio_backplane_writel_qtest(
         source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    qtest_clock_step(source, CYW43455_ESCAN_EVENT_DELAY_MS * SCALE_MS);
     cyw43455_sdio_wait_for_frame(source);
 
-    /* Migrate with the partial result active and completion still pending. */
+    memset(event_frame, 0, sizeof(event_frame));
+    cyw43455_sdio_function2_read_qtest(source, event_frame,
+        cyw43455_sdio_escan_event_stored_len(
+            CYW43455_CHANSPEC_2G_CH13_40MHZ, true));
+    cyw43455_sdio_assert_escan_event(
+        event_frame, cyw43455_sdio_escan_event_stored_len(
+            CYW43455_CHANSPEC_2G_CH13_40MHZ, true), 2,
+        1 + CYW43455_DEFAULT_CREDIT_WINDOW, first_sync_id, true,
+        cyw43455_sdio_default_test_mac,
+        CYW43455_CHANSPEC_2G_CH13_40MHZ, 13);
+    cyw43455_sdio_backplane_writel_qtest(
+        source, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+
+    /* Migrate after consuming the partial result, with completion delayed. */
     qtest_qmp_assert_success(source, "{ 'execute': 'stop' }");
     tmpdir = g_dir_make_tmp("raspi4b-cyw43455-scan-XXXXXX", &error);
     g_assert_no_error(error);
@@ -7974,18 +7999,9 @@ static void test_cyw43455_sdio_scan_migration(void)
         "'uri': %s, 'exit-on-error': false } }", uri);
     raspi4b_wait_for_migration(destination);
 
-    memset(event_frame, 0, sizeof(event_frame));
-    cyw43455_sdio_function2_read_qtest(destination, event_frame,
-        cyw43455_sdio_escan_event_stored_len(
-            CYW43455_CHANSPEC_2G_CH13_40MHZ, true));
-    cyw43455_sdio_assert_escan_event(
-        event_frame, cyw43455_sdio_escan_event_stored_len(
-            CYW43455_CHANSPEC_2G_CH13_40MHZ, true), 2,
-        1 + CYW43455_DEFAULT_CREDIT_WINDOW, first_sync_id, true,
-        cyw43455_sdio_default_test_mac,
-        CYW43455_CHANSPEC_2G_CH13_40MHZ, 13);
-    cyw43455_sdio_backplane_writel_qtest(
-        destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    qtest_qmp_assert_success(destination, "{ 'execute': 'cont' }");
+    /* The destination qtest clock starts independently of the source. */
+    qtest_clock_step_next(destination);
     cyw43455_sdio_wait_for_frame(destination);
     memset(event_frame, 0, CYW43455_EVENT_FRAME_LEN);
     cyw43455_sdio_function2_read_qtest(destination, event_frame,
@@ -8013,6 +8029,8 @@ static void test_cyw43455_sdio_scan_migration(void)
         CYW43455_ESCAN_V1_REQUEST_LEN, 4, 3);
     cyw43455_sdio_backplane_writel_qtest(
         destination, CYW43455_SDIO_INTSTATUS, CYW43455_SDIO_FRAME_IND);
+    qtest_clock_step(destination,
+                     CYW43455_ESCAN_EVENT_DELAY_MS * SCALE_MS);
     cyw43455_sdio_wait_for_frame(destination);
     memset(event_frame, 0, CYW43455_EVENT_FRAME_LEN);
     cyw43455_sdio_function2_read_qtest(destination, event_frame,

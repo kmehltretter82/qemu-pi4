@@ -1,7 +1,7 @@
 Pi 400 and Pi 500+ Wi-Fi development handoff
 ============================================
 
-Checkpoint: 2026-10-12. This is AI-assisted work for Karl's downstream
+Checkpoint: 2026-10-16. This is AI-assisted work for Karl's downstream
 forks, not a QEMU upstream submission.
 
 Repositories and tested state
@@ -30,14 +30,20 @@ Local main on 2026-10-16 additionally completed firmware upload/readback,
 country state and eMMC1 DMA request wiring, then added the bounded 5 GHz
 channel-36/20-MHz profile described below.  A fresh macOS build passes the
 79-test Pi 4 suite (including focused 5 GHz and scheduled-scan migration
-coverage), all 5 Pi 400 board tests and all 27 display tests.  The earlier
-stock-kernel Pi 400 boot validated the firmware-upload and 2.4 GHz path; a
-5 GHz Linux guest boot has not yet been recorded, so qtest coverage must not
-be described as end-to-end driver acceptance.
+coverage), all 5 Pi 400 board tests and all 27 display tests.  The stock
+6.18.39 Raspberry Pi kernel and unmodified Pi 4 DT also completed five
+consecutive Pi-on-Pi station boots with the channel-36 profile.  The real
+``brcmfmac`` driver advertised 5180 MHz through nl80211, ``iw`` received the
+synthetic BSS, and carrier reached one before each clean power-off.  This is
+end-to-end acceptance of the bounded synthetic station path, not RF or AP-mode
+validation.
 
-That boot used the compatibility association profile, a 41-position SDPCM
-credit window and 1 ms delay. It skipped the old stress fixtures. It is
-integration coverage, not a new BASE/prototype or retry-policy comparison.
+The earlier 2.4 GHz boot used the compatibility association profile, a
+41-position SDPCM credit window and 1 ms credit delay.  The 5 GHz boots use a
+10 ms scan-event delay which starts only after the preceding SDIO frame is
+consumed.  This ordering and its pending timer migrate with the endpoint.  The
+boots skipped the old stress fixtures; they are integration coverage, not a
+new BASE/prototype or retry-policy comparison.
 
 Pi 500+ development belongs in
 https://github.com/kmehltretter82/qemu-pi5, branch
@@ -79,9 +85,9 @@ bandwidth capabilities, chanspecs, scheduled-scan channel validation,
 scan/BSS replies, legacy rates, information elements and per-band roaming
 thresholds are covered together. Other 5 GHz channels and widths fail
 explicitly. A property naming a synthetic peer's channel does not establish
-that Linux can operate this endpoint as an AP. Before expanding the RF
-profile, record a bounded Linux station boot against channel 36 and retain the
-driver log.
+that Linux can operate this endpoint as an AP. The bounded channel-36 Linux
+station boot is now retained with the native Pi 400 artifacts. Expand the RF
+profile only from additional captured channels and widths.
 
 The next transport milestone is firmware flow-control signaling from captured
 modes 1/2:
