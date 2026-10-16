@@ -26,6 +26,15 @@ Fresh Linux-host results:
 * Linux attached brcmfmac through ``fe300000.mmc`` using PIO. Lockdep
   remained active; no measurement diagnostics or TX errors/drops occurred.
 
+Local main on 2026-10-16 additionally completed firmware upload/readback,
+country state and eMMC1 DMA request wiring, then added the bounded 5 GHz
+channel-36/20-MHz profile described below.  A fresh macOS build passes the
+79-test Pi 4 suite (including focused 5 GHz and scheduled-scan migration
+coverage), all 5 Pi 400 board tests and all 27 display tests.  The earlier
+stock-kernel Pi 400 boot validated the firmware-upload and 2.4 GHz path; a
+5 GHz Linux guest boot has not yet been recorded, so qtest coverage must not
+be described as end-to-end driver acceptance.
+
 That boot used the compatibility association profile, a 41-position SDPCM
 credit window and 1 ms delay. It skipped the old stress fixtures. It is
 integration coverage, not a new BASE/prototype or retry-policy comparison.
@@ -54,23 +63,28 @@ normal QEMU build dependencies installed, build from the clone's root::
   tests/qtest/raspi400-test
   tests/qtest/bcm2711-display-test
 
-These commands were exercised on Linux with an offline dependency setup;
-the fresh macOS build still needs verification. Preserve its compiler,
-configuration, source identity and raw test output. The archived Linux
-smoke runner has fixed Hetzner paths and a binary hash. Adapt a copy for
-the Mac, recording the new paths and hash; do not edit the archived runner
-or assume its Linux binary is portable.
+These commands were exercised on Linux with an offline dependency setup and
+again on macOS for the current local main. Preserve the compiler,
+configuration, source identity and raw test output. The archived Linux smoke
+runner has fixed Hetzner paths and a binary hash. Adapt a copy for a new host,
+recording its paths and hash; do not edit the archived runner or assume its
+Linux binary is portable.
 
 Next Pi 400 milestone
 ---------------------
 
-Add a small, driver-visible 5 GHz profile based on the successful hardware
-channel-36/20-MHz capture. Keep band lists, chanspecs, scan/BSS replies,
-rates and information elements consistent. Unsupported configurations
-should fail explicitly. A property naming a synthetic peer's channel does
-not establish that Linux can operate this endpoint as an AP.
+The small driver-visible 5 GHz profile based on the successful hardware
+channel-36/20-MHz capture is now implemented on local main. Band lists,
+bandwidth capabilities, chanspecs, scheduled-scan channel validation,
+scan/BSS replies, legacy rates, information elements and per-band roaming
+thresholds are covered together. Other 5 GHz channels and widths fail
+explicitly. A property naming a synthetic peer's channel does not establish
+that Linux can operate this endpoint as an AP. Before expanding the RF
+profile, record a bounded Linux station boot against channel 36 and retain the
+driver log.
 
-Then implement firmware flow-control signaling from captured modes 1/2:
+The next transport milestone is firmware flow-control signaling from captured
+modes 1/2:
 negotiation, message/TLV layout, per-peer credits and TX status. SDPCM
 transport sequence credits already modeled here are a different protocol.
 The short physical mode-2 runs show credit returns but no exhaustion, so

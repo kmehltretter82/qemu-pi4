@@ -184,6 +184,20 @@ changes generate events only after a requested association. Setting
 The model accepts the open-connection security settings and rejects WPA
 security settings it cannot implement.
 
+The default synthetic peer remains on 2.4 GHz channel 1.  The endpoint also
+advertises the captured 5 GHz channel-36/20-MHz profile.  Select it with the
+D11AC chanspec observed for that channel::
+
+  -global cyw43455-sdio.ap-chanspec=0xd024
+
+In this profile the band list, 20-MHz bandwidth capability, ``chanspecs``
+list, scan result and BSS record all expose the same channel.  Its supported
+rates and scan information element use the 5 GHz OFDM rate set and omit the
+2.4 GHz DS-parameter element.  Other 5 GHz channels and 40/80/160-MHz 5 GHz
+configurations are deliberately rejected; they have not been calibrated.
+The property selects the synthetic peer seen by a station guest.  It does not
+turn QEMU into an access point or establish AP-mode support.
+
 The Pi 400 reference capture on 2026-10-09 used firmware 7.84.17.1 and the
 vendor 6.18.39 kernel. All 294 observed control replies advertised a TX
 sequence limit 41 positions beyond the request; this is now the default
