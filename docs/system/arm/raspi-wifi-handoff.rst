@@ -63,11 +63,14 @@ normal QEMU build dependencies installed, build from the clone's root::
   cd build-wifi
   ../configure --target-list=aarch64-softmmu --enable-slirp --disable-docs
   ninja qemu-system-aarch64 tests/qtest/raspi4b-test \
-      tests/qtest/raspi400-test tests/qtest/bcm2711-display-test
+      tests/qtest/raspi400-test tests/qtest/bcm2711-display-test \
+      tests/qtest/cyw43455-ap-test tests/qtest/cyw43455-fws-test
   export QTEST_QEMU_BINARY="$PWD/qemu-system-aarch64"
   tests/qtest/raspi4b-test
   tests/qtest/raspi400-test
   tests/qtest/bcm2711-display-test
+  tests/qtest/cyw43455-ap-test
+  tests/qtest/cyw43455-fws-test
 
 These commands were exercised on Linux with an offline dependency setup and
 again on macOS for the current local main. Preserve the compiler,
@@ -89,19 +92,28 @@ that Linux can operate this endpoint as an AP. The bounded channel-36 Linux
 station boot is now retained with the native Pi 400 artifacts. Expand the RF
 profile only from additional captured channels and widths.
 
-The next transport milestone is firmware flow-control signaling from captured
-modes 1/2:
-negotiation, message/TLV layout, per-peer credits and TX status. SDPCM
-transport sequence credits already modeled here are a different protocol.
-The short physical mode-2 runs show credit returns but no exhaustion, so
-they cannot supply an invented starvation/recovery rule. Use a separate
-capture to validate behavior after developing against the first one.
+The captured firmware flow-control slice is now integrated as an opt-in
+private model. It covers negotiation, event-mask readiness, credit-map and
+BCMC-support events, packet tags, pending-traffic TLVs, bounded terminal
+status batches, explicit FIFO credit returns, shared AC borrowing, a separate
+BCMC pool, primary-interface close/open ordering, malformed input, reset and
+active-state migration refusal. Native wire tests exercise both host modes:
+mode 1 returns ordinary credits through terminal status, while mode 2 waits
+for explicit ``FIFO_CREDITBACK``. SDPCM transport sequence credits remain a
+different protocol.
+
+The retained Pi 400 captures and Linux runs validate completion/credit framing
+and active traffic, while synthetic finite budgets provide the exhaustion and
+resume oracle. They do not prove physical firmware starvation timing. The next
+FWS milestones are suppression/sequence reuse, compressed completion records,
+peer power-save and RX reordering, each requiring separate evidence. Do not
+invent XOFF/XON transitions: none occurred in the retained Pi 400 sample.
 
 The physical Pi 400 PMF-disabled AP workaround is useful evidence for an
-investigation, not a firmware fix. The current endpoint accepts selected
-control values but does not execute firmware, WPA handshakes or PMF. Add
-AP/PMF state tests only for a documented driver-visible contract; do not
-claim that synthetic association reproduces the hardware failure.
+investigation, not a firmware fix. The private open-AP HLE now covers the
+bounded driver-visible primary-BSS control contract and one synthetic peer,
+but it does not execute firmware, WPA handshakes or PMF. Do not claim that
+synthetic association reproduces the hardware failure.
 
 Next Pi 500+ milestone
 ----------------------

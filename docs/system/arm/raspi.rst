@@ -196,8 +196,11 @@ list, scan result and BSS record all expose the same channel.  Its supported
 rates and scan information element use the 5 GHz OFDM rate set and omit the
 2.4 GHz DS-parameter element.  Other 5 GHz channels and 40/80/160-MHz 5 GHz
 configurations are deliberately rejected; they have not been calibrated.
-The property selects the synthetic peer seen by a station guest.  It does not
-turn QEMU into an access point or establish AP-mode support.
+The property selects the synthetic peer seen by a station guest.  A separate
+private open-AP HLE follows the guest's AP control sequence, reports one
+synthetic peer, emits ordered link/association events and forwards Ethernet.
+It is intentionally limited to one primary BSS and open security.  It does
+not implement WPA, PMF, multiple peers, P2P/MBSS, radio firmware or RF.
 
 Scan results are asynchronous. ``escan-event-delay-ms`` accepts 0..1000 and
 defaults to 10 ms. Its timer starts only after the guest has consumed and
@@ -232,11 +235,30 @@ not a calibrated reproduction of firmware scheduling or RF latency.
 
 Small credit windows and larger delays remain available for queue-pressure
 and netpoll fixtures (for example, window 2 and delay 10 ms). Such settings
-are synthetic stress conditions. Modeled delivery does not establish that
-radio behavior, firmware execution, encryption, FWS modes 1/2, power-save
-latency or hardware packet-loss rates are reproduced. The captured Pi 400
-had no flow-control XOFF/XON changes, so the model does not invent these
-transitions from that sample.
+are synthetic stress conditions.
+
+A bounded firmware-signalling experiment is available with::
+
+  -global cyw43455-sdio.fws-enabled=on
+
+It negotiates the captured ``tlv`` value only after the driver subscribes to
+events 74 and 127, publishes BCMC support and a finite per-FIFO credit map,
+parses packet-tag and pending-traffic TLVs, and returns matching terminal
+``TXSTATUS`` records plus explicit FIFO credits.  Linux ``fcmode=1`` and
+``fcmode=2`` therefore exercise their distinct host credit policies without
+conflating these credits with the SDPCM sequence window above.  Status batches
+are bounded to 1..8 records (default 1); the credit budget defaults to two and
+startup, status and credit delays each default to one virtual millisecond.
+Partial reads retain hanger ownership, queues are bounded, and reset discards
+private FWS state.  Once negotiation starts, migration is refused because
+that private state is not serialized; ``-only-migratable`` refuses the
+negotiation instead.
+
+This slice does not implement suppression/sequence reuse, compressed status,
+peer power-save, RX reordering or proprietary firmware scheduling.  Modeled
+delivery does not establish radio behavior, firmware execution, encryption,
+power-save latency or hardware packet-loss rates.  The captured Pi 400 had no
+flow-control XOFF/XON changes, so the model does not invent those transitions.
 
 ``scripts/pi4/cyw43455-sdio-init.sh`` remains a focused attach probe. The
 separate reference validation harness uses an ordinary nl80211 helper,

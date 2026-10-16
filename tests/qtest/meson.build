@@ -240,6 +240,8 @@ qtests_raspi4 = \
    'bcm2835-pwm-test',
    'bcm2835-i2c-test',
    'raspi400-test',
+   'cyw43455-ap-test',
+   'cyw43455-fws-test',
    'raspi4b-test']
 
 qtests_stm32l4x5 = \

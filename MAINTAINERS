@@ -1029,6 +1029,7 @@ F: scripts/pi4/
 F: tests/pi4/
 F: tests/functional/aarch64/test_raspi*.py
 F: tests/qtest/bcm2835-*-test.c
+F: tests/qtest/cyw43455-*-test.c
 F: tests/qtest/raspi*-test.c
 F: tests/qtest/libqos/*raspi*
 

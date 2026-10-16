@@ -75,7 +75,17 @@ cyw43455_sdio_roam_parameter(bool set, bool trigger, int32_t value, uint32_t ban
 cyw43455_sdio_control(uint32_t command, bool set, uint32_t request_id, uint32_t length) "synthetic control command=%" PRIu32 " set=%u id=%" PRIu32 " length=%" PRIu32
 cyw43455_sdio_iovar(const char *name, bool set, uint32_t request_id, int32_t status) "synthetic iovar name=%s set=%u id=%" PRIu32 " status=%" PRIi32
 cyw43455_sdio_control_queued(uint32_t length) "synthetic control response queued length=%" PRIu32
+cyw43455_sdio_ap_state(bool mode, bool started, bool peer, uint32_t chanspec, uint32_t ssid_len) "private open AP mode=%u started=%u peer=%u chanspec=0x%" PRIx32 " ssid-length=%" PRIu32
+cyw43455_sdio_ap_event(uint32_t type, uint16_t flags, uint32_t length, bool peer, uint8_t pending) "private AP event type=%" PRIu32 " flags=%u length=%" PRIu32 " peer=%u pending=%u"
+cyw43455_sdio_ap_drop(bool tx, uint32_t reason, uint32_t length) "private AP filtered tx=%u reason=%" PRIu32 " length=%" PRIu32
 cyw43455_sdio_control_dropped(uint32_t command, uint32_t request_id) "synthetic control response dropped command=%" PRIu32 " id=%" PRIu32
+cyw43455_sdio_fws_negotiate(uint32_t flags) "private FWS negotiated flags=0x%" PRIx32
+cyw43455_sdio_fws_map(uint8_t budget) "private FWS credit map emitted per-FIFO-budget=%u"
+cyw43455_sdio_fws_accept(uint32_t tag, uint8_t outstanding, uint8_t available) "private FWS accepted tag=0x%08" PRIx32 " outstanding=%u pool-available=%u"
+cyw43455_sdio_fws_drop(uint32_t tag, unsigned int reason) "private FWS rejected tag=0x%08" PRIx32 " reason=%u"
+cyw43455_sdio_fws_status(uint32_t tag, uint8_t outstanding) "private FWS terminal status tag=0x%08" PRIx32 " outstanding=%u"
+cyw43455_sdio_fws_creditback(void) "private FWS explicit FIFO credit return emitted"
+cyw43455_sdio_fws_interface(bool open) "private FWS primary interface open=%u"
 sdcard_normal_command(const char *proto, const char *cmd_desc, uint8_t cmd, uint32_t arg, const char *mode, const char *state) "%s %20s/ CMD%02d arg 0x%08x (mode %s, state %s)"
 sdcard_app_command(const char *proto, const char *acmd_desc, uint8_t acmd, uint32_t arg, const char *mode, const char *state) "%s %23s/ACMD%02d arg 0x%08x (mode %s, state %s)"
 sdcard_response(const char *rspdesc, int rsplen) "%s (sz:%d)"
