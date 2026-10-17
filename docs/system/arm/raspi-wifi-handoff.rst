@@ -4,6 +4,12 @@ Pi 400 and Pi 500+ Wi-Fi development handoff
 Checkpoint: 2026-10-16. This is AI-assisted work for Karl's downstream
 forks, not a QEMU upstream submission.
 
+The later ``wifi-next-20261017`` experimental branch adds shared radio
+regressions and records the Pi 500 source integration. Its pending-scan
+migration test currently fails, and development is paused. See
+:doc:`raspi-wifi-next-checkpoint`; the historical results below must not be
+treated as qualification of that branch.
+
 Repositories and tested state
 -----------------------------
 

@@ -242,6 +242,7 @@ qtests_raspi4 = \
    'raspi400-test',
    'cyw43455-ap-test',
    'cyw43455-fws-test',
+   'cyw43455-radio-test',
    'raspi4b-test']
 
 qtests_stm32l4x5 = \
