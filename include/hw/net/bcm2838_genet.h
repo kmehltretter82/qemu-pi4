@@ -10,6 +10,7 @@
 #define HW_NET_BCM2838_GENET_H
 
 #include "hw/core/sysbus.h"
+#include "qemu/timer.h"
 #include "net/net.h"
 
 #define TYPE_BCM2838_GENET "bcm2838-genet"
@@ -39,6 +40,10 @@ struct BCM2838GenetState {
     uint8_t tx_packet_checksum[BCM2838_GENET_NUM_RINGS];
     uint8_t tx_packet[BCM2838_GENET_NUM_RINGS]
                      [BCM2838_GENET_MAX_FRAME_SIZE];
+
+    QEMUTimer tx_completion_timer;
+    uint32_t tx_completion_delay_us;
+    uint32_t tx_completion_budget;
 };
 
 #endif /* HW_NET_BCM2838_GENET_H */

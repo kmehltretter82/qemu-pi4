@@ -517,7 +517,9 @@ static void genet_tx_descriptor(BCM2838GenetState *s, unsigned int ring,
     }
 }
 
-static void genet_process_tx_ring(BCM2838GenetState *s, unsigned int ring)
+static unsigned int genet_process_tx_ring(BCM2838GenetState *s,
+                                          unsigned int ring,
+                                          unsigned int budget)
 {
     hwaddr ring_base = genet_ring_reg(GENET_TDMA_RING_BASE, ring, 0);
     uint16_t consumer = genet_reg_read(s, ring_base +
@@ -529,10 +531,11 @@ static void genet_process_tx_ring(BCM2838GenetState *s, unsigned int ring)
 
     if (!(genet_reg_read(s, GENET_UMAC_CMD) & UMAC_CMD_TX_EN) ||
         !genet_dma_ring_enabled(s, true, ring) || !count) {
-        return;
+        return 0;
     }
 
-    while (consumer != producer && completed < count) {
+    while (consumer != producer && completed < count &&
+           (!budget || completed < budget)) {
         unsigned int descriptor = genet_ring_descriptor(s, true, ring,
                                                         consumer);
 
@@ -553,12 +556,74 @@ static void genet_process_tx_ring(BCM2838GenetState *s, unsigned int ring)
     if (completed) {
         genet_raise_dma_irq(s, true, ring);
     }
+
+    return completed;
+}
+
+static bool genet_tx_ring_pending(BCM2838GenetState *s, unsigned int ring)
+{
+    hwaddr ring_base = genet_ring_reg(GENET_TDMA_RING_BASE, ring, 0);
+    uint16_t consumer;
+    uint16_t producer;
+
+    if (!(genet_reg_read(s, GENET_UMAC_CMD) & UMAC_CMD_TX_EN) ||
+        !genet_dma_ring_enabled(s, true, ring) ||
+        !genet_ring_buffer_count(s, true, ring)) {
+        return false;
+    }
+
+    consumer = genet_reg_read(s, ring_base + DMA_RING_CONS_PROD_INDEX);
+    producer = genet_reg_read(s, ring_base + DMA_RING_PROD_CONS_INDEX);
+    return consumer != producer;
+}
+
+static bool genet_tx_pending(BCM2838GenetState *s)
+{
+    for (unsigned int ring = 0; ring < BCM2838_GENET_NUM_RINGS; ring++) {
+        if (genet_tx_ring_pending(s, ring)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void genet_schedule_tx(BCM2838GenetState *s)
+{
+    if (!s->tx_completion_delay_us || !genet_tx_pending(s) ||
+        timer_pending(&s->tx_completion_timer)) {
+        return;
+    }
+
+    timer_mod(&s->tx_completion_timer,
+              qemu_clock_get_us(QEMU_CLOCK_VIRTUAL) +
+              s->tx_completion_delay_us);
+}
+
+static void genet_tx_completion(void *opaque)
+{
+    BCM2838GenetState *s = opaque;
+    bool progress = false;
+
+    for (unsigned int ring = 0; ring < BCM2838_GENET_NUM_RINGS; ring++) {
+        progress |= genet_process_tx_ring(s, ring,
+                                          s->tx_completion_budget) != 0;
+    }
+
+    if (progress) {
+        genet_schedule_tx(s);
+    }
 }
 
 static void genet_kick_tx(BCM2838GenetState *s)
 {
+    if (s->tx_completion_delay_us) {
+        genet_schedule_tx(s);
+        return;
+    }
+
     for (unsigned int ring = 0; ring < BCM2838_GENET_NUM_RINGS; ring++) {
-        genet_process_tx_ring(s, ring);
+        genet_process_tx_ring(s, ring, 0);
     }
 }
 
@@ -851,7 +916,11 @@ static void genet_write(void *opaque, hwaddr offset, uint64_t value,
         unsigned int ring = (offset - GENET_TDMA_RING_BASE) /
                             GENET_DMA_RING_SIZE;
 
-        genet_process_tx_ring(s, ring);
+        if (s->tx_completion_delay_us) {
+            genet_schedule_tx(s);
+        } else {
+            genet_process_tx_ring(s, ring, 0);
+        }
         return;
     }
 
@@ -890,6 +959,7 @@ static void genet_reset(DeviceState *dev)
     BCM2838GenetState *s = BCM2838_GENET(dev);
     const uint8_t *mac = s->conf.macaddr.a;
 
+    timer_del(&s->tx_completion_timer);
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->tx_packet_len, 0, sizeof(s->tx_packet_len));
     memset(s->tx_packet_active, 0, sizeof(s->tx_packet_active));
@@ -916,11 +986,21 @@ static void genet_init(Object *obj)
     BCM2838GenetState *s = BCM2838_GENET(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
+    timer_init_us(&s->tx_completion_timer, QEMU_CLOCK_VIRTUAL,
+                  genet_tx_completion, s);
     memory_region_init_io(&s->iomem, obj, &genet_ops, s,
                           TYPE_BCM2838_GENET, BCM2838_GENET_MMIO_SIZE);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq[0]);
     sysbus_init_irq(sbd, &s->irq[1]);
+}
+
+static void genet_finalize(Object *obj)
+{
+    BCM2838GenetState *s = BCM2838_GENET(obj);
+
+    timer_del(&s->tx_completion_timer);
+    timer_deinit(&s->tx_completion_timer);
 }
 
 static void genet_realize(DeviceState *dev, Error **errp)
@@ -947,8 +1027,28 @@ static int genet_post_load(void *opaque, int version_id)
 
     genet_update_link_registers(s);
     genet_update_irqs(s);
+    genet_schedule_tx(s);
+
     return 0;
 }
+
+static bool genet_tx_completion_timer_needed(void *opaque)
+{
+    BCM2838GenetState *s = opaque;
+
+    return timer_pending(&s->tx_completion_timer);
+}
+
+static const VMStateDescription vmstate_genet_tx_completion_timer = {
+    .name = TYPE_BCM2838_GENET "/tx-completion-timer",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = genet_tx_completion_timer_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER(tx_completion_timer, BCM2838GenetState),
+        VMSTATE_END_OF_LIST()
+    },
+};
 
 static const VMStateDescription vmstate_genet = {
     .name = TYPE_BCM2838_GENET,
@@ -972,11 +1072,19 @@ static const VMStateDescription vmstate_genet = {
                               BCM2838_GENET_MAX_FRAME_SIZE),
         VMSTATE_END_OF_LIST()
     },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_genet_tx_completion_timer,
+        NULL
+    },
 };
 
 static const Property genet_properties[] = {
     DEFINE_NIC_PROPERTIES(BCM2838GenetState, conf),
     DEFINE_PROP_UINT8("phy-addr", BCM2838GenetState, phy_addr, 1),
+    DEFINE_PROP_UINT32("tx-completion-delay-us", BCM2838GenetState,
+                       tx_completion_delay_us, 0),
+    DEFINE_PROP_UINT32("tx-completion-budget", BCM2838GenetState,
+                       tx_completion_budget, 0),
     DEFINE_PROP_LINK("dma-memory", BCM2838GenetState, dma_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
 };
@@ -997,6 +1105,7 @@ static const TypeInfo genet_type_info = {
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(BCM2838GenetState),
     .instance_init = genet_init,
+    .instance_finalize = genet_finalize,
     .class_init = genet_class_init,
 };
 
