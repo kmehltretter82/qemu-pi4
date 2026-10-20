@@ -10047,6 +10047,155 @@ static void genet_recv_all(void *buf, size_t size)
     }
 }
 
+static void genet_assert_no_packet(void)
+{
+    GPollFD pollfd = {
+        .fd = genet_test_socket,
+        .events = G_IO_IN | G_IO_HUP | G_IO_ERR,
+    };
+
+    g_assert_cmpint(g_poll(&pollfd, 1, 0), ==, 0);
+}
+
+static void genet_expect_packet(const void *expected, size_t size)
+{
+    g_autofree uint8_t *received = g_malloc(size);
+    uint32_t frame_len;
+
+    genet_recv_all(&frame_len, sizeof(frame_len));
+    g_assert_cmpuint(ntohl(frame_len), ==, size);
+    genet_recv_all(received, size);
+    g_assert_cmpmem(received, size, expected, size);
+}
+
+static void genet_write_tx_descriptor(unsigned int descriptor,
+                                      uint64_t buffer, size_t size,
+                                      uint32_t flags)
+{
+    uint64_t base = RASPI4_GENET_TDMA_DESC +
+                    descriptor * GENET_DMA_DESC_SIZE;
+
+    writel(base, (size << 16) | flags);
+    writel(base + 4, buffer);
+    writel(base + 8, buffer >> 32);
+}
+
+static void test_genet_delayed_tx_completion(void)
+{
+    static const uint8_t frame0[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x52, 0x54, 0x00, 0x12, 0x34, 0x56,
+        0x08, 0x00,
+        'd', 'e', 'l', 'a', 'y', 'e', 'd', '-',
+        'g', 'e', 'n', 'e', 't', '-', 'z', 'e', 'r', 'o',
+    };
+    static const uint8_t frame1[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x52, 0x54, 0x00, 0x12, 0x34, 0x57,
+        0x08, 0x00,
+        'd', 'e', 'l', 'a', 'y', 'e', 'd', '-',
+        'g', 'e', 'n', 'e', 't', '-', 'o', 'n', 'e', '!',
+    };
+    static const uint8_t split_frame[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x52, 0x54, 0x00, 0x12, 0x34, 0x58,
+        0x08, 0x00,
+        's', 'p', 'l', 'i', 't', '-', 'f', 'r', 'a', 'm', 'e', '-',
+        's', 'u', 'r', 'v', 'i', 'v', 'e', 's', '-', 't', 'i', 'c', 'k',
+    };
+    static const uint8_t reset_frame[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x52, 0x54, 0x00, 0x12, 0x34, 0x59,
+        0x08, 0x00,
+        'r', 'e', 's', 'e', 't', '-', 'c', 'a', 'n', 'c', 'e', 'l', 's',
+    };
+    const int64_t delay_ns = 1000 * SCALE_US;
+    const uint64_t buffer0 = 0x60000;
+    const uint64_t buffer1 = 0x61000;
+    const uint64_t split_buffer = 0x62000;
+    const uint64_t reset_buffer = 0x63000;
+    const size_t split = sizeof(split_frame) / 2;
+
+    memwrite(buffer0, frame0, sizeof(frame0));
+    memwrite(buffer1, frame1, sizeof(frame1));
+    genet_write_tx_descriptor(0, buffer0, sizeof(frame0),
+                              GENET_DMA_SOP | GENET_DMA_EOP);
+    genet_write_tx_descriptor(1, buffer1, sizeof(frame1),
+                              GENET_DMA_SOP | GENET_DMA_EOP);
+    genet_configure_ring(RASPI4_GENET_TDMA_RING,
+                         RASPI4_GENET_TDMA_COMMON, 128, 0);
+    writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_MASK_CLEAR,
+           GENET_TX_RING_IRQ);
+    writel(RASPI4_GENET_UMAC_CMD, GENET_UMAC_TX_ENABLE);
+
+    /* The producer update arms the timer instead of completing inline. */
+    writel(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX_UPDATE, 2);
+    g_assert_cmphex(readl(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX),
+                    ==, 0);
+    g_assert_false(get_irq(RASPI4_GENET_GIC_IRQ1));
+    genet_assert_no_packet();
+    qtest_clock_step(global_qtest, delay_ns - 1);
+    g_assert_cmphex(readl(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX),
+                    ==, 0);
+    genet_assert_no_packet();
+
+    /* A budget of one consumes one descriptor on each timer expiry. */
+    qtest_clock_step(global_qtest, 1);
+    g_assert_cmphex(readl(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX),
+                    ==, 1);
+    g_assert_true(get_irq(RASPI4_GENET_GIC_IRQ1));
+    genet_expect_packet(frame0, sizeof(frame0));
+    genet_assert_no_packet();
+    writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_CLEAR,
+           GENET_TX_RING_IRQ);
+
+    qtest_clock_step(global_qtest, delay_ns);
+    g_assert_cmphex(readl(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX),
+                    ==, 2);
+    g_assert_true(get_irq(RASPI4_GENET_GIC_IRQ1));
+    genet_expect_packet(frame1, sizeof(frame1));
+    genet_assert_no_packet();
+    writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_CLEAR,
+           GENET_TX_RING_IRQ);
+
+    /* Partial frame assembly is preserved while the timer is rearmed. */
+    memwrite(split_buffer, split_frame, sizeof(split_frame));
+    genet_write_tx_descriptor(2, split_buffer, split, GENET_DMA_SOP);
+    genet_write_tx_descriptor(3, split_buffer + split,
+                              sizeof(split_frame) - split, GENET_DMA_EOP);
+    writel(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX_UPDATE, 4);
+    qtest_clock_step(global_qtest, delay_ns);
+    g_assert_cmphex(readl(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX),
+                    ==, 3);
+    g_assert_true(get_irq(RASPI4_GENET_GIC_IRQ1));
+    genet_assert_no_packet();
+    writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_CLEAR,
+           GENET_TX_RING_IRQ);
+
+    qtest_clock_step(global_qtest, delay_ns);
+    g_assert_cmphex(readl(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX),
+                    ==, 4);
+    g_assert_true(get_irq(RASPI4_GENET_GIC_IRQ1));
+    genet_expect_packet(split_frame, sizeof(split_frame));
+    genet_assert_no_packet();
+    writel(RASPI4_GENET_INTRL2_1 + RASPI4_GENET_IRQ_CLEAR,
+           GENET_TX_RING_IRQ);
+
+    /* Reset must cancel a completion that has already been scheduled. */
+    memwrite(reset_buffer, reset_frame, sizeof(reset_frame));
+    genet_write_tx_descriptor(4, reset_buffer, sizeof(reset_frame),
+                              GENET_DMA_SOP | GENET_DMA_EOP);
+    writel(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX_UPDATE, 5);
+    g_assert_cmphex(readl(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX),
+                    ==, 4);
+    qtest_system_reset(global_qtest);
+    qtest_clock_step(global_qtest, delay_ns);
+    g_assert_cmphex(readl(RASPI4_GENET_TDMA_RING + GENET_DMA_RING_INDEX),
+                    ==, 0);
+    g_assert_false(get_irq(RASPI4_GENET_GIC_IRQ1));
+    genet_assert_no_packet();
+}
+
 static void test_genet_packet_dma(void)
 {
     static const uint8_t frame[64] = {
@@ -10592,6 +10741,11 @@ int main(int argc, char **argv)
     raspi4b_add_test("/raspi4b/genet/packet_dma", test_genet_packet_dma);
     raspi4b_add_test("/raspi4b/genet/default_ring_packet_dma",
                      test_genet_default_ring_packet_dma);
+    raspi4b_add_test_with_args(
+        "/raspi4b/genet/delayed_tx_completion",
+        test_genet_delayed_tx_completion,
+        " -global bcm2838-genet.tx-completion-delay-us=1000"
+        " -global bcm2838-genet.tx-completion-budget=1");
     raspi4b_add_test("/raspi4b/hdmi/hotplug", test_hdmi_hotplug);
 #endif
 
